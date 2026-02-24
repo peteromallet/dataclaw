@@ -4,7 +4,9 @@ Turn your Claude Code conversation history into structured training data and pub
 
 ![DataClaw](dataclaw.jpeg)
 
-All DataClaw datasets are tagged **`dataclaw`** — [browse them all](https://huggingface.co/datasets?other=dataclaw).
+Every dataset is tagged **`dataclaw`** on Hugging Face. Individually, each export is a snapshot of one person's coding sessions. But collectively, they form a growing distributed dataset of real-world human-AI collaboration — the kind of data that's hard to find and expensive to create. The more people share, the more useful the dataset becomes for everyone building the next generation of coding tools.
+
+[Browse all DataClaw datasets](https://huggingface.co/datasets?other=dataclaw)
 
 ## Getting started
 
