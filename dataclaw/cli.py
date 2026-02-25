@@ -466,7 +466,7 @@ pretty_name: Coding Agent Conversations
 
 # Coding Agent Conversation Logs
 
-> **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces may or may not be useful for training, but the point is that it's yours to share.
+> **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces is yours to share.
 
 Exported with [DataClaw]({REPO_URL}).
 
