@@ -26,33 +26,53 @@ class AnonymizerWrapper:
         self._extra_usernames = extra_usernames or []
 
     def _get_all_usernames(self) -> list[str]:
-        """Combine current username with extra usernames."""
-        usernames = list(self._extra_usernames)
-        if self._current_username and self._current_username not in usernames:
-            usernames.append(self._current_username)
-        return usernames
+        """Combine current username with extra usernames (deduplicated)."""
+        usernames = set(self._extra_usernames)
+        if self._current_username:
+            usernames.add(self._current_username)
+        return list(usernames)
 
     def text(self, content: str) -> str:
         if not content:
             return content
         usernames = self._get_all_usernames()
-        result = self._tool.run({
-            "mode": "text",
-            "data": content,
-            "extra_usernames": usernames,
-        })
-        return result.get("result", content)
+        try:
+            result = self._tool.run({
+                "mode": "text",
+                "data": content,
+                "extra_usernames": usernames,
+            })
+            return result.get("result") or content
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Anonymizer text() failed: {e}, returning original")
+            return content
 
     def path(self, file_path: str) -> str:
         if not file_path:
             return file_path
         usernames = self._get_all_usernames()
-        result = self._tool.run({
-            "mode": "path",
-            "data": file_path,
-            "extra_usernames": usernames,
-        })
-        return result.get("result", file_path)
+        try:
+            result = self._tool.run({
+                "mode": "path",
+                "data": file_path,
+                "extra_usernames": usernames,
+            })
+            return result.get("result") or file_path
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Anonymizer path() failed: {e}, returning original")
+            return file_path
+
+
+class PassthroughAnonymizer:
+    """A no-op anonymizer for when raw data is needed (e.g., for search indexing)."""
+
+    def text(self, content: str) -> str:
+        return content
+
+    def path(self, file_path: str) -> str:
+        return file_path
 
 # Claude Code directory - can be overridden via CLAUDE_DIR environment variable
 # or by passing a custom path to functions that need it
@@ -106,23 +126,29 @@ def parse_project_sessions(
     anonymizer: AnonymizerWrapper,
     include_thinking: bool = True,
     claude_dir: Path | None = None,
+    anonymize: bool = True,
 ) -> list[dict]:
     """Parse all sessions for a project into structured dicts.
     
     Args:
         project_dir_name: Name of the project directory
-        anonymizer: AnonymizerWrapper instance
+        anonymizer: AnonymizerWrapper instance (used if anonymize=True)
         include_thinking: Whether to include thinking blocks
         claude_dir: Optional path to Claude Code directory
+        anonymize: Whether to anonymize the session content (default: True).
+                   Set to False when raw data is needed (e.g., for search indexing).
     """
     base_dir = claude_dir or get_claude_dir()
     project_path = base_dir / "projects" / project_dir_name
     if not project_path.exists():
         return []
 
+    # Use passthrough anonymizer if anonymize=False
+    effective_anonymizer = anonymizer if anonymize else PassthroughAnonymizer()
+
     sessions = []
     for session_file in sorted(project_path.glob("*.jsonl")):
-        parsed = _parse_session_file(session_file, anonymizer, include_thinking)
+        parsed = _parse_session_file(session_file, effective_anonymizer, include_thinking)
         if parsed and parsed["messages"]:
             parsed["project"] = _build_project_name(project_dir_name)
             sessions.append(parsed)

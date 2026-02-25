@@ -2,21 +2,39 @@
 
 This module provides offline search capabilities for Claude Code sessions
 using BM25 ranking with confidence scores.
+
+Key design:
+- Raw (un-anonymized) session content is indexed for searchability
+- Search results are anonymized at display time to protect privacy
+- Users can search for original terms (file paths, usernames)
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from .config import CONFIG_DIR, load_config
 from .parser import get_claude_dir, discover_projects, parse_project_sessions
-from .parser import AnonymizerWrapper
+from .parser import AnonymizerWrapper, PassthroughAnonymizer
+
+logger = logging.getLogger(__name__)
 
 # Search index storage location
 SEARCH_DB_PATH = CONFIG_DIR / "search.db"
 
-# Maximum content length per session to keep index size manageable
-MAX_CONTENT_LENGTH = 5000
+# Default max content length - can be overridden in config
+DEFAULT_MAX_CONTENT_LENGTH = 20000
+
+
+def _get_max_content_length() -> int:
+    """Get MAX_CONTENT_LENGTH from config or use default."""
+    try:
+        config = load_config()
+        search_config = config.get("search") or {}
+        return search_config.get("max_content_length", DEFAULT_MAX_CONTENT_LENGTH)
+    except Exception:
+        return DEFAULT_MAX_CONTENT_LENGTH
 
 
 def _ensure_search_available() -> Any:
@@ -25,12 +43,17 @@ def _ensure_search_available() -> Any:
         from scout.search import SearchIndex
         return SearchIndex
     except ImportError:
-        raise ImportError(
-            "scout-core is required for search. Install with:\n"
-            "  pip install scout-core\n"
-            "Or for local development:\n"
-            "  pip install -e ../scout"
-        )
+        try:
+            from scout import search as scout_search_module
+            from scout.search import SearchIndex
+            return SearchIndex
+        except ImportError:
+            raise ImportError(
+                "scout-core is required for search. Install with:\n"
+                "  pip install scout-core\n"
+                "Or for local development:\n"
+                "  pip install -e ../scout"
+            )
 
 
 def _get_index() -> Any:
@@ -41,6 +64,9 @@ def _get_index() -> Any:
 
 def _session_to_document(session: dict[str, Any]) -> dict[str, Any]:
     """Convert a parsed session to a search document.
+    
+    The session should contain raw (un-anonymized) content for indexing.
+    This allows users to search for original file paths and usernames.
     
     Args:
         session: A parsed session dict from parser.parse_project_sessions()
@@ -59,9 +85,12 @@ def _session_to_document(session: dict[str, Any]) -> dict[str, Any]:
     
     content = " ".join(content_parts)
     
+    # Get configurable max content length
+    max_content_length = _get_max_content_length()
+    
     # Truncate content to keep index manageable
-    if len(content) > MAX_CONTENT_LENGTH * 4:  # rough token estimate
-        content = content[:MAX_CONTENT_LENGTH * 4]
+    if len(content) > max_content_length * 4:  # rough token estimate
+        content = content[:max_content_length * 4]
     
     # Extract project name from session
     project = session.get("project", "unknown")
@@ -82,6 +111,9 @@ def _session_to_document(session: dict[str, Any]) -> dict[str, Any]:
 
 def build_index(projects: list[str] | None = None, force: bool = False) -> dict[str, Any]:
     """Build or update the search index from Claude Code sessions.
+    
+    Indexes RAW (un-anonymized) content so users can search for original terms.
+    Results will be anonymized at display time.
     
     Args:
         projects: Optional list of project names to index. If None, all projects.
@@ -119,9 +151,9 @@ def build_index(projects: list[str] | None = None, force: bool = False) -> dict[
             }
         all_projects = [p for p in all_projects if p["display_name"] in projects]
     
-    # Create anonymizer (we want to index original content, not anonymized)
-    # but we should at least handle paths consistently
-    anonymizer = AnonymizerWrapper(extra_usernames=[])
+    # Create a passthrough anonymizer - we want raw data for indexing
+    # Anonymization happens at display time in search()
+    passthrough_anonymizer = PassthroughAnonymizer()
     
     # Parse sessions and convert to documents
     documents: list[dict[str, Any]] = []
@@ -133,11 +165,13 @@ def build_index(projects: list[str] | None = None, force: bool = False) -> dict[
         print(f"  Indexing {project_name}...", end="", flush=True)
         
         try:
+            # Pass anonymize=False to get RAW content for indexing
             sessions = parse_project_sessions(
                 project["dir_name"],
-                anonymizer=anonymizer,
+                anonymizer=passthrough_anonymizer,
                 include_thinking=True,
                 claude_dir=claude_dir,
+                anonymize=False,  # Index raw data for searchability
             )
             
             for session in sessions:
@@ -180,13 +214,18 @@ def search(
     query: str,
     limit: int = 20,
     min_confidence: int = 0,
+    anonymize: bool = True,
 ) -> list[dict[str, Any]]:
     """Search the indexed sessions.
+    
+    Raw content is indexed, but results are anonymized by default to protect privacy.
+    Set anonymize=False to get raw snippets (useful for debugging).
     
     Args:
         query: Search query string
         limit: Maximum number of results to return
         min_confidence: Minimum confidence score (0-100) to include
+        anonymize: Whether to anonymize snippets (default: True)
         
     Returns:
         List of result dicts with keys:
@@ -203,15 +242,35 @@ def search(
     index = _get_index()
     results = index.search(query, limit=limit, min_confidence=min_confidence)
     
+    # Create anonymizer for display (if needed)
+    display_anonymizer = None
+    if anonymize:
+        try:
+            config = load_config()
+            extra_usernames = config.get("redact_usernames", [])
+            display_anonymizer = AnonymizerWrapper(extra_usernames=extra_usernames)
+        except Exception as e:
+            logger.warning(f"Could not load config for anonymizer: {e}")
+            display_anonymizer = AnonymizerWrapper()
+    
     # Format results for DataClaw users
     formatted = []
     for r in results:
+        snippet = r.get("snippet", "")[:200]
+        
+        # Anonymize snippet at display time
+        if anonymize and display_anonymizer:
+            try:
+                snippet = display_anonymizer.text(snippet)
+            except Exception as e:
+                logger.warning(f"Failed to anonymize snippet: {e}")
+        
         formatted.append({
             "id": r.get("id", ""),
             "title": r.get("title", ""),
             "project": r.get("project", ""),
             "confidence": r.get("confidence", 0),
-            "snippet": r.get("snippet", "")[:200],  # Limit snippet length for display
+            "snippet": snippet,
             "start_time": r.get("start_time", ""),
         })
     

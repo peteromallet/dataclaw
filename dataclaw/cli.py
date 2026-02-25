@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import os
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -149,9 +148,9 @@ def _build_status_next_steps(
     )
 
 
-def list_projects() -> None:
+def list_projects(claude_dir: Path | None = None) -> None:
     """Print all projects as JSON (for agents to parse)."""
-    projects = discover_projects()
+    projects = discover_projects(claude_dir=claude_dir)
     if not projects:
         print("No Claude Code sessions found.")
         return
@@ -596,17 +595,20 @@ def confirm(file_path: Path | None = None) -> None:
     print(json.dumps(result, indent=2))
 
 
-def prep() -> None:
+def prep(claude_dir: Path | None = None) -> None:
     """Data prep — discover projects, detect HF auth, output JSON.
 
     Designed to be called by an agent which handles the interactive parts.
     Outputs pure JSON to stdout so agents can parse it directly.
     """
-    if not CLAUDE_DIR.exists():
+    # Use provided claude_dir or fall back to default
+    effective_claude_dir = claude_dir or CLAUDE_DIR
+    
+    if not effective_claude_dir.exists():
         print(json.dumps({"error": "~/.claude not found. Is Claude Code installed?"}))
         sys.exit(1)
 
-    projects = discover_projects()
+    projects = discover_projects(claude_dir=effective_claude_dir)
     if not projects:
         print(json.dumps({"error": "No Claude Code sessions found."}))
         sys.exit(1)
@@ -701,19 +703,23 @@ def main() -> None:
     sch.add_argument("--limit", "-n", type=int, default=20, help="Max results (default: 20)")
     sch.add_argument("--min-confidence", "-c", type=int, default=0,
                      help="Minimum confidence score 0-100 (default: 0)")
+    sch.add_argument("--json", action="store_true",
+                     help="Output results as JSON only (no table formatting)")
+    sch.add_argument("--no-anonymize", action="store_true",
+                     help="Don't anonymize snippets (for debugging)")
 
     args = parser.parse_args()
     command = args.command or "export"
 
-    # Handle --claude-dir option by setting environment variable
-    if args.claude_dir:
-        if not args.claude_dir.exists():
-            print(f"Error: --claude-dir path does not exist: {args.claude_dir}")
+    # Store claude_dir for explicit passing to functions
+    claude_dir = args.claude_dir
+    if claude_dir:
+        if not claude_dir.exists():
+            print(f"Error: --claude-dir path does not exist: {claude_dir}")
             sys.exit(1)
-        os.environ["CLAUDE_DIR"] = str(args.claude_dir.resolve())
 
     if command == "prep":
-        prep()
+        prep(claude_dir=claude_dir)
         return
 
     if command == "status":
@@ -729,7 +735,7 @@ def main() -> None:
         return
 
     if command == "list":
-        list_projects()
+        list_projects(claude_dir=claude_dir)
         return
 
     if command == "config":
@@ -737,7 +743,7 @@ def main() -> None:
         return
 
     if command == "index":
-        _handle_index(args)
+        _handle_index(args, claude_dir=claude_dir)
         return
 
     if command == "search":
@@ -768,7 +774,7 @@ def _handle_config(args) -> None:
     )
 
 
-def _handle_index(args) -> None:
+def _handle_index(args, claude_dir: Path | None = None) -> None:
     """Handle the index subcommand - build search index."""
     projects = None
     if args.projects:
@@ -778,8 +784,11 @@ def _handle_index(args) -> None:
     print("  DataClaw — Building Search Index")
     print("=" * 50)
     
-    if not CLAUDE_DIR.exists():
-        print(f"Error: {CLAUDE_DIR} not found. Is Claude Code installed?")
+    # Use provided claude_dir or fall back to default
+    effective_claude_dir = claude_dir or CLAUDE_DIR
+    
+    if not effective_claude_dir.exists():
+        print(f"Error: {effective_claude_dir} not found. Is Claude Code installed?")
         sys.exit(1)
     
     result = build_index(projects=projects, force=args.force)
@@ -813,36 +822,54 @@ def _handle_index(args) -> None:
 
 def _handle_search(args) -> None:
     """Handle the search subcommand - search indexed sessions."""
-    print("=" * 50)
-    print(f"  Searching: {args.query}")
-    print("=" * 50)
+    # Determine anonymization setting
+    anonymize = not args.no_anonymize
     
-    results = do_search(args.query, limit=args.limit, min_confidence=args.min_confidence)
+    if not args.json:
+        print("=" * 50)
+        print(f"  Searching: {args.query}")
+        print("=" * 50)
+    
+    results = do_search(
+        args.query, 
+        limit=args.limit, 
+        min_confidence=args.min_confidence,
+        anonymize=anonymize,
+    )
     
     if not results:
-        print("No results found. Try:")
-        print("  - Building the index: dataclaw index")
-        print("  - Using different search terms")
-        print("  - Lowering min-confidence: dataclaw search \"query\" --min-confidence 10")
+        if not args.json:
+            print("No results found. Try:")
+            print("  - Building the index: dataclaw index")
+            print("  - Using different search terms")
+            print("  - Lowering min-confidence: dataclaw search \"query\" --min-confidence 10")
         print(json.dumps({"results": [], "count": 0}, indent=2))
         return
     
-    # Print results as a table
-    print(f"\nFound {len(results)} results:\n")
-    print(f"{'Session ID':<30} {'Project':<20} {'Confidence':>10} {'Preview'}")
-    print("-" * 100)
-    
-    for r in results:
-        preview = r.get("snippet", "")[:50].replace("\n", " ")
-        print(f"{r['id'][:28]:<30} {r['project'][:18]:<20} {r['confidence']:>8}% {preview}...")
-    
-    # Also output JSON for programmatic use
-    print("\n---DATACLAW_JSON---")
-    print(json.dumps({
-        "query": args.query,
-        "results": results,
-        "count": len(results),
-    }, indent=2))
+    if args.json:
+        # JSON-only output
+        print(json.dumps({
+            "query": args.query,
+            "results": results,
+            "count": len(results),
+        }, indent=2))
+    else:
+        # Table output
+        print(f"\nFound {len(results)} results:\n")
+        print(f"{'Session ID':<30} {'Project':<20} {'Confidence':>10} {'Preview'}")
+        print("-" * 100)
+        
+        for r in results:
+            preview = r.get("snippet", "")[:50].replace("\n", " ")
+            print(f"{r['id'][:28]:<30} {r['project'][:18]:<20} {r['confidence']:>8}% {preview}...")
+        
+        # Also output JSON for programmatic use
+        print("\n---DATACLAW_JSON---")
+        print(json.dumps({
+            "query": args.query,
+            "results": results,
+            "count": len(results),
+        }, indent=2))
 
 
 def _run_export(args) -> None:

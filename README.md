@@ -113,6 +113,18 @@ dataclaw search "refactor" --min-confidence 50
 | `dataclaw search "query"` | Search with BM25 ranking |
 | `dataclaw search "query" --limit 10` | Limit results |
 | `dataclaw search "query" --min-confidence 50` | Filter by confidence |
+| `dataclaw search "query" --json` | Output results as JSON only |
+| `dataclaw search "query" --no-anonymize` | Don't anonymize snippets (for debugging) |
+
+### Search Design: Raw Indexing, Anonymized Display
+
+DataClaw's search is designed to balance **searchability** with **privacy**:
+
+- **Raw content is indexed** — Session content is indexed exactly as-is, so you can search for original terms like `/Users/alice/project/file.py` or your actual usernames.
+- **Results are anonymized at display time** — When showing search results, snippets are anonymized on-the-fly using scout-core's AnonymizerTool, so paths and usernames are hashed before being displayed.
+- **No privacy leak** — The original raw content stays only in your local index (which is stored in `~/.dataclaw/search.db`). It's never sent anywhere.
+
+This means you get full searchability while keeping your exported data privacy-safe.
 
 ### Specifying Claude Code Directory
 
@@ -121,10 +133,6 @@ By default, DataClaw looks for Claude Code sessions in `~/.claude`. You can over
 ```bash
 # Using CLI flag (any command)
 dataclaw index --claude-dir /path/to/claude/data
-
-# Using environment variable
-export CLAUDE_DIR=/path/to/claude/data
-dataclaw index
 ```
 
 This is useful for:
@@ -132,12 +140,23 @@ This is useful for:
 - Using a custom Claude Code data location
 - Testing with sample data
 
+### Configuration
+
+You can configure search behavior via `dataclaw config`:
+
+```bash
+# Set max content length per session (default: 20000 chars)
+# This controls how much of each session is indexed
+dataclaw config --search-max-content 30000
+```
+
 ### How It Works
 
 - The index is stored in `~/.dataclaw/search.db`
 - Search uses BM25 ranking for relevance
 - Confidence scores (0-100) indicate match quality
 - Snippets show context around search terms
+- Sn before display usingippets are anonymized scout-core's AnonymizerTool
 
 ### Requirements
 
@@ -148,6 +167,17 @@ pip install scout-core
 # Or for local development:
 pip install -e ../scout
 ```
+
+### Anonymizer Integration
+
+DataClaw uses scout-core's `AnonymizerTool` for consistent, auditable PII redaction. This provides:
+
+- **Deterministic hashing** — Same username always produces the same hash
+- **Audit logging** — All anonymization operations are logged to `~/.scout/audit.jsonl`
+- **Multiple patterns** — Handles `/Users/username/`, `/home/username/`, `-Users-username-`, temp paths, and more
+- **Extra usernames** — Additional usernames (GitHub handles, etc.) from your config are also hashed
+
+The anonymizer is applied at display time to search snippets, not during indexing, ensuring you can find your conversations while keeping displayed results privacy-safe.
 
 </details>
 

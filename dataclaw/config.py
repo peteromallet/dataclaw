@@ -19,6 +19,7 @@ class DataClawConfig(TypedDict, total=False):
     last_export: dict
     stage: str | None  # "auth" | "configure" | "review" | "confirmed" | "done"
     projects_confirmed: bool  # True once user has addressed folder exclusions
+    search: dict | None  # Search config: {"max_content_length": int}
 
 
 DEFAULT_CONFIG: DataClawConfig = {

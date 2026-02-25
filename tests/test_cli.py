@@ -285,7 +285,7 @@ class TestListProjects:
     def test_with_projects(self, monkeypatch, capsys):
         monkeypatch.setattr(
             "dataclaw.cli.discover_projects",
-            lambda: [{"display_name": "proj1", "session_count": 5, "total_size_bytes": 1024}],
+            lambda claude_dir=None: [{"display_name": "proj1", "session_count": 5, "total_size_bytes": 1024}],
         )
         monkeypatch.setattr(
             "dataclaw.cli.load_config",
@@ -298,7 +298,7 @@ class TestListProjects:
         assert data[0]["name"] == "proj1"
 
     def test_no_projects(self, monkeypatch, capsys):
-        monkeypatch.setattr("dataclaw.cli.discover_projects", lambda: [])
+        monkeypatch.setattr("dataclaw.cli.discover_projects", lambda claude_dir=None: [])
         list_projects()
         captured = capsys.readouterr()
         assert "No Claude Code sessions" in captured.out
