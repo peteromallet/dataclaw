@@ -2,7 +2,7 @@
 
 > **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same with their data — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces is yours to share.
 
-Turn your Claude Code, Codex, and Gemini CLI conversation history into structured data and publish it to Hugging Face with a single command. DataClaw parses session logs, redacts secrets and PII, and uploads the result as a ready-to-use dataset.
+Turn your Claude Code, Codex, Gemini CLI, and OpenCode conversation history into structured data and publish it to Hugging Face with a single command. DataClaw parses session logs, redacts secrets and PII, and uploads the result as a ready-to-use dataset.
 
 ![DataClaw](dataclaw.jpeg)
 
@@ -10,7 +10,7 @@ Every export is tagged **`dataclaw`** on Hugging Face. Together, they may someda
 
 ## Give this to your agent
 
-Paste this into Claude Code, Codex, or any coding agent:
+Paste this into Claude Code, Codex, Gemini CLI, OpenCode, or any coding agent:
 
 ```
 Help me export my Claude Code, Codex, Gemini CLI, and OpenCode conversation history to Hugging Face using DataClaw.
@@ -143,8 +143,7 @@ dataclaw export --publish-attestation "User explicitly approved publishing to Hu
 | User messages | Yes | Full text (including voice transcripts) |
 | Assistant responses | Yes | Full text output |
 | Extended thinking | Yes | Claude's reasoning (opt out with `--no-thinking`) |
-| Tool calls | Yes | Tool name + summarized input |
-| Tool results | No | Not stored in session logs |
+| Tool calls | Yes | Tool name + inputs + outputs |
 | Token usage | Yes | Input/output tokens per session |
 | Model & metadata | Yes | Model name, git branch, timestamps |
 
@@ -158,7 +157,7 @@ DataClaw applies multiple layers of protection:
 4. **Entropy analysis** — Long high-entropy strings in quotes are flagged as potential secrets
 5. **Email redaction** — Personal email addresses removed
 6. **Custom redaction** — You can configure additional strings and usernames to redact
-7. **Tool input pre-redaction** — Secrets in tool inputs are redacted BEFORE truncation to prevent partial leaks
+7. **Tool call redaction** — Secrets in tool inputs and outputs are redacted
 
 **This is NOT foolproof.** Always review your exported data before publishing.
 Automated redaction cannot catch everything — especially service-specific
@@ -187,7 +186,14 @@ Each line in `conversations.jsonl` is one session:
       "role": "assistant",
       "content": "I'll investigate the login flow.",
       "thinking": "The user wants me to look at...",
-      "tool_uses": [{"tool": "Read", "input": "src/auth.py"}],
+      "tool_uses": [
+          {
+            "tool": "bash",
+            "input": {"command": "grep -r 'login' src/"},
+            "output": {"text": "src/auth.py:42: def login(user, password):"},
+            "status": "success"
+          }
+        ],
       "timestamp": "..."
     }
   ],
@@ -221,7 +227,7 @@ All repos are named `{username}/my-personal-codex-data` and tagged `dataclaw`.
   ```
 
 The auto-generated HF README includes:
-- Model distribution (which Claude models, how many sessions each)
+- Model distribution (which models, how many sessions each)
 - Total token counts
 - Project count
 - Last updated timestamp

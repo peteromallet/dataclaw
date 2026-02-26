@@ -414,6 +414,34 @@ def _make_session_result(
     }
 
 
+def _build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+    """Pre-pass: build a map of tool_use_id -> {output, status} from tool_result blocks."""
+    result: dict[str, dict] = {}
+    for entry in entries:
+        if entry.get("type") != "user":
+            continue
+        for block in entry.get("message", {}).get("content", []):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tid = block.get("tool_use_id")
+            if not tid:
+                continue
+            is_error = bool(block.get("is_error"))
+            content = block.get("content", "")
+            if isinstance(content, list):
+                text = "\n\n".join(
+                    part.get("text", "") for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ).strip()
+            else:
+                text = str(content).strip() if content else ""
+            result[tid] = {
+                "output": {"text": anonymizer.text(text)} if text else {},
+                "status": "error" if is_error else "success",
+            }
+    return result
+
+
 def _parse_claude_session_file(
     filepath: Path, anonymizer: Anonymizer, include_thinking: bool = True
 ) -> dict | None:
@@ -430,10 +458,13 @@ def _parse_claude_session_file(
     stats = _make_stats()
 
     try:
-        for entry in _iter_jsonl(filepath):
-            _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+        entries = list(_iter_jsonl(filepath))
     except OSError:
         return None
+
+    tool_result_map = _build_tool_result_map(entries, anonymizer)
+    for entry in entries:
+        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking, tool_result_map)
 
     return _make_session_result(metadata, messages, stats)
 
@@ -501,10 +532,130 @@ def _parse_subagent_session(
     }
     stats = _make_stats()
 
-    for _ts, entry in timed_entries:
-        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+    entries = [entry for _ts, entry in timed_entries]
+    tool_result_map = _build_tool_result_map(entries, anonymizer)
+    for entry in entries:
+        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking, tool_result_map)
 
     return _make_session_result(metadata, messages, stats)
+
+
+def _parse_gemini_tool_call(tc: dict, anonymizer: Anonymizer) -> dict:
+    """Parse a Gemini tool call into a structured dict with input/output/status."""
+    name = tc.get("name")
+    args = tc.get("args", {})
+    status = tc.get("status", "unknown")
+    result_list = tc.get("result") or []
+
+    # --- Extract output text from functionResponse ---
+    output_text: str | None = None
+    extra_texts: list[str] = []
+    for item in result_list:
+        if not isinstance(item, dict):
+            continue
+        if "functionResponse" in item:
+            resp = item["functionResponse"].get("response", {})
+            output_text = resp.get("output")
+        elif "text" in item:
+            extra_texts.append(item["text"])
+
+    # --- Build structured input ---
+    if name == "read_file":
+        inp = {"file_path": anonymizer.path(args.get("file_path", ""))}
+    elif name == "write_file":
+        inp = {
+            "file_path": anonymizer.path(args.get("file_path", "")),
+            "content": anonymizer.text(args.get("content", "")),
+        }
+    elif name == "replace":
+        inp = {
+            "file_path": anonymizer.path(args.get("file_path", "")),
+            "old_string": anonymizer.text(args.get("old_string", "")),
+            "new_string": anonymizer.text(args.get("new_string", "")),
+            "expected_replacements": args.get("expected_replacements"),
+            "instruction": anonymizer.text(args.get("instruction", "")) if args.get("instruction") else None,
+        }
+        inp = {k: v for k, v in inp.items() if v is not None}
+    elif name == "run_shell_command":
+        inp = {"command": anonymizer.text(args.get("command", ""))}
+    elif name == "read_many_files":
+        inp = {"paths": [anonymizer.path(p) for p in args.get("paths", [])]}
+    elif name in ("search_file_content", "grep_search"):
+        inp = {k: anonymizer.text(str(v)) for k, v in args.items()}
+    elif name == "list_directory":
+        inp = {"dir_path": anonymizer.path(args.get("dir_path", ""))}
+        if args.get("ignore"):
+            inp["ignore"] = [anonymizer.text(str(p)) for p in args["ignore"]] if isinstance(args["ignore"], list) else anonymizer.text(str(args["ignore"]))
+    elif name == "glob":
+        inp = {"pattern": args.get("pattern", "")}
+    elif name in ("google_web_search", "web_fetch", "codebase_investigator"):
+        inp = {k: anonymizer.text(str(v)) for k, v in args.items()}
+    else:
+        inp = {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in args.items()}
+
+    # --- Build structured output ---
+    if name == "read_many_files":
+        # Parse "--- /path/to/file ---\n<content>" blocks from extra text parts
+        files: list[dict] = []
+        for raw in extra_texts:
+            lines = raw.split("\n")
+            current_path: str | None = None
+            content_lines: list[str] = []
+            for line in lines:
+                if line.startswith("--- ") and line.endswith(" ---"):
+                    if current_path is not None:
+                        files.append({
+                            "path": anonymizer.path(current_path),
+                            "content": anonymizer.text("\n".join(content_lines).strip()),
+                        })
+                    current_path = line[4:-4].strip()
+                    content_lines = []
+                else:
+                    content_lines.append(line)
+            if current_path is not None:
+                files.append({
+                    "path": anonymizer.path(current_path),
+                    "content": anonymizer.text("\n".join(content_lines).strip()),
+                })
+        out: dict = {"files": files}
+    elif name == "run_shell_command" and output_text:
+        # Parse "Command: ...\nDirectory: ...\nOutput: ...\nExit Code: ..." format
+        parsed: dict = {}
+        current_key: str | None = None
+        current_val: list[str] = []
+        for line in output_text.splitlines():
+            for key, prefix in (("command", "Command: "), ("directory", "Directory: "),
+                                 ("output", "Output: "), ("exit_code", "Exit Code: ")):
+                if line.startswith(prefix):
+                    if current_key:
+                        parsed[current_key] = "\n".join(current_val).strip()
+                    current_key = key
+                    current_val = [line[len(prefix):]]
+                    break
+            else:
+                if current_key:
+                    current_val.append(line)
+        if current_key:
+            parsed[current_key] = "\n".join(current_val).strip()
+        if "exit_code" in parsed:
+            try:
+                parsed["exit_code"] = int(parsed["exit_code"])
+            except ValueError:
+                pass
+        if "command" in parsed:
+            parsed["command"] = anonymizer.text(parsed["command"])
+        if "directory" in parsed:
+            parsed["directory"] = anonymizer.path(parsed["directory"])
+        if "output" in parsed:
+            parsed["output"] = anonymizer.text(parsed["output"])
+        out = parsed
+    elif output_text is not None:
+        out = {"text": anonymizer.text(output_text)}
+    else:
+        out = {}
+
+    result: dict = {"tool": name, "input": inp, "output": out, "status": status}
+    return result
 
 
 def _parse_gemini_session_file(
@@ -579,12 +730,7 @@ def _parse_gemini_session_file(
 
             tool_uses = []
             for tc in msg_data.get("toolCalls", []):
-                tool_name = tc.get("name")
-                args_data = tc.get("args", {})
-                tool_uses.append({
-                    "tool": tool_name,
-                    "input": _summarize_tool_input(tool_name, args_data, anonymizer)
-                })
+                tool_uses.append(_parse_gemini_tool_call(tc, anonymizer))
 
             if tool_uses:
                 msg["tool_uses"] = tool_uses
@@ -609,6 +755,63 @@ class _CodexParseState:
     raw_cwd: str = UNKNOWN_CODEX_CWD
     max_input_tokens: int = 0
     max_output_tokens: int = 0
+    tool_result_map: dict[str, dict] = dataclasses.field(default_factory=dict)
+
+
+def _build_codex_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+    """Pre-pass: build call_id -> {output, status} from function_call_output and custom_tool_call_output."""
+    result: dict[str, dict] = {}
+    for entry in entries:
+        if entry.get("type") != "response_item":
+            continue
+        p = entry.get("payload", {})
+        pt = p.get("type")
+        call_id = p.get("call_id")
+        if not call_id:
+            continue
+
+        if pt == "function_call_output":
+            raw = p.get("output", "")
+            # Parse "Exit code: N\nWall time: ...\nOutput:\n..." format
+            out: dict = {}
+            lines = raw.splitlines()
+            output_lines: list[str] = []
+            in_output = False
+            for line in lines:
+                if line.startswith("Exit code: "):
+                    try:
+                        out["exit_code"] = int(line[len("Exit code: "):].strip())
+                    except ValueError:
+                        out["exit_code"] = line[len("Exit code: "):].strip()
+                elif line.startswith("Wall time: "):
+                    out["wall_time"] = line[len("Wall time: "):].strip()
+                elif line == "Output:":
+                    in_output = True
+                elif in_output:
+                    output_lines.append(line)
+            if output_lines:
+                out["output"] = anonymizer.text("\n".join(output_lines).strip())
+            result[call_id] = {"output": out, "status": "success"}
+
+        elif pt == "custom_tool_call_output":
+            raw = p.get("output", "")
+            out = {}
+            try:
+                parsed = json.loads(raw)
+                text = parsed.get("output", "")
+                if text:
+                    out["output"] = anonymizer.text(str(text))
+                meta = parsed.get("metadata", {})
+                if "exit_code" in meta:
+                    out["exit_code"] = meta["exit_code"]
+                if "duration_seconds" in meta:
+                    out["duration_seconds"] = meta["duration_seconds"]
+            except (json.JSONDecodeError, AttributeError):
+                if raw:
+                    out["output"] = anonymizer.text(raw)
+            result[call_id] = {"output": out, "status": "success"}
+
+    return result
 
 
 def _parse_codex_session_file(
@@ -630,34 +833,38 @@ def _parse_codex_session_file(
     )
 
     try:
-        for entry in _iter_jsonl(filepath):
-            timestamp = _normalize_timestamp(entry.get("timestamp"))
-            entry_type = entry.get("type")
-
-            if entry_type == "session_meta":
-                _handle_codex_session_meta(state, entry, filepath, anonymizer)
-            elif entry_type == "turn_context":
-                _handle_codex_turn_context(state, entry, anonymizer)
-            elif entry_type == "response_item":
-                _handle_codex_response_item(state, entry, anonymizer, include_thinking)
-            elif entry_type == "event_msg":
-                payload = entry.get("payload", {})
-                event_type = payload.get("type")
-                if event_type == "token_count":
-                    _handle_codex_token_count(state, payload)
-                elif event_type == "agent_reasoning" and include_thinking:
-                    thinking = payload.get("text")
-                    if isinstance(thinking, str) and thinking.strip():
-                        cleaned = anonymizer.text(thinking.strip())
-                        if cleaned not in state._pending_thinking_seen:
-                            state._pending_thinking_seen.add(cleaned)
-                            state.pending_thinking.append(cleaned)
-                elif event_type == "user_message":
-                    _handle_codex_user_message(state, payload, timestamp, anonymizer)
-                elif event_type == "agent_message":
-                    _handle_codex_agent_message(state, payload, timestamp, anonymizer, include_thinking)
+        entries = list(_iter_jsonl(filepath))
     except OSError:
         return None
+
+    state.tool_result_map = _build_codex_tool_result_map(entries, anonymizer)
+
+    for entry in entries:
+        timestamp = _normalize_timestamp(entry.get("timestamp"))
+        entry_type = entry.get("type")
+
+        if entry_type == "session_meta":
+            _handle_codex_session_meta(state, entry, filepath, anonymizer)
+        elif entry_type == "turn_context":
+            _handle_codex_turn_context(state, entry, anonymizer)
+        elif entry_type == "response_item":
+            _handle_codex_response_item(state, entry, anonymizer, include_thinking)
+        elif entry_type == "event_msg":
+            payload = entry.get("payload", {})
+            event_type = payload.get("type")
+            if event_type == "token_count":
+                _handle_codex_token_count(state, payload)
+            elif event_type == "agent_reasoning" and include_thinking:
+                thinking = payload.get("text")
+                if isinstance(thinking, str) and thinking.strip():
+                    cleaned = anonymizer.text(thinking.strip())
+                    if cleaned not in state._pending_thinking_seen:
+                        state._pending_thinking_seen.add(cleaned)
+                        state.pending_thinking.append(cleaned)
+            elif event_type == "user_message":
+                _handle_codex_user_message(state, payload, timestamp, anonymizer)
+            elif event_type == "agent_message":
+                _handle_codex_agent_message(state, payload, timestamp, anonymizer, include_thinking)
 
     state.stats["input_tokens"] = state.max_input_tokens
     state.stats["output_tokens"] = state.max_output_tokens
@@ -723,7 +930,19 @@ def _handle_codex_response_item(
         state.pending_tool_uses.append(
             {
                 "tool": tool_name,
-                "input": _summarize_tool_input(tool_name, args_data, anonymizer),
+                "input": _parse_tool_input(tool_name, args_data, anonymizer),
+                "_call_id": payload.get("call_id"),
+            }
+        )
+    elif item_type == "custom_tool_call":
+        tool_name = payload.get("name")
+        raw_input = payload.get("input", "")
+        inp = {"patch": anonymizer.text(raw_input)} if isinstance(raw_input, str) else _parse_tool_input(tool_name, raw_input, anonymizer)
+        state.pending_tool_uses.append(
+            {
+                "tool": tool_name,
+                "input": inp,
+                "_call_id": payload.get("call_id"),
             }
         )
     elif item_type == "reasoning" and include_thinking:
@@ -768,6 +987,19 @@ def _handle_codex_user_message(
         _update_time_bounds(state.metadata, timestamp)
 
 
+def _resolve_codex_tool_uses(state: _CodexParseState) -> list[dict]:
+    """Attach outputs from tool_result_map and strip internal _call_id field."""
+    resolved = []
+    for tu in state.pending_tool_uses:
+        call_id = tu.pop("_call_id", None)
+        if call_id and call_id in state.tool_result_map:
+            r = state.tool_result_map[call_id]
+            tu["output"] = r["output"]
+            tu["status"] = r["status"]
+        resolved.append(tu)
+    return resolved
+
+
 def _handle_codex_agent_message(
     state: _CodexParseState, payload: dict[str, Any],
     timestamp: str | None, anonymizer: Anonymizer, include_thinking: bool,
@@ -779,7 +1011,7 @@ def _handle_codex_agent_message(
     if state.pending_thinking and include_thinking:
         msg["thinking"] = "\n\n".join(state.pending_thinking)
     if state.pending_tool_uses:
-        msg["tool_uses"] = list(state.pending_tool_uses)
+        msg["tool_uses"] = _resolve_codex_tool_uses(state)
 
     if len(msg) > 1:
         msg["timestamp"] = timestamp
@@ -801,7 +1033,7 @@ def _flush_codex_pending(state: _CodexParseState, timestamp: str | None) -> None
     if state.pending_thinking:
         msg["thinking"] = "\n\n".join(state.pending_thinking)
     if state.pending_tool_uses:
-        msg["tool_uses"] = list(state.pending_tool_uses)
+        msg["tool_uses"] = _resolve_codex_tool_uses(state)
 
     state.messages.append(msg)
     state.stats["assistant_messages"] += 1
@@ -905,12 +1137,20 @@ def _extract_opencode_assistant_content(
             tool_name = part.get("tool")
             state = part.get("state", {})
             tool_input = state.get("input", {}) if isinstance(state, dict) else {}
-            tool_uses.append(
-                {
-                    "tool": tool_name,
-                    "input": _summarize_tool_input(tool_name, tool_input, anonymizer),
-                }
-            )
+            tu: dict[str, Any] = {
+                "tool": tool_name,
+                "input": _parse_tool_input(tool_name, tool_input, anonymizer),
+            }
+            if isinstance(state, dict):
+                status = state.get("status")
+                if isinstance(status, str):
+                    tu["status"] = "success" if status == "completed" else status
+                output = state.get("output")
+                if isinstance(output, str) and output:
+                    tu["output"] = {"text": anonymizer.text(output)}
+                elif output is not None:
+                    tu["output"] = {}
+            tool_uses.append(tu)
 
     if not text_parts and not thinking_parts and not tool_uses:
         return None
@@ -1008,6 +1248,7 @@ def _process_entry(
     stats: dict[str, int],
     anonymizer: Anonymizer,
     include_thinking: bool,
+    tool_result_map: dict[str, dict] | None = None,
 ) -> None:
     entry_type = entry.get("type")
 
@@ -1027,7 +1268,7 @@ def _process_entry(
             _update_time_bounds(metadata, timestamp)
 
     elif entry_type == "assistant":
-        msg = _extract_assistant_content(entry, anonymizer, include_thinking)
+        msg = _extract_assistant_content(entry, anonymizer, include_thinking, tool_result_map)
         if msg:
             if metadata["model"] is None:
                 metadata["model"] = entry.get("message", {}).get("model")
@@ -1054,6 +1295,7 @@ def _extract_user_content(entry: dict[str, Any], anonymizer: Anonymizer) -> str 
 
 def _extract_assistant_content(
     entry: dict[str, Any], anonymizer: Anonymizer, include_thinking: bool,
+    tool_result_map: dict[str, dict] | None = None,
 ) -> dict[str, Any] | None:
     msg_data = entry.get("message", {})
     content_blocks = msg_data.get("content", [])
@@ -1077,10 +1319,16 @@ def _extract_assistant_content(
             if thinking:
                 thinking_parts.append(anonymizer.text(thinking))
         elif block_type == "tool_use":
-            tool_uses.append({
+            tu: dict[str, Any] = {
                 "tool": block.get("name"),
-                "input": _summarize_tool_input(block.get("name"), block.get("input", {}), anonymizer),
-            })
+                "input": _parse_tool_input(block.get("name"), block.get("input", {}), anonymizer),
+            }
+            if tool_result_map is not None:
+                result = tool_result_map.get(block.get("id", ""))
+                if result:
+                    tu["output"] = result["output"]
+                    tu["status"] = result["status"]
+            tool_uses.append(tu)
 
     if not text_parts and not tool_uses and not thinking_parts:
         return None
@@ -1095,60 +1343,66 @@ def _extract_assistant_content(
     return msg
 
 
-MAX_TOOL_INPUT_LENGTH = 300
-
-
-def _redact_and_truncate(text: str, anonymizer: Anonymizer) -> str:
-    """Redact secrets BEFORE truncating to avoid partial secret leaks."""
-    text, _ = redact_text(text)
-    return anonymizer.text(text[:MAX_TOOL_INPUT_LENGTH])
-
-
-def _summarize_file_path(d: dict, a: Anonymizer) -> str:
-    return a.path(d.get("file_path", ""))
-
-
-def _summarize_write(d: dict, a: Anonymizer) -> str:
-    return f"{a.path(d.get('file_path', ''))} ({len(d.get('content', ''))} chars)"
-
-
-def _summarize_bash(d: dict, a: Anonymizer) -> str:
-    return _redact_and_truncate(d.get("command", ""), a)
-
-
-def _summarize_grep(d: dict, a: Anonymizer) -> str:
-    pattern, _ = redact_text(d.get("pattern", ""))
-    return f"pattern={a.text(pattern)} path={a.path(d.get('path', ''))}"
-
-
-def _summarize_glob(d: dict, a: Anonymizer) -> str:
-    return f"pattern={a.text(d.get('pattern', ''))} path={a.path(d.get('path', ''))}"
-
-
-_TOOL_SUMMARIZERS: dict[str, Any] = {
-    "read": _summarize_file_path,
-    "edit": _summarize_file_path,
-    "write": _summarize_write,
-    "bash": _summarize_bash,
-    "grep": _summarize_grep,
-    "glob": _summarize_glob,
-    "task": lambda d, a: _redact_and_truncate(d.get("prompt", ""), a),
-    "websearch": lambda d, _: d.get("query", ""),
-    "webfetch": lambda d, _: d.get("url", ""),
-}
-
-
-def _summarize_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> str:
-    """Summarize tool input for export."""
+def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> dict:
+    """Return a structured dict for a tool's input args, with paths/content anonymized."""
     if not isinstance(input_data, dict):
-        return _redact_and_truncate(str(input_data), anonymizer)
+        return {"raw": anonymizer.text(str(input_data))}
 
-    name = tool_name.lower() if tool_name else ""
-    summarizer = _TOOL_SUMMARIZERS.get(name)
-    if summarizer is not None:
-        return summarizer(input_data, anonymizer)
-    return _redact_and_truncate(str(input_data), anonymizer)
+    name = (tool_name or "").lower()
 
+    # Claude Code tools
+    if name in ("read", "edit"):
+        return {"file_path": anonymizer.path(input_data.get("file_path", ""))}
+    if name == "write":
+        return {
+            "file_path": anonymizer.path(input_data.get("file_path", "")),
+            "content": anonymizer.text(input_data.get("content", "")),
+        }
+    if name == "bash":
+        cmd, _ = redact_text(input_data.get("command", ""))
+        return {"command": anonymizer.text(cmd)}
+    if name == "grep":
+        pattern, _ = redact_text(input_data.get("pattern", ""))
+        return {"pattern": anonymizer.text(pattern), "path": anonymizer.path(input_data.get("path", ""))}
+    if name == "glob":
+        return {"pattern": input_data.get("pattern", ""), "path": anonymizer.path(input_data.get("path", ""))}
+    if name == "task":
+        return {"prompt": anonymizer.text(input_data.get("prompt", ""))}
+    if name == "websearch":
+        return {"query": anonymizer.text(input_data.get("query", ""))}
+    if name == "webfetch":
+        return {"url": anonymizer.text(input_data.get("url", ""))}
+    if name == "apply_patch":
+        return {"patch": anonymizer.text(input_data.get("patchText", ""))}
+    if name == "codesearch":
+        return {"query": anonymizer.text(input_data.get("query", ""))}
+
+    # Codex tools
+    if name == "exec_command":
+        cmd, _ = redact_text(input_data.get("cmd", ""))
+        return {"cmd": anonymizer.text(cmd)}
+    if name == "shell_command":
+        cmd, _ = redact_text(input_data.get("command", ""))
+        return {
+            "command": anonymizer.text(cmd),
+            "workdir": anonymizer.path(input_data.get("workdir", "")),
+        }
+    if name == "write_stdin":
+        return {
+            "session_id": input_data.get("session_id"),
+            "chars": anonymizer.text(input_data.get("chars", "")),
+            "yield_time_ms": input_data.get("yield_time_ms"),
+            "max_output_tokens": input_data.get("max_output_tokens"),
+        }
+    if name == "update_plan":
+        plan = input_data.get("plan", [])
+        return {
+            "explanation": anonymizer.text(input_data.get("explanation", "")),
+            "plan": [anonymizer.text(str(p)) if isinstance(p, str) else p for p in plan],
+        }
+
+    # Fallback: anonymize all string values
+    return {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in input_data.items()}
 
 def _normalize_timestamp(value) -> str | None:
     if value is None:

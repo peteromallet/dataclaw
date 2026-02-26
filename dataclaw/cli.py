@@ -468,6 +468,7 @@ tags:
   - claude-code
   - codex-cli
   - gemini-cli
+  - opencode
   - conversations
   - coding-assistant
   - tool-use
@@ -481,7 +482,7 @@ configs:
 
 # Coding Agent Conversation Logs
 
-> **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces is yours to share.
+> **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same with their data — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces is yours to share.
 
 Exported with [DataClaw]({REPO_URL}).
 
@@ -521,7 +522,14 @@ Each line in `conversations.jsonl` is one conversation session:
       "role": "assistant",
       "content": "I'll investigate the login flow.",
       "thinking": "The user wants me to...",
-      "tool_uses": [{{"tool": "Read", "input": "src/auth.py"}}],
+      "tool_uses": [
+          {{
+            "tool": "bash",
+            "input": {{"command": "grep -r 'login' src/"}},
+            "output": {{"text": "src/auth.py:42: def login(user, password):"}},
+            "status": "success"
+          }}
+        ],
       "timestamp": "..."
     }}
   ],
@@ -538,7 +546,6 @@ Each line in `conversations.jsonl` is one conversation session:
 ### Privacy
 
 - Paths anonymized to project-relative; usernames hashed
-- No tool outputs — only tool call inputs (summaries)
 
 ## Load
 

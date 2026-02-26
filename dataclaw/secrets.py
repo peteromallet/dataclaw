@@ -2,6 +2,7 @@
 
 import math
 import re
+from typing import Any
 
 REDACTED = "[REDACTED]"
 
@@ -225,6 +226,32 @@ def redact_custom_strings(text: str, strings: list[str]) -> tuple[str, int]:
     return text, count
 
 
+def _redact_value(value: Any, custom_strings: list[str] | None = None) -> tuple[Any, int]:
+    """Recursively redact secrets from a string, list, or dict value."""
+    if isinstance(value, str):
+        result, count = redact_text(value)
+        if custom_strings:
+            result, n = redact_custom_strings(result, custom_strings)
+            count += n
+        return result, count
+    if isinstance(value, dict):
+        total = 0
+        out = {}
+        for k, v in value.items():
+            out[k], n = _redact_value(v, custom_strings)
+            total += n
+        return out, total
+    if isinstance(value, list):
+        total = 0
+        out_list = []
+        for item in value:
+            redacted, n = _redact_value(item, custom_strings)
+            out_list.append(redacted)
+            total += n
+        return out_list, total
+    return value, 0
+
+
 def redact_session(session: dict, custom_strings: list[str] | None = None) -> tuple[dict, int]:
     """Redact all secrets in a session dict. Returns (redacted_session, total_redactions)."""
     total = 0
@@ -238,11 +265,9 @@ def redact_session(session: dict, custom_strings: list[str] | None = None) -> tu
                     msg[field], count = redact_custom_strings(msg[field], custom_strings)
                     total += count
         for tool_use in msg.get("tool_uses", []):
-            if tool_use.get("input"):
-                tool_use["input"], count = redact_text(tool_use["input"])
-                total += count
-                if custom_strings:
-                    tool_use["input"], count = redact_custom_strings(tool_use["input"], custom_strings)
+            for field in ("input", "output"):
+                if tool_use.get(field):
+                    tool_use[field], count = _redact_value(tool_use[field], custom_strings)
                     total += count
 
     return session, total
