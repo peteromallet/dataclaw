@@ -260,9 +260,9 @@ def _discover_kimi_projects() -> list[dict]:
     if not KIMI_SESSIONS_DIR.exists():
         return []
 
-    # 加载工作目录配置以获取路径映射
+    # Load work directory config to get path mapping
     work_dirs = _load_kimi_work_dirs()
-    # 建立路径到哈希的反向映射
+    # Build reverse mapping from path to hash
     path_to_hash = {path: _get_kimi_project_hash(path) for path in work_dirs}
     hash_to_path = {h: p for p, h in path_to_hash.items()}
 
@@ -272,12 +272,12 @@ def _discover_kimi_projects() -> list[dict]:
             continue
 
         project_hash = project_dir.name
-        # 查找所有会话子目录
+        # Find all session subdirectories
         session_dirs = [d for d in project_dir.iterdir() if d.is_dir()]
         if not session_dirs:
             continue
 
-        # 计算总会话数和总大小
+        # Calculate total sessions and size
         total_sessions = 0
         total_size = 0
         for session_dir in session_dirs:
@@ -289,13 +289,13 @@ def _discover_kimi_projects() -> list[dict]:
         if total_sessions == 0:
             continue
 
-        # 尝试解析项目路径
+        # Try to resolve project path
         project_path = hash_to_path.get(project_hash)
         if project_path:
             display_name = f"kimi:{Path(project_path).name}"
             dir_name = project_path
         else:
-            # 无法解析时使用哈希前8位
+            # Use first 8 chars of hash if unresolved
             display_name = f"kimi:{project_hash[:8]}"
             dir_name = project_hash
 
@@ -366,7 +366,7 @@ def parse_project_sessions(
         return sessions
 
     if source == KIMI_SOURCE:
-        # project_dir_name 是工作目录路径
+        # project_dir_name is the working directory path
         project_hash = _get_kimi_project_hash(project_dir_name)
         project_path = KIMI_SESSIONS_DIR / project_hash
         if not project_path.exists():
@@ -387,7 +387,7 @@ def parse_project_sessions(
             if parsed and parsed["messages"]:
                 parsed["project"] = _build_kimi_project_name(project_dir_name)
                 parsed["source"] = KIMI_SOURCE
-                # 如果模型未设置，使用默认模型名
+                # Use default model name if not set
                 if not parsed.get("model"):
                     parsed["model"] = "kimi-k2"
                 sessions.append(parsed)
@@ -1139,7 +1139,7 @@ def _parse_kimi_session_file(
             elif role == "assistant":
                 msg: dict[str, Any] = {"role": "assistant"}
 
-                # 提取内容（可能包含 think 和 text）
+                # Extract content (may include think and text)
                 content = entry.get("content")
                 text_parts = []
                 thinking_parts = []
@@ -1163,7 +1163,7 @@ def _parse_kimi_session_file(
                 if thinking_parts:
                     msg["thinking"] = "\n\n".join(thinking_parts)
 
-                # 提取工具调用
+                # Extract tool calls
                 tool_calls = entry.get("tool_calls", [])
                 tool_uses = []
                 if isinstance(tool_calls, list):
@@ -1187,16 +1187,16 @@ def _parse_kimi_session_file(
                     msg["tool_uses"] = tool_uses
                     stats["tool_uses"] += len(tool_uses)
 
-                # 只添加有内容的助手消息
+                # Only add assistant messages with content
                 if text_parts or thinking_parts or tool_uses:
                     messages.append(msg)
                     stats["assistant_messages"] += 1
 
             elif role == "_usage":
-                # 提取 token 使用量
+                # Extract token usage
                 token_count = entry.get("token_count")
                 if isinstance(token_count, int):
-                    # Kimi 的 token_count 是累积值，我们取最大值作为输出
+                    # Kimi's token_count is cumulative, use max as output
                     stats["output_tokens"] = max(stats["output_tokens"], token_count)
 
     except OSError:
