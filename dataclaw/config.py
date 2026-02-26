@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 CONFIG_DIR = Path.home() / ".dataclaw"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -20,6 +20,10 @@ class DataClawConfig(TypedDict, total=False):
     last_export: dict
     stage: str | None  # "auth" | "configure" | "review" | "confirmed" | "done"
     projects_confirmed: bool  # True once user has addressed folder exclusions
+    review_attestations: dict
+    review_verification: dict
+    last_confirm: dict
+    publish_attestation: str
 
 
 DEFAULT_CONFIG: DataClawConfig = {
@@ -35,10 +39,10 @@ def load_config() -> DataClawConfig:
         try:
             with open(CONFIG_FILE) as f:
                 stored = json.load(f)
-            return {**DEFAULT_CONFIG, **stored}
+            return cast(DataClawConfig, {**DEFAULT_CONFIG, **stored})
         except (json.JSONDecodeError, OSError) as e:
             print(f"Warning: could not read {CONFIG_FILE}: {e}", file=sys.stderr)
-    return dict(DEFAULT_CONFIG)
+    return cast(DataClawConfig, dict(DEFAULT_CONFIG))
 
 
 def save_config(config: DataClawConfig) -> None:
