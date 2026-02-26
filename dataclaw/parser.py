@@ -54,15 +54,21 @@ def _discover_claude_projects() -> list[dict]:
     for project_dir in sorted(PROJECTS_DIR.iterdir()):
         if not project_dir.is_dir():
             continue
-        sessions = list(project_dir.glob("*.jsonl"))
-        if not sessions:
+        root_sessions = list(project_dir.glob("*.jsonl"))
+        subagent_sessions = _find_subagent_only_sessions(project_dir)
+        total_count = len(root_sessions) + len(subagent_sessions)
+        if total_count == 0:
             continue
+        total_size = sum(f.stat().st_size for f in root_sessions)
+        for session_dir in subagent_sessions:
+            for sa_file in (session_dir / "subagents").glob("agent-*.jsonl"):
+                total_size += sa_file.stat().st_size
         projects.append(
             {
                 "dir_name": project_dir.name,
                 "display_name": _build_project_name(project_dir.name),
-                "session_count": len(sessions),
-                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+                "session_count": total_count,
+                "total_size_bytes": total_size,
                 "source": CLAUDE_SOURCE,
             }
         )
@@ -122,6 +128,14 @@ def parse_project_sessions(
             parsed["project"] = _build_project_name(project_dir_name)
             parsed["source"] = CLAUDE_SOURCE
             sessions.append(parsed)
+
+    for session_dir in _find_subagent_only_sessions(project_path):
+        parsed = _parse_subagent_session(session_dir, anonymizer, include_thinking)
+        if parsed and parsed["messages"]:
+            parsed["project"] = _build_project_name(project_dir_name)
+            parsed["source"] = CLAUDE_SOURCE
+            sessions.append(parsed)
+
     return sessions
 
 
@@ -180,6 +194,68 @@ def _parse_session_file(
 ) -> dict | None:
     """Backward-compatible alias for the Claude parser used by tests."""
     return _parse_claude_session_file(filepath, anonymizer, include_thinking)
+
+
+def _find_subagent_only_sessions(project_dir: Path) -> list[Path]:
+    """Find session directories that have subagent data but no root-level JSONL.
+
+    Some Claude Code sessions (especially those run entirely via the Task tool)
+    store conversation data only in ``<uuid>/subagents/agent-*.jsonl`` without
+    writing a root-level ``<uuid>.jsonl`` file.  This function identifies those
+    directories so they can be parsed separately.
+    """
+    root_stems = {f.stem for f in project_dir.glob("*.jsonl")}
+    sessions = []
+    for entry in sorted(project_dir.iterdir()):
+        if not entry.is_dir() or entry.name in root_stems:
+            continue
+        subagent_dir = entry / "subagents"
+        if subagent_dir.is_dir() and any(subagent_dir.glob("agent-*.jsonl")):
+            sessions.append(entry)
+    return sessions
+
+
+def _parse_subagent_session(
+    session_dir: Path, anonymizer: Anonymizer, include_thinking: bool = True,
+) -> dict | None:
+    """Merge subagent JSONL files into a single session and parse it.
+
+    Reads all ``agent-*.jsonl`` files from the session's ``subagents/``
+    directory, sorts entries by timestamp, and feeds them through the
+    standard Claude entry processor.
+    """
+    subagent_dir = session_dir / "subagents"
+    if not subagent_dir.is_dir():
+        return None
+
+    # Collect all entries with their timestamps for sorting.
+    timed_entries: list[tuple[str, dict[str, Any]]] = []
+    for sa_file in sorted(subagent_dir.glob("agent-*.jsonl")):
+        for entry in _iter_jsonl(sa_file):
+            ts = entry.get("timestamp", "")
+            timed_entries.append((ts if isinstance(ts, str) else "", entry))
+
+    if not timed_entries:
+        return None
+
+    timed_entries.sort(key=lambda pair: pair[0])
+
+    messages: list[dict[str, Any]] = []
+    metadata = {
+        "session_id": session_dir.name,
+        "cwd": None,
+        "git_branch": None,
+        "claude_version": None,
+        "model": None,
+        "start_time": None,
+        "end_time": None,
+    }
+    stats = _make_stats()
+
+    for _ts, entry in timed_entries:
+        _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+
+    return _make_session_result(metadata, messages, stats)
 
 
 @dataclasses.dataclass

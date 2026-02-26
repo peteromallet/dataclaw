@@ -8,8 +8,10 @@ from dataclaw.parser import (
     _build_project_name,
     _extract_assistant_content,
     _extract_user_content,
+    _find_subagent_only_sessions,
     _normalize_timestamp,
     _parse_session_file,
+    _parse_subagent_session,
     _process_entry,
     _summarize_tool_input,
     discover_projects,
@@ -642,3 +644,250 @@ class TestDiscoverProjects:
         thinking = assistant_msgs[0]["thinking"]
         paragraphs = [p.strip() for p in thinking.split("\n\n") if p.strip()]
         assert paragraphs == ["Planning fix", "Reading code"]
+
+
+# --- Subagent-only session discovery and parsing ---
+
+
+def _make_subagent_entry(role, content, timestamp, cwd=None, session_id=None):
+    """Build a minimal JSONL entry matching the subagent file format."""
+    entry = {"timestamp": timestamp}
+    if role == "user":
+        entry["type"] = "user"
+        entry["message"] = {"content": content}
+        if cwd:
+            entry["cwd"] = cwd
+            entry["gitBranch"] = "main"
+            entry["version"] = "2.1.2"
+        if session_id:
+            entry["sessionId"] = session_id
+    elif role == "assistant":
+        entry["type"] = "assistant"
+        entry["message"] = {
+            "model": "claude-opus-4-5-20251101",
+            "content": [{"type": "text", "text": content}],
+            "usage": {"input_tokens": 50, "output_tokens": 20},
+        }
+    return entry
+
+
+class TestFindSubagentOnlySessions:
+    def test_finds_subagent_dirs_without_root_jsonl(self, tmp_path):
+        proj = tmp_path / "project"
+        proj.mkdir()
+
+        # Session with root JSONL — should NOT be returned.
+        (proj / "has-root.jsonl").write_text("{}\n")
+        sa_dir = proj / "has-root" / "subagents"
+        sa_dir.mkdir(parents=True)
+        (sa_dir / "agent-a1.jsonl").write_text("{}\n")
+
+        # Session with only subagent data — SHOULD be returned.
+        sa_dir2 = proj / "subagent-only" / "subagents"
+        sa_dir2.mkdir(parents=True)
+        (sa_dir2 / "agent-b1.jsonl").write_text("{}\n")
+
+        result = _find_subagent_only_sessions(proj)
+        assert len(result) == 1
+        assert result[0].name == "subagent-only"
+
+    def test_ignores_dirs_without_subagents(self, tmp_path):
+        proj = tmp_path / "project"
+        proj.mkdir()
+
+        # Directory with only tool-results, no subagents.
+        (proj / "tool-only" / "tool-results").mkdir(parents=True)
+
+        result = _find_subagent_only_sessions(proj)
+        assert result == []
+
+    def test_ignores_empty_subagent_dirs(self, tmp_path):
+        proj = tmp_path / "project"
+        (proj / "empty-sa" / "subagents").mkdir(parents=True)
+
+        result = _find_subagent_only_sessions(proj)
+        assert result == []
+
+    def test_returns_empty_for_no_dirs(self, tmp_path):
+        proj = tmp_path / "project"
+        proj.mkdir()
+        (proj / "session.jsonl").write_text("{}\n")
+
+        result = _find_subagent_only_sessions(proj)
+        assert result == []
+
+
+class TestParseSubagentSession:
+    def test_merges_multiple_files_sorted_by_timestamp(self, tmp_path, mock_anonymizer):
+        session = tmp_path / "abc-123"
+        sa_dir = session / "subagents"
+        sa_dir.mkdir(parents=True)
+
+        # Write entries across two subagent files with interleaved timestamps.
+        (sa_dir / "agent-a1.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "First message", "2026-01-10T08:00:00Z",
+                cwd="/tmp/proj", session_id="abc-123",
+            )) + "\n"
+            + json.dumps(_make_subagent_entry(
+                "assistant", "Third reply", "2026-01-10T08:02:00Z",
+            )) + "\n"
+        )
+        (sa_dir / "agent-b2.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "assistant", "Second reply", "2026-01-10T08:01:00Z",
+            )) + "\n"
+        )
+
+        result = _parse_subagent_session(session, mock_anonymizer)
+        assert result is not None
+        assert result["session_id"] == "abc-123"
+        assert len(result["messages"]) == 3
+        # Verify sort order: user(08:00), assistant(08:01), assistant(08:02)
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][0]["content"] == "First message"
+        assert result["messages"][1]["content"] == "Second reply"
+        assert result["messages"][2]["content"] == "Third reply"
+        assert result["model"] == "claude-opus-4-5-20251101"
+
+    def test_returns_none_for_empty_subagents(self, tmp_path, mock_anonymizer):
+        session = tmp_path / "empty"
+        (session / "subagents").mkdir(parents=True)
+
+        result = _parse_subagent_session(session, mock_anonymizer)
+        assert result is None
+
+    def test_returns_none_for_no_subagent_dir(self, tmp_path, mock_anonymizer):
+        session = tmp_path / "no-sa"
+        session.mkdir()
+
+        result = _parse_subagent_session(session, mock_anonymizer)
+        assert result is None
+
+    def test_returns_none_when_no_messages(self, tmp_path, mock_anonymizer):
+        session = tmp_path / "no-msgs"
+        sa_dir = session / "subagents"
+        sa_dir.mkdir(parents=True)
+        # Entry with unknown type — produces no messages.
+        (sa_dir / "agent-x.jsonl").write_text(
+            json.dumps({"type": "system", "timestamp": "2026-01-01T00:00:00Z"}) + "\n"
+        )
+
+        result = _parse_subagent_session(session, mock_anonymizer)
+        assert result is None
+
+    def test_stats_aggregated(self, tmp_path, mock_anonymizer):
+        session = tmp_path / "stats-test"
+        sa_dir = session / "subagents"
+        sa_dir.mkdir(parents=True)
+
+        (sa_dir / "agent-a.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "Hello", "2026-01-10T10:00:00Z", cwd="/tmp/p",
+            )) + "\n"
+            + json.dumps(_make_subagent_entry(
+                "assistant", "Hi", "2026-01-10T10:00:01Z",
+            )) + "\n"
+            + json.dumps(_make_subagent_entry(
+                "assistant", "Done", "2026-01-10T10:00:02Z",
+            )) + "\n"
+        )
+
+        result = _parse_subagent_session(session, mock_anonymizer)
+        assert result is not None
+        assert result["stats"]["user_messages"] == 1
+        assert result["stats"]["assistant_messages"] == 2
+        assert result["stats"]["input_tokens"] == 100  # 50 * 2
+        assert result["stats"]["output_tokens"] == 40  # 20 * 2
+
+
+class TestDiscoverSubagentProjects:
+    """Verify discover_projects and parse_project_sessions include subagent-only sessions."""
+
+    def _disable_codex(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+
+    def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_codex(tmp_path, monkeypatch)
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "-Users-alice-Documents-research"
+        proj.mkdir(parents=True)
+
+        # One root session.
+        (proj / "root-session.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "Hi", "2026-01-01T00:00:00Z", cwd="/tmp",
+            )) + "\n"
+        )
+
+        # One subagent-only session.
+        sa_dir = proj / "subagent-session" / "subagents"
+        sa_dir.mkdir(parents=True)
+        (sa_dir / "agent-a.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "Build it", "2026-01-02T00:00:00Z", cwd="/tmp",
+            )) + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", projects_dir)
+        projects = discover_projects()
+        assert len(projects) == 1
+        assert projects[0]["session_count"] == 2
+        assert projects[0]["display_name"] == "research"
+
+    def test_discover_subagent_only_project(self, tmp_path, monkeypatch, mock_anonymizer):
+        """A project with zero root .jsonl but subagent sessions should still appear."""
+        self._disable_codex(tmp_path, monkeypatch)
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "subagent-project"
+        proj.mkdir(parents=True)
+
+        sa_dir = proj / "session-uuid" / "subagents"
+        sa_dir.mkdir(parents=True)
+        (sa_dir / "agent-a.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "Do work", "2026-01-01T00:00:00Z", cwd="/tmp",
+            )) + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", projects_dir)
+        projects = discover_projects()
+        assert len(projects) == 1
+        assert projects[0]["session_count"] == 1
+
+    def test_parse_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_codex(tmp_path, monkeypatch)
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "mixed-project"
+        proj.mkdir(parents=True)
+
+        # Root session.
+        (proj / "root.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "Root msg", "2026-01-01T00:00:00Z", cwd="/tmp",
+            )) + "\n"
+            + json.dumps(_make_subagent_entry(
+                "assistant", "Root reply", "2026-01-01T00:00:01Z",
+            )) + "\n"
+        )
+
+        # Subagent-only session.
+        sa_dir = proj / "sa-session" / "subagents"
+        sa_dir.mkdir(parents=True)
+        (sa_dir / "agent-a.jsonl").write_text(
+            json.dumps(_make_subagent_entry(
+                "user", "SA msg", "2026-01-02T00:00:00Z", cwd="/tmp",
+            )) + "\n"
+            + json.dumps(_make_subagent_entry(
+                "assistant", "SA reply", "2026-01-02T00:00:01Z",
+            )) + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", projects_dir)
+        sessions = parse_project_sessions("mixed-project", mock_anonymizer)
+        assert len(sessions) == 2
+        contents = {s["messages"][0]["content"] for s in sessions}
+        assert "Root msg" in contents
+        assert "SA msg" in contents
