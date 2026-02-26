@@ -832,7 +832,7 @@ def _handle_codex_response_item(
         state.pending_tool_uses.append(
             {
                 "tool": tool_name,
-                "input": {"summary": _summarize_tool_input(tool_name, args_data, anonymizer)},
+                "input": _parse_tool_input(tool_name, args_data, anonymizer),
             }
         )
     elif item_type == "reasoning" and include_thinking:
@@ -1017,7 +1017,7 @@ def _extract_opencode_assistant_content(
             tool_uses.append(
                 {
                     "tool": tool_name,
-                    "input": {"summary": _summarize_tool_input(tool_name, tool_input, anonymizer)},
+                    "input": _parse_tool_input(tool_name, tool_input, anonymizer),
                 }
             )
 
@@ -1188,7 +1188,7 @@ def _extract_assistant_content(
         elif block_type == "tool_use":
             tool_uses.append({
                 "tool": block.get("name"),
-                "input": {"summary": _summarize_tool_input(block.get("name"), block.get("input", {}), anonymizer)},
+                "input": _parse_tool_input(block.get("name"), block.get("input", {}), anonymizer),
             })
 
     if not text_parts and not tool_uses and not thinking_parts:
@@ -1204,60 +1204,61 @@ def _extract_assistant_content(
     return msg
 
 
-MAX_TOOL_INPUT_LENGTH = 300
-
-
-def _redact_and_truncate(text: str, anonymizer: Anonymizer) -> str:
-    """Redact secrets BEFORE truncating to avoid partial secret leaks."""
-    text, _ = redact_text(text)
-    return anonymizer.text(text[:MAX_TOOL_INPUT_LENGTH])
-
-
-def _summarize_file_path(d: dict, a: Anonymizer) -> str:
-    return a.path(d.get("file_path", ""))
-
-
-def _summarize_write(d: dict, a: Anonymizer) -> str:
-    return f"{a.path(d.get('file_path', ''))} ({len(d.get('content', ''))} chars)"
-
-
-def _summarize_bash(d: dict, a: Anonymizer) -> str:
-    return _redact_and_truncate(d.get("command", ""), a)
-
-
-def _summarize_grep(d: dict, a: Anonymizer) -> str:
-    pattern, _ = redact_text(d.get("pattern", ""))
-    return f"pattern={a.text(pattern)} path={a.path(d.get('path', ''))}"
-
-
-def _summarize_glob(d: dict, a: Anonymizer) -> str:
-    return f"pattern={a.text(d.get('pattern', ''))} path={a.path(d.get('path', ''))}"
-
-
-_TOOL_SUMMARIZERS: dict[str, Any] = {
-    "read": _summarize_file_path,
-    "edit": _summarize_file_path,
-    "write": _summarize_write,
-    "bash": _summarize_bash,
-    "grep": _summarize_grep,
-    "glob": _summarize_glob,
-    "task": lambda d, a: _redact_and_truncate(d.get("prompt", ""), a),
-    "websearch": lambda d, _: d.get("query", ""),
-    "webfetch": lambda d, _: d.get("url", ""),
-}
-
-
-def _summarize_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> str:
-    """Summarize tool input for export."""
+def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> dict:
+    """Return a structured dict for a tool's input args, with paths/content anonymized."""
     if not isinstance(input_data, dict):
-        return _redact_and_truncate(str(input_data), anonymizer)
+        return {"raw": anonymizer.text(str(input_data))}
 
-    name = tool_name.lower() if tool_name else ""
-    summarizer = _TOOL_SUMMARIZERS.get(name)
-    if summarizer is not None:
-        return summarizer(input_data, anonymizer)
-    return _redact_and_truncate(str(input_data), anonymizer)
+    name = (tool_name or "").lower()
 
+    # Claude Code tools
+    if name in ("read", "edit"):
+        return {"file_path": anonymizer.path(input_data.get("file_path", ""))}
+    if name == "write":
+        return {
+            "file_path": anonymizer.path(input_data.get("file_path", "")),
+            "content": anonymizer.text(input_data.get("content", "")),
+        }
+    if name == "bash":
+        cmd, _ = redact_text(input_data.get("command", ""))
+        return {"command": anonymizer.text(cmd)}
+    if name == "grep":
+        pattern, _ = redact_text(input_data.get("pattern", ""))
+        return {"pattern": anonymizer.text(pattern), "path": anonymizer.path(input_data.get("path", ""))}
+    if name == "glob":
+        return {"pattern": input_data.get("pattern", ""), "path": anonymizer.path(input_data.get("path", ""))}
+    if name == "task":
+        return {"prompt": anonymizer.text(input_data.get("prompt", ""))}
+    if name == "websearch":
+        return {"query": input_data.get("query", "")}
+    if name == "webfetch":
+        return {"url": input_data.get("url", "")}
+
+    # Codex tools
+    if name == "exec_command":
+        cmd, _ = redact_text(input_data.get("cmd", ""))
+        return {"cmd": anonymizer.text(cmd)}
+    if name == "shell_command":
+        cmd, _ = redact_text(input_data.get("command", ""))
+        return {
+            "command": anonymizer.text(cmd),
+            "workdir": anonymizer.path(input_data.get("workdir", "")),
+        }
+    if name == "write_stdin":
+        return {
+            "session_id": input_data.get("session_id"),
+            "chars": anonymizer.text(input_data.get("chars", "")),
+            "yield_time_ms": input_data.get("yield_time_ms"),
+            "max_output_tokens": input_data.get("max_output_tokens"),
+        }
+    if name == "update_plan":
+        return {
+            "explanation": anonymizer.text(input_data.get("explanation", "")),
+            "plan": input_data.get("plan", []),
+        }
+
+    # Fallback: anonymize all string values
+    return {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in input_data.items()}
 
 def _normalize_timestamp(value) -> str | None:
     if value is None:
