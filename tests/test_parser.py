@@ -7,14 +7,16 @@ import pytest
 
 from dataclaw.parser import (
     _build_project_name,
+    _build_tool_result_map,
+    _build_codex_tool_result_map,
     _extract_assistant_content,
     _extract_user_content,
     _find_subagent_only_sessions,
     _normalize_timestamp,
     _parse_session_file,
     _parse_subagent_session,
+    _parse_tool_input,
     _process_entry,
-    _summarize_tool_input,
     discover_projects,
     parse_project_sessions,
     _parse_codex_session_file,
@@ -101,75 +103,107 @@ class TestNormalizeTimestamp:
         assert _normalize_timestamp({"ts": 123}) is None
 
 
-# --- _summarize_tool_input ---
+# --- _parse_tool_input ---
 
 
-class TestSummarizeToolInput:
+class TestParseToolInput:
     def test_read_tool(self, mock_anonymizer):
-        result = _summarize_tool_input("Read", {"file_path": "/tmp/test.py"}, mock_anonymizer)
-        assert "test.py" in result
+        result = _parse_tool_input("Read", {"file_path": "/tmp/test.py"}, mock_anonymizer)
+        assert isinstance(result, dict)
+        assert "file_path" in result
+        assert "test.py" in result["file_path"]
 
     def test_write_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "Write", {"file_path": "/tmp/test.py", "content": "abc"}, mock_anonymizer,
         )
-        assert "test.py" in result
-        assert "3 chars" in result
+        assert isinstance(result, dict)
+        assert "file_path" in result
+        assert "content" in result
 
     def test_bash_tool(self, mock_anonymizer):
-        result = _summarize_tool_input("Bash", {"command": "ls -la"}, mock_anonymizer)
-        assert "ls -la" in result
+        result = _parse_tool_input("Bash", {"command": "ls -la"}, mock_anonymizer)
+        assert isinstance(result, dict)
+        assert result["command"] == "ls -la"
 
     def test_grep_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "Grep", {"pattern": "TODO", "path": "/tmp"}, mock_anonymizer,
         )
-        assert "pattern=" in result
-        assert "path=" in result
+        assert isinstance(result, dict)
+        assert "pattern" in result
+        assert "path" in result
 
     def test_glob_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "Glob", {"pattern": "*.py", "path": "/tmp"}, mock_anonymizer,
         )
-        assert "pattern=" in result
+        assert isinstance(result, dict)
+        assert result["pattern"] == "*.py"
 
     def test_task_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "Task", {"prompt": "Search for bugs"}, mock_anonymizer,
         )
-        assert "Search for bugs" in result
+        assert isinstance(result, dict)
+        assert "Search for bugs" in result["prompt"]
 
     def test_websearch_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "WebSearch", {"query": "python async"}, mock_anonymizer,
         )
-        assert "python async" in result
+        assert isinstance(result, dict)
+        assert result["query"] == "python async"
 
     def test_webfetch_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "WebFetch", {"url": "https://example.com"}, mock_anonymizer,
         )
-        assert "https://example.com" in result
-
-    def test_unknown_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
-            "CustomTool", {"foo": "bar"}, mock_anonymizer,
-        )
-        assert "foo" in result or "bar" in result
+        assert isinstance(result, dict)
+        assert result["url"] == "https://example.com"
 
     def test_edit_tool(self, mock_anonymizer):
-        result = _summarize_tool_input(
+        result = _parse_tool_input(
             "Edit", {"file_path": "/tmp/test.py"}, mock_anonymizer,
         )
-        assert "test.py" in result
+        assert isinstance(result, dict)
+        assert "file_path" in result
+
+    def test_exec_command_tool(self, mock_anonymizer):
+        result = _parse_tool_input("exec_command", {"cmd": "ls -la"}, mock_anonymizer)
+        assert isinstance(result, dict)
+        assert result["cmd"] == "ls -la"
+
+    def test_shell_command_tool(self, mock_anonymizer):
+        result = _parse_tool_input(
+            "shell_command", {"command": "ls", "workdir": "/tmp"}, mock_anonymizer,
+        )
+        assert isinstance(result, dict)
+        assert result["command"] == "ls"
+        assert "workdir" in result
+
+    def test_update_plan_tool(self, mock_anonymizer):
+        result = _parse_tool_input(
+            "update_plan",
+            {"explanation": "New plan", "plan": [{"step": "do it", "status": "pending"}]},
+            mock_anonymizer,
+        )
+        assert isinstance(result, dict)
+        assert "explanation" in result
+        assert "plan" in result
+
+    def test_unknown_tool(self, mock_anonymizer):
+        result = _parse_tool_input("CustomTool", {"foo": "bar"}, mock_anonymizer)
+        assert isinstance(result, dict)
 
     def test_none_tool_name(self, mock_anonymizer):
-        result = _summarize_tool_input(None, {"data": "value"}, mock_anonymizer)
-        assert isinstance(result, str)
+        result = _parse_tool_input(None, {"data": "value"}, mock_anonymizer)
+        assert isinstance(result, dict)
 
     def test_non_dict_input(self, mock_anonymizer):
-        result = _summarize_tool_input("Read", "just a string", mock_anonymizer)
-        assert isinstance(result, str)
+        result = _parse_tool_input("Read", "just a string", mock_anonymizer)
+        assert isinstance(result, dict)
+        assert "raw" in result
 
 
 # --- _extract_user_content ---
@@ -1031,3 +1065,262 @@ class TestDiscoverSubagentProjects:
         contents = {s["messages"][0]["content"] for s in sessions}
         assert "Root msg" in contents
         assert "SA msg" in contents
+
+
+# --- _build_tool_result_map (Claude tool outputs) ---
+
+
+class TestBuildToolResultMap:
+    def test_basic_string_output(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-1",
+                            "content": "file contents here",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            }
+        ]
+        result = _build_tool_result_map(entries, mock_anonymizer)
+        assert "tu-1" in result
+        assert result["tu-1"]["status"] == "success"
+        assert result["tu-1"]["output"]["text"] == "file contents here"
+
+    def test_error_result(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-2",
+                            "content": "Permission denied",
+                            "is_error": True,
+                        }
+                    ]
+                },
+            }
+        ]
+        result = _build_tool_result_map(entries, mock_anonymizer)
+        assert result["tu-2"]["status"] == "error"
+
+    def test_list_content(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-3",
+                            "content": [
+                                {"type": "text", "text": "Part one"},
+                                {"type": "text", "text": "Part two"},
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+        result = _build_tool_result_map(entries, mock_anonymizer)
+        assert "Part one" in result["tu-3"]["output"]["text"]
+        assert "Part two" in result["tu-3"]["output"]["text"]
+
+    def test_empty_content_gives_empty_output(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu-4", "content": ""}
+                    ]
+                },
+            }
+        ]
+        result = _build_tool_result_map(entries, mock_anonymizer)
+        assert result["tu-4"]["output"] == {}
+
+    def test_non_user_entries_ignored(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu-5", "content": "ignored"}
+                    ]
+                },
+            }
+        ]
+        result = _build_tool_result_map(entries, mock_anonymizer)
+        assert "tu-5" not in result
+
+    def test_tool_output_attached_in_session(self, tmp_path, mock_anonymizer):
+        """End-to-end: tool_use in assistant entry gets output from tool_result in user entry."""
+        f = tmp_path / "session.jsonl"
+        entries = [
+            {
+                "type": "assistant",
+                "timestamp": 1706000001000,
+                "message": {
+                    "model": "claude-sonnet",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu-abc",
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        }
+                    ],
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": 1706000002000,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-abc",
+                            "content": "file1.py\nfile2.py",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+        ]
+        f.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        result = _parse_session_file(f, mock_anonymizer)
+        assert result is not None
+        tu = result["messages"][0]["tool_uses"][0]
+        assert tu["tool"] == "Bash"
+        assert tu["status"] == "success"
+        assert "file1.py" in tu["output"]["text"]
+
+
+# --- _build_codex_tool_result_map ---
+
+
+class TestBuildCodexToolResultMap:
+    def test_function_call_output(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "Exit code: 0\nWall time: 1 seconds\nOutput:\nhello world\n",
+                },
+            }
+        ]
+        result = _build_codex_tool_result_map(entries, mock_anonymizer)
+        assert "call-1" in result
+        assert result["call-1"]["status"] == "success"
+        assert result["call-1"]["output"]["exit_code"] == 0
+        assert result["call-1"]["output"]["wall_time"] == "1 seconds"
+        assert "hello world" in result["call-1"]["output"]["output"]
+
+    def test_custom_tool_call_output(self, mock_anonymizer):
+        import json as _json
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-2",
+                    "output": _json.dumps({
+                        "output": "Successfully applied patch",
+                        "metadata": {"exit_code": 0, "duration_seconds": 0.5},
+                    }),
+                },
+            }
+        ]
+        result = _build_codex_tool_result_map(entries, mock_anonymizer)
+        assert "call-2" in result
+        assert result["call-2"]["output"]["exit_code"] == 0
+        assert "Successfully applied patch" in result["call-2"]["output"]["output"]
+        assert result["call-2"]["output"]["duration_seconds"] == 0.5
+
+    def test_non_response_item_ignored(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-3",
+                    "output": "ignored",
+                },
+            }
+        ]
+        result = _build_codex_tool_result_map(entries, mock_anonymizer)
+        assert "call-3" not in result
+
+    def test_output_attached_end_to_end(self, tmp_path, monkeypatch, mock_anonymizer):
+        """Codex tool output is attached to the tool_use in the parsed session."""
+        import json as _json
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+
+        codex_sessions = tmp_path / "codex-sessions" / "2026" / "02" / "24"
+        codex_sessions.mkdir(parents=True)
+        session_file = codex_sessions / "rollout-1.jsonl"
+        lines = [
+            {
+                "timestamp": "2026-02-24T16:09:59.567Z",
+                "type": "session_meta",
+                "payload": {"id": "s1", "cwd": "/home/user/repo", "model_provider": "openai"},
+            },
+            {
+                "timestamp": "2026-02-24T16:10:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "run ls"},
+            },
+            {
+                "timestamp": "2026-02-24T16:10:00.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell_command",
+                    "call_id": "call-x",
+                    "arguments": _json.dumps({"command": "ls", "workdir": "/home/user/repo"}),
+                },
+            },
+            {
+                "timestamp": "2026-02-24T16:10:00.200Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-x",
+                    "output": "Exit code: 0\nWall time: 0 seconds\nOutput:\nfoo.py\nbar.py\n",
+                },
+            },
+            {
+                "timestamp": "2026-02-24T16:10:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Done."},
+            },
+        ]
+        session_file.write_text("\n".join(_json.dumps(l) for l in lines) + "\n")
+
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "codex-sessions")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "codex-archived")
+
+        result = _parse_codex_session_file(
+            session_file, mock_anonymizer, include_thinking=True,
+            target_cwd="/home/user/repo",
+        )
+        assert result is not None
+        assistant_msgs = [m for m in result["messages"] if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        tu = assistant_msgs[0]["tool_uses"][0]
+        assert tu["tool"] == "shell_command"
+        assert tu["status"] == "success"
+        assert tu["output"]["exit_code"] == 0
+        assert "foo.py" in tu["output"]["output"]
