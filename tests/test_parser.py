@@ -396,7 +396,9 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude-projects")
         monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
         monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
         monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser._GEMINI_HASH_MAP", {})
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
 
@@ -943,7 +945,11 @@ class TestDiscoverSubagentProjects:
     def _disable_codex(self, tmp_path, monkeypatch):
         monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
         monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser._GEMINI_HASH_MAP", {})
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
         self._disable_codex(tmp_path, monkeypatch)
