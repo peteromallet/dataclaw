@@ -832,7 +832,7 @@ def _handle_codex_response_item(
         state.pending_tool_uses.append(
             {
                 "tool": tool_name,
-                "input": _summarize_tool_input(tool_name, args_data, anonymizer),
+                "input": {"summary": _summarize_tool_input(tool_name, args_data, anonymizer)},
             }
         )
     elif item_type == "reasoning" and include_thinking:
@@ -1017,7 +1017,7 @@ def _extract_opencode_assistant_content(
             tool_uses.append(
                 {
                     "tool": tool_name,
-                    "input": _summarize_tool_input(tool_name, tool_input, anonymizer),
+                    "input": {"summary": _summarize_tool_input(tool_name, tool_input, anonymizer)},
                 }
             )
 
@@ -1188,7 +1188,7 @@ def _extract_assistant_content(
         elif block_type == "tool_use":
             tool_uses.append({
                 "tool": block.get("name"),
-                "input": _summarize_tool_input(block.get("name"), block.get("input", {}), anonymizer),
+                "input": {"summary": _summarize_tool_input(block.get("name"), block.get("input", {}), anonymizer)},
             })
 
     if not text_parts and not tool_uses and not thinking_parts:
