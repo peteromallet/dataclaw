@@ -4,13 +4,15 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping, cast
 
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, discover_projects, parse_project_sessions
+from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, OPENCODE_DIR, discover_projects, parse_project_sessions
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -56,8 +58,8 @@ SETUP_TO_PUBLISH_STEPS = [
     "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
 
-EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "all", "both"}
-SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "all"]
+EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "opencode", "all", "both"}
+SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "opencode", "all", "both"]
 
 
 def _mask_secret(s: str) -> str:
@@ -67,7 +69,7 @@ def _mask_secret(s: str) -> str:
     return f"{s[:4]}...{s[-4:]}"
 
 
-def _mask_config_for_display(config: dict) -> dict:
+def _mask_config_for_display(config: Mapping[str, Any]) -> dict[str, Any]:
     """Return a copy of config with redact_strings values masked."""
     out = dict(config)
     if out.get("redact_strings"):
@@ -83,7 +85,9 @@ def _source_label(source_filter: str) -> str:
         return "Codex"
     if source_filter == "gemini":
         return "Gemini CLI"
-    return "Claude Code, Codex, or Gemini CLI"
+    if source_filter == "opencode":
+        return "OpenCode"
+    return "Claude Code, Codex, Gemini CLI, or OpenCode"
 
 
 def _normalize_source_filter(source_filter: str) -> str:
@@ -123,7 +127,9 @@ def _has_session_sources(source_filter: str = "auto") -> bool:
         return CODEX_DIR.exists()
     if source_filter == "gemini":
         return GEMINI_DIR.exists()
-    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists()
+    if source_filter == "opencode":
+        return OPENCODE_DIR.exists()
+    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists() or OPENCODE_DIR.exists()
 
 
 def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list[dict]:
@@ -134,11 +140,12 @@ def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list
 
 
 def _format_size(size_bytes: int) -> str:
+    size = float(size_bytes)
     for unit in ("B", "KB", "MB"):
-        if size_bytes < 1024:
-            return f"{size_bytes:.1f} {unit}" if unit != "B" else f"{size_bytes} B"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} GB"
+        if size < 1024:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def _format_token_count(count: int) -> str:
@@ -1119,7 +1126,7 @@ def prep(source_filter: str = "auto") -> None:
         repo_id = default_repo_name(hf_user)
 
     # Build contextual next_steps
-    stage_config = dict(config)
+    stage_config = cast(DataClawConfig, dict(config))
     if source_explicit:
         stage_config["source"] = resolved_source_choice
     next_steps, next_command = _build_status_next_steps(stage, stage_config, hf_user, repo_id)
