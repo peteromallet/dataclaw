@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, discover_projects, parse_project_sessions
+from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, discover_projects, parse_project_sessions
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -49,15 +49,15 @@ EXPORT_REVIEW_PUBLISH_STEPS = [
 
 SETUP_TO_PUBLISH_STEPS = [
     "Step 1/6: Run prep/list to review project scope: dataclaw prep && dataclaw list",
-    "Step 2/6: Explicitly choose source scope: dataclaw config --source <claude|codex|both>",
+    "Step 2/6: Explicitly choose source scope: dataclaw config --source <claude|codex|gemini|all>",
     "Step 3/6: Configure exclusions/redactions and confirm projects: dataclaw config ...",
     "Step 4/6: Export locally only: dataclaw export --no-push --output /tmp/dataclaw_export.jsonl",
     "Step 5/6: Review and confirm: dataclaw confirm ...",
     "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
 
-EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "both"}
-SOURCE_CHOICES = ["auto", "claude", "codex", "both"]
+EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "all", "both"}
+SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "all"]
 
 
 def _mask_secret(s: str) -> str:
@@ -81,11 +81,13 @@ def _source_label(source_filter: str) -> str:
         return "Claude Code"
     if source_filter == "codex":
         return "Codex"
-    return "Claude Code or Codex"
+    if source_filter == "gemini":
+        return "Gemini CLI"
+    return "Claude Code, Codex, or Gemini CLI"
 
 
 def _normalize_source_filter(source_filter: str) -> str:
-    if source_filter == "both":
+    if source_filter in ("all", "both"):
         return "auto"
     return source_filter
 
@@ -102,7 +104,7 @@ def _resolve_source_choice(
 
     Returns:
       (source_choice, explicit) where source_choice is one of
-      "claude" | "codex" | "both" | "auto".
+      "claude" | "codex" | "gemini" | "all" | "auto".
     """
     if _is_explicit_source_choice(requested_source):
         return requested_source, True
@@ -119,7 +121,9 @@ def _has_session_sources(source_filter: str = "auto") -> bool:
         return CLAUDE_DIR.exists()
     if source_filter == "codex":
         return CODEX_DIR.exists()
-    return CLAUDE_DIR.exists() or CODEX_DIR.exists()
+    if source_filter == "gemini":
+        return GEMINI_DIR.exists()
+    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists()
 
 
 def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list[dict]:
@@ -204,14 +208,14 @@ def _build_status_next_steps(
         steps = []
         if not source_confirmed:
             steps.append(
-                "Ask the user to explicitly choose export source scope: Claude Code, Codex, or both. "
-                "Then set it: dataclaw config --source <claude|codex|both>. "
+                "Ask the user to explicitly choose export source scope: Claude Code, Codex, Gemini, or all. "
+                "Then set it: dataclaw config --source <claude|codex|gemini|all>. "
                 "Do not run export until source scope is explicitly confirmed."
             )
         else:
             steps.append(
                 f"Source scope is currently set to '{configured_source}'. "
-                "If the user wants a different scope, run: dataclaw config --source <claude|codex|both>."
+                "If the user wants a different scope, run: dataclaw config --source <claude|codex|gemini|all>."
             )
         if not projects_confirmed:
             steps.append(
@@ -456,6 +460,7 @@ tags:
   - dataclaw
   - claude-code
   - codex-cli
+  - gemini-cli
   - conversations
   - coding-assistant
   - tool-use
@@ -1091,8 +1096,11 @@ def prep(source_filter: str = "auto") -> None:
             err = "~/.claude was not found."
         elif effective_source_filter == "codex":
             err = "~/.codex was not found."
+        elif effective_source_filter == "gemini":
+            from .parser import GEMINI_DIR
+            err = f"{GEMINI_DIR} was not found."
         else:
-            err = "Neither ~/.claude nor ~/.codex was found."
+            err = "None of ~/.claude, ~/.codex, or ~/.gemini/tmp were found."
         print(json.dumps({"error": err}))
         sys.exit(1)
 
@@ -1181,7 +1189,7 @@ def main() -> None:
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
     cfg.add_argument("--source", choices=sorted(EXPLICIT_SOURCE_CHOICES),
-                     help="Set export source scope explicitly: claude, codex, or both")
+                     help="Set export source scope explicitly: claude, codex, gemini, or all")
     cfg.add_argument("--exclude", type=str, help="Comma-separated projects to exclude")
     cfg.add_argument("--redact", type=str,
                      help="Comma-separated strings to always redact (API keys, usernames, domains)")
@@ -1302,17 +1310,17 @@ def _run_export(args) -> None:
             "error": "Source scope is not confirmed yet.",
             "hint": (
                 "Explicitly choose one source scope before exporting: "
-                "`claude`, `codex`, or `both`."
+                "`claude`, `codex`, `gemini`, or `all`."
             ),
             "required_action": (
-                "Ask the user whether to export Claude Code, Codex, or both. "
-                "Then run `dataclaw config --source <claude|codex|both>` "
-                "or pass `--source <claude|codex|both>` on the export command."
+                "Ask the user whether to export Claude Code, Codex, Gemini, or all. "
+                "Then run `dataclaw config --source <claude|codex|gemini|all>` "
+                "or pass `--source <claude|codex|gemini|all>` on the export command."
             ),
             "allowed_sources": sorted(EXPLICIT_SOURCE_CHOICES),
             "blocked_on_step": "Step 2/6",
             "process_steps": SETUP_TO_PUBLISH_STEPS,
-            "next_command": "dataclaw config --source both",
+            "next_command": "dataclaw config --source all",
         }, indent=2))
         sys.exit(1)
 
@@ -1396,8 +1404,11 @@ def _run_export(args) -> None:
             print(f"Error: {CLAUDE_DIR} not found.", file=sys.stderr)
         elif source_filter == "codex":
             print(f"Error: {CODEX_DIR} not found.", file=sys.stderr)
+        elif source_filter == "gemini":
+            from .parser import GEMINI_DIR
+            print(f"Error: {GEMINI_DIR} not found.", file=sys.stderr)
         else:
-            print("Error: neither ~/.claude nor ~/.codex was found.", file=sys.stderr)
+            print("Error: none of ~/.claude, ~/.codex, or ~/.gemini/tmp were found.", file=sys.stderr)
         sys.exit(1)
 
     projects = _filter_projects_by_source(discover_projects(), source_filter)

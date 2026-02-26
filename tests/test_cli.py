@@ -400,7 +400,7 @@ class TestListProjects:
         monkeypatch.setattr("dataclaw.cli.discover_projects", lambda: [])
         list_projects()
         captured = capsys.readouterr()
-        assert "No Claude Code or Codex sessions" in captured.out
+        assert "No Claude Code, Codex, or Gemini CLI sessions" in captured.out
 
     def test_source_filter_codex(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -579,7 +579,7 @@ class TestWorkflowGateMessages:
         assert payload["full_name_scan"]["skipped"] is True
 
     def test_push_before_confirm_shows_step_process(self, monkeypatch, capsys):
-        monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"stage": "review", "source": "both"})
+        monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"stage": "review", "source": "all"})
         monkeypatch.setattr("sys.argv", ["dataclaw", "export"])
         with pytest.raises(SystemExit):
             main()
@@ -602,7 +602,7 @@ class TestWorkflowGateMessages:
                 }
             ],
         )
-        monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"source": "both"})
+        monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"source": "all"})
         monkeypatch.setattr("sys.argv", ["dataclaw", "export", "--no-push"])
         with pytest.raises(SystemExit):
             main()
@@ -626,8 +626,8 @@ class TestWorkflowGateMessages:
         assert payload["error"] == "Source scope is not confirmed yet."
         assert payload["blocked_on_step"] == "Step 2/6"
         assert len(payload["process_steps"]) == 6
-        assert payload["allowed_sources"] == ["both", "claude", "codex"]
-        assert payload["next_command"] == "dataclaw config --source both"
+        assert payload["allowed_sources"] == ["all", "both", "claude", "codex", "gemini"]
+        assert payload["next_command"] == "dataclaw config --source all"
 
     def test_configure_next_steps_require_full_folder_presentation(self):
         steps, _next = _build_status_next_steps(

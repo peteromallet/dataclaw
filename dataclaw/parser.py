@@ -1,6 +1,7 @@
 """Parse Claude Code and Codex session JSONL files into structured conversations."""
 
 import dataclasses
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_SOURCE = "claude"
 CODEX_SOURCE = "codex"
+GEMINI_SOURCE = "gemini"
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -23,7 +25,75 @@ CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
 CODEX_ARCHIVED_DIR = CODEX_DIR / "archived_sessions"
 UNKNOWN_CODEX_CWD = "<unknown-cwd>"
 
+GEMINI_DIR = Path.home() / ".gemini" / "tmp"
+
 _CODEX_PROJECT_INDEX: dict[str, list[Path]] = {}
+_GEMINI_HASH_MAP: dict[str, str] = {}
+
+
+def _build_gemini_hash_map() -> dict[str, str]:
+    """Build a mapping from SHA-256 hash prefix to directory path.
+
+    Gemini CLI names project dirs by hashing the absolute working directory path.
+    We scan first-level dirs under $HOME to reverse this mapping.
+    """
+    result: dict[str, str] = {}
+    home = Path.home()
+    try:
+        for entry in home.iterdir():
+            if entry.is_dir() and not entry.name.startswith("."):
+                h = hashlib.sha256(str(entry).encode()).hexdigest()
+                result[h] = str(entry)
+    except OSError:
+        pass
+    return result
+
+
+def _extract_project_path_from_sessions(project_hash: str) -> str | None:
+    """Try to extract the project working directory from session tool call file paths."""
+    chats_dir = GEMINI_DIR / project_hash / "chats"
+    if not chats_dir.exists():
+        return None
+    for session_file in sorted(chats_dir.glob("session-*.json"), reverse=True):
+        try:
+            data = json.loads(session_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        for msg in data.get("messages", []):
+            for tc in msg.get("toolCalls", []):
+                fp = tc.get("args", {}).get("file_path") or tc.get("args", {}).get("path", "")
+                if fp.startswith("/"):
+                    # Extract the shallowest directory and verify its hash matches
+                    parts = Path(fp).parts  # e.g. ('/', 'home', 'wd', 'project', ...)
+                    for depth in range(3, len(parts)):
+                        candidate = str(Path(*parts[:depth + 1]))
+                        if hashlib.sha256(candidate.encode()).hexdigest() == project_hash:
+                            return candidate
+        # Only check the most recent session file with tool calls
+        break
+    return None
+
+
+def _resolve_gemini_hash(project_hash: str) -> str:
+    """Resolve a Gemini project hash to a readable directory name.
+
+    Strategy:
+    1. Check hash map built from first-level dirs under $HOME.
+    2. Fallback: extract path from session file tool call args.
+    3. Last resort: return first 8 chars of the hash.
+    """
+    global _GEMINI_HASH_MAP
+    if not _GEMINI_HASH_MAP:
+        _GEMINI_HASH_MAP = _build_gemini_hash_map()
+    full_path = _GEMINI_HASH_MAP.get(project_hash)
+    if full_path:
+        return Path(full_path).name
+    # Fallback: try extracting from session files
+    extracted = _extract_project_path_from_sessions(project_hash)
+    if extracted:
+        _GEMINI_HASH_MAP[project_hash] = extracted  # cache it
+        return Path(extracted).name
+    return project_hash[:8]
 
 
 def _iter_jsonl(filepath: Path):
@@ -40,9 +110,10 @@ def _iter_jsonl(filepath: Path):
 
 
 def discover_projects() -> list[dict]:
-    """Discover Claude Code and Codex projects with session counts."""
+    """Discover Claude Code, Codex, and Gemini CLI projects with session counts."""
     projects = _discover_claude_projects()
     projects.extend(_discover_codex_projects())
+    projects.extend(_discover_gemini_projects())
     return sorted(projects, key=lambda p: (p["display_name"], p["source"]))
 
 
@@ -93,6 +164,32 @@ def _discover_codex_projects() -> list[dict]:
     return projects
 
 
+def _discover_gemini_projects() -> list[dict]:
+    if not GEMINI_DIR.exists():
+        return []
+
+    projects = []
+    for project_dir in sorted(GEMINI_DIR.iterdir()):
+        if not project_dir.is_dir() or project_dir.name == "bin":
+            continue
+        chats_dir = project_dir / "chats"
+        if not chats_dir.exists():
+            continue
+        sessions = list(chats_dir.glob("session-*.json"))
+        if not sessions:
+            continue
+        projects.append(
+            {
+                "dir_name": project_dir.name,
+                "display_name": f"gemini:{_resolve_gemini_hash(project_dir.name)}",
+                "session_count": len(sessions),
+                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+                "source": GEMINI_SOURCE,
+            }
+        )
+    return projects
+
+
 def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
@@ -100,6 +197,19 @@ def parse_project_sessions(
     source: str = CLAUDE_SOURCE,
 ) -> list[dict]:
     """Parse all sessions for a project into structured dicts."""
+    if source == GEMINI_SOURCE:
+        project_path = GEMINI_DIR / project_dir_name / "chats"
+        if not project_path.exists():
+            return []
+        sessions = []
+        for session_file in sorted(project_path.glob("session-*.json")):
+            parsed = _parse_gemini_session_file(session_file, anonymizer, include_thinking)
+            if parsed and parsed["messages"]:
+                parsed["project"] = f"gemini:{_resolve_gemini_hash(project_dir_name)}"
+                parsed["source"] = GEMINI_SOURCE
+                sessions.append(parsed)
+        return sessions
+
     if source == CODEX_SOURCE:
         index = _get_codex_project_index()
         session_files = index.get(project_dir_name, [])
@@ -254,6 +364,97 @@ def _parse_subagent_session(
 
     for _ts, entry in timed_entries:
         _process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+
+    return _make_session_result(metadata, messages, stats)
+
+
+def _parse_gemini_session_file(
+    filepath: Path, anonymizer: Anonymizer, include_thinking: bool = True
+) -> dict | None:
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    messages = []
+    metadata = {
+        "session_id": data.get("sessionId", filepath.stem),
+        "cwd": None,
+        "git_branch": None,
+        "model": None,
+        "start_time": data.get("startTime"),
+        "end_time": data.get("lastUpdated"),
+    }
+    stats = _make_stats()
+
+    for msg_data in data.get("messages", []):
+        msg_type = msg_data.get("type")
+        timestamp = msg_data.get("timestamp")
+
+        if msg_type == "user":
+            content = msg_data.get("content")
+            if isinstance(content, list):
+                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and "text" in part]
+                text = "\n".join(text_parts)
+            elif isinstance(content, str):
+                text = content
+            else:
+                continue
+            if not text.strip():
+                continue
+            messages.append({
+                "role": "user",
+                "content": anonymizer.text(text.strip()),
+                "timestamp": timestamp,
+            })
+            stats["user_messages"] += 1
+            _update_time_bounds(metadata, timestamp)
+
+        elif msg_type == "gemini":
+            if metadata["model"] is None:
+                metadata["model"] = msg_data.get("model")
+
+            tokens = msg_data.get("tokens", {})
+            if tokens:
+                stats["input_tokens"] += tokens.get("input", 0) + tokens.get("cached", 0)
+                stats["output_tokens"] += tokens.get("output", 0)
+
+            msg = {"role": "assistant"}
+            if timestamp:
+                msg["timestamp"] = timestamp
+
+            content = msg_data.get("content")
+            if isinstance(content, str) and content.strip():
+                msg["content"] = anonymizer.text(content.strip())
+
+            if include_thinking:
+                thoughts = msg_data.get("thoughts", [])
+                if thoughts:
+                    thought_texts = []
+                    for t in thoughts:
+                        if "description" in t and isinstance(t["description"], str):
+                            thought_texts.append(t["description"].strip())
+                    if thought_texts:
+                        msg["thinking"] = anonymizer.text("\n\n".join(thought_texts))
+
+            tool_uses = []
+            for tc in msg_data.get("toolCalls", []):
+                tool_name = tc.get("name")
+                args_data = tc.get("args", {})
+                tool_uses.append({
+                    "tool": tool_name,
+                    "input": _summarize_tool_input(tool_name, args_data, anonymizer)
+                })
+
+            if tool_uses:
+                msg["tool_uses"] = tool_uses
+                stats["tool_uses"] += len(tool_uses)
+
+            if "content" in msg or "thinking" in msg or "tool_uses" in msg:
+                messages.append(msg)
+                stats["assistant_messages"] += 1
+                _update_time_bounds(metadata, timestamp)
 
     return _make_session_result(metadata, messages, stats)
 
