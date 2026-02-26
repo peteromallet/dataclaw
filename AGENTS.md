@@ -1,15 +1,6 @@
----
-name: dataclaw
-description: >
-  Export Claude Code, Codex, Gemini CLI, and OpenCode conversation history to Hugging Face.
-  Use when the user asks about exporting conversations, uploading to Hugging Face,
-  configuring DataClaw, reviewing PII/secrets in exports, or managing their dataset.
-allowed-tools: Bash(dataclaw *), Bash(huggingface-cli login *), Bash(pip install dataclaw*), Bash(grep *)
----
+# DataClaw
 
-<!-- dataclaw-begin -->
-
-# DataClaw Skill
+Export Claude Code, Codex, Gemini CLI, and OpenCode conversation history to Hugging Face.
 
 ## THE RULE
 
@@ -80,7 +71,6 @@ dataclaw export --source opencode --no-push # Export only OpenCode sessions
 dataclaw export --all-projects             # Include everything (ignore exclusions)
 dataclaw export --no-thinking              # Exclude extended thinking blocks
 dataclaw export -o /path/to/file.jsonl     # Custom output path
-dataclaw update-skill claude               # Install/update the dataclaw skill for Claude Code
 ```
 
 ## Gotchas
@@ -94,8 +84,8 @@ dataclaw update-skill claude               # Install/update the dataclaw skill f
 - **PII audit is critical** — automated redaction is not foolproof.
 - **Large exports take time** — 500+ sessions may take 1-3 minutes. Use a generous timeout.
 
-## Prerequisite
+## Install
 
-`command -v dataclaw >/dev/null 2>&1 && echo "dataclaw: installed" || echo "NOT INSTALLED — run: pip install dataclaw"`
-
-<!-- dataclaw-end -->
+```bash
+pip install dataclaw
+```

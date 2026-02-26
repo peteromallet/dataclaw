@@ -13,7 +13,7 @@ Every export is tagged **`dataclaw`** on Hugging Face. Together, they may someda
 Paste this into Claude Code, Codex, or any coding agent:
 
 ```
-Help me export my Claude Code, Codex, and Gemini CLI conversation history to Hugging Face using DataClaw.
+Help me export my Claude Code, Codex, Gemini CLI, and OpenCode conversation history to Hugging Face using DataClaw.
 Install it, set up the skill, then walk me through the process.
 
 STEP 1 — INSTALL
@@ -29,12 +29,12 @@ STEP 3 — START
   Every dataclaw command outputs next_steps in its JSON — follow them through the entire flow.
 
 STEP 3A — CHOOSE SOURCE SCOPE (REQUIRED BEFORE EXPORT)
-  Ask the user explicitly: Claude Code, Codex, Gemini CLI, or all?
-  dataclaw config --source "claude|codex|gemini|all"
+  Ask the user explicitly: Claude Code, Codex, Gemini CLI, OpenCode, or all?
+  dataclaw config --source "claude|codex|gemini|opencode|all"
   Do not export until source scope is explicitly confirmed.
 
 STEP 3B — PRESENT ALL FOLDERS (REQUIRED BEFORE EXPORT)
-  dataclaw list --source "claude|codex|gemini|all"
+  dataclaw list --source "claude|codex|gemini|opencode|all"
   Send the FULL project/folder list to the user in a message (name, source, sessions, size, excluded).
   Ask which projects to exclude.
   dataclaw config --exclude "project1,project2" OR dataclaw config --confirm-projects
@@ -69,7 +69,7 @@ huggingface-cli login --token YOUR_TOKEN
 
 # See your projects
 dataclaw prep
-dataclaw config --source all  # REQUIRED: choose claude, codex, gemini, or all
+dataclaw config --source all  # REQUIRED: choose claude, codex, gemini, opencode, or all
 dataclaw list --source all  # Present full list and confirm folder scope before export
 
 # Configure
@@ -105,25 +105,27 @@ dataclaw export --publish-attestation "User explicitly approved publishing to Hu
 |---------|-------------|
 | `dataclaw status` | Show current stage and next steps (JSON) |
 | `dataclaw prep` | Discover projects, check HF auth, output JSON |
-| `dataclaw prep --source all` | Prep with Claude, Codex, and Gemini explicitly selected |
-| `dataclaw prep --source gemini` | Prep using only Gemini CLI sessions |
-| `dataclaw prep --source codex` | Prep using only Codex sessions |
+| `dataclaw prep --source all` | Prep with all sources explicitly selected |
 | `dataclaw prep --source claude` | Prep using only Claude Code sessions |
+| `dataclaw prep --source codex` | Prep using only Codex sessions |
+| `dataclaw prep --source gemini` | Prep using only Gemini CLI sessions |
+| `dataclaw prep --source opencode` | Prep using only OpenCode sessions |
 | `dataclaw list` | List all projects with exclusion status |
-| `dataclaw list --source all` | List Claude, Codex, and Gemini projects |
+| `dataclaw list --source all` | List all sources |
 | `dataclaw list --source codex` | List only Codex projects |
 | `dataclaw config` | Show current config |
 | `dataclaw config --repo user/my-personal-codex-data` | Set HF repo |
-| `dataclaw config --source all` | REQUIRED source scope selection (`claude`, `codex`, `gemini`, or `all`) |
+| `dataclaw config --source all` | REQUIRED source scope selection (`claude`, `codex`, `gemini`, `opencode`, or `all`) |
 | `dataclaw config --exclude "a,b"` | Add excluded projects (appends) |
 | `dataclaw config --redact "str1,str2"` | Add strings to always redact (appends) |
 | `dataclaw config --redact-usernames "u1,u2"` | Add usernames to anonymize (appends) |
 | `dataclaw config --confirm-projects` | Mark project selection as confirmed |
 | `dataclaw export --no-push` | Export locally only (always do this first) |
-| `dataclaw export --source all --no-push` | Export Claude, Codex, and Gemini sessions locally |
-| `dataclaw export --source codex --no-push` | Export only Codex sessions locally |
+| `dataclaw export --source all --no-push` | Export all sources locally |
 | `dataclaw export --source claude --no-push` | Export only Claude Code sessions locally |
+| `dataclaw export --source codex --no-push` | Export only Codex sessions locally |
 | `dataclaw export --source gemini --no-push` | Export only Gemini CLI sessions locally |
+| `dataclaw export --source opencode --no-push` | Export only OpenCode sessions locally |
 | `dataclaw confirm --full-name "NAME" --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Scan for PII, run exact-name privacy check, verify review attestations, unlock pushing |
 | `dataclaw confirm --skip-full-name-scan --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Skip exact-name scan when user declines sharing full name (requires skip attestation) |
 | `dataclaw export --publish-attestation "..."` | Export and push (requires `dataclaw confirm` first) |
