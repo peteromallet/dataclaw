@@ -400,6 +400,7 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
 
     def _write_opencode_db(self, db_path):
         conn = sqlite3.connect(db_path)
@@ -948,6 +949,7 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
         self._disable_codex(tmp_path, monkeypatch)

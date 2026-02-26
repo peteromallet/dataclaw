@@ -400,7 +400,7 @@ class TestListProjects:
         monkeypatch.setattr("dataclaw.cli.discover_projects", lambda: [])
         list_projects()
         captured = capsys.readouterr()
-        assert "No Claude Code, Codex, Gemini CLI, or OpenCode sessions" in captured.out
+        assert "No Claude Code, Codex, Gemini CLI, OpenCode, or Kimi CLI sessions" in captured.out
 
     def test_source_filter_codex(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -626,7 +626,7 @@ class TestWorkflowGateMessages:
         assert payload["error"] == "Source scope is not confirmed yet."
         assert payload["blocked_on_step"] == "Step 2/6"
         assert len(payload["process_steps"]) == 6
-        assert payload["allowed_sources"] == ["all", "both", "claude", "codex", "gemini", "opencode"]
+        assert payload["allowed_sources"] == ["all", "both", "claude", "codex", "gemini", "kimi", "opencode"]
         assert payload["next_command"] == "dataclaw config --source all"
 
     def test_configure_next_steps_require_full_folder_presentation(self):

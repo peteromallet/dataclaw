@@ -12,7 +12,7 @@ from typing import Any, Mapping, cast
 
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, OPENCODE_DIR, discover_projects, parse_project_sessions
+from .parser import CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, OPENCODE_DIR, KIMI_DIR, discover_projects, parse_project_sessions
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -58,8 +58,8 @@ SETUP_TO_PUBLISH_STEPS = [
     "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
 
-EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "opencode", "all", "both"}
-SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "opencode", "all"]
+EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "gemini", "opencode", "kimi", "all", "both"}
+SOURCE_CHOICES = ["auto", "claude", "codex", "gemini", "opencode", "kimi", "all"]
 
 
 def _mask_secret(s: str) -> str:
@@ -87,7 +87,9 @@ def _source_label(source_filter: str) -> str:
         return "Gemini CLI"
     if source_filter == "opencode":
         return "OpenCode"
-    return "Claude Code, Codex, Gemini CLI, or OpenCode"
+    if source_filter == "kimi":
+        return "Kimi CLI"
+    return "Claude Code, Codex, Gemini CLI, OpenCode, or Kimi CLI"
 
 
 def _normalize_source_filter(source_filter: str) -> str:
@@ -129,7 +131,9 @@ def _has_session_sources(source_filter: str = "auto") -> bool:
         return GEMINI_DIR.exists()
     if source_filter == "opencode":
         return OPENCODE_DIR.exists()
-    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists() or OPENCODE_DIR.exists()
+    if source_filter == "kimi":
+        return KIMI_DIR.exists()
+    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or GEMINI_DIR.exists() or OPENCODE_DIR.exists() or KIMI_DIR.exists()
 
 
 def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list[dict]:
@@ -215,14 +219,14 @@ def _build_status_next_steps(
         steps = []
         if not source_confirmed:
             steps.append(
-                "Ask the user to explicitly choose export source scope: Claude Code, Codex, Gemini, or all. "
-                "Then set it: dataclaw config --source <claude|codex|gemini|all>. "
+                "Ask the user to explicitly choose export source scope: Claude Code, Codex, Gemini, OpenCode, Kimi, or all. "
+                "Then set it: dataclaw config --source <claude|codex|gemini|opencode|kimi|all>. "
                 "Do not run export until source scope is explicitly confirmed."
             )
         else:
             steps.append(
                 f"Source scope is currently set to '{configured_source}'. "
-                "If the user wants a different scope, run: dataclaw config --source <claude|codex|gemini|all>."
+                "If the user wants a different scope, run: dataclaw config --source <claude|codex|gemini|opencode|kimi|all>."
             )
         if not projects_confirmed:
             steps.append(
@@ -1196,7 +1200,7 @@ def main() -> None:
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
     cfg.add_argument("--source", choices=sorted(EXPLICIT_SOURCE_CHOICES),
-                     help="Set export source scope explicitly: claude, codex, gemini, or all")
+                     help="Set export source scope explicitly: claude, codex, gemini, opencode, kimi, or all")
     cfg.add_argument("--exclude", type=str, help="Comma-separated projects to exclude")
     cfg.add_argument("--redact", type=str,
                      help="Comma-separated strings to always redact (API keys, usernames, domains)")
@@ -1317,12 +1321,12 @@ def _run_export(args) -> None:
             "error": "Source scope is not confirmed yet.",
             "hint": (
                 "Explicitly choose one source scope before exporting: "
-                "`claude`, `codex`, `gemini`, or `all`."
+                "`claude`, `codex`, `gemini`, `opencode`, `kimi`, or `all`."
             ),
             "required_action": (
-                "Ask the user whether to export Claude Code, Codex, Gemini, or all. "
-                "Then run `dataclaw config --source <claude|codex|gemini|all>` "
-                "or pass `--source <claude|codex|gemini|all>` on the export command."
+                "Ask the user whether to export Claude Code, Codex, Gemini, OpenCode, Kimi, or all. "
+                "Then run `dataclaw config --source <claude|codex|gemini|opencode|kimi|all>` "
+                "or pass `--source <claude|codex|gemini|opencode|kimi|all>` on the export command."
             ),
             "allowed_sources": sorted(EXPLICIT_SOURCE_CHOICES),
             "blocked_on_step": "Step 2/6",
@@ -1414,8 +1418,13 @@ def _run_export(args) -> None:
         elif source_filter == "gemini":
             from .parser import GEMINI_DIR
             print(f"Error: {GEMINI_DIR} not found.", file=sys.stderr)
+        elif source_filter == "opencode":
+            from .parser import OPENCODE_DIR
+            print(f"Error: {OPENCODE_DIR} not found.", file=sys.stderr)
+        elif source_filter == "kimi":
+            print(f"Error: {KIMI_DIR} not found.", file=sys.stderr)
         else:
-            print("Error: none of ~/.claude, ~/.codex, or ~/.gemini/tmp were found.", file=sys.stderr)
+            print("Error: none of ~/.claude, ~/.codex, ~/.gemini/tmp, ~/.local/share/opencode, or ~/.kimi were found.", file=sys.stderr)
         sys.exit(1)
 
     projects = _filter_projects_by_source(discover_projects(), source_filter)
