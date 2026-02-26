@@ -1,8 +1,9 @@
-"""Parse Claude Code and Codex session JSONL files into structured conversations."""
+"""Parse Claude Code, Codex, and OpenCode session data into conversations."""
 
 import dataclasses
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_SOURCE = "claude"
 CODEX_SOURCE = "codex"
+OPENCODE_SOURCE = "opencode"
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -23,7 +25,12 @@ CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
 CODEX_ARCHIVED_DIR = CODEX_DIR / "archived_sessions"
 UNKNOWN_CODEX_CWD = "<unknown-cwd>"
 
+OPENCODE_DIR = Path.home() / ".local" / "share" / "opencode"
+OPENCODE_DB_PATH = OPENCODE_DIR / "opencode.db"
+UNKNOWN_OPENCODE_CWD = "<unknown-cwd>"
+
 _CODEX_PROJECT_INDEX: dict[str, list[Path]] = {}
+_OPENCODE_PROJECT_INDEX: dict[str, list[str]] = {}
 
 
 def _iter_jsonl(filepath: Path):
@@ -43,6 +50,7 @@ def discover_projects() -> list[dict]:
     """Discover Claude Code and Codex projects with session counts."""
     projects = _discover_claude_projects()
     projects.extend(_discover_codex_projects())
+    projects.extend(_discover_opencode_projects())
     return sorted(projects, key=lambda p: (p["display_name"], p["source"]))
 
 
@@ -87,6 +95,28 @@ def _discover_codex_projects() -> list[dict]:
     return projects
 
 
+def _discover_opencode_projects() -> list[dict]:
+    index = _get_opencode_project_index(refresh=True)
+    total_sessions = sum(len(session_ids) for session_ids in index.values())
+    db_size = OPENCODE_DB_PATH.stat().st_size if OPENCODE_DB_PATH.exists() else 0
+
+    projects = []
+    for cwd, session_ids in sorted(index.items()):
+        if not session_ids:
+            continue
+        estimated_size = int(db_size * (len(session_ids) / total_sessions)) if total_sessions else 0
+        projects.append(
+            {
+                "dir_name": cwd,
+                "display_name": _build_opencode_project_name(cwd),
+                "session_count": len(session_ids),
+                "total_size_bytes": estimated_size,
+                "source": OPENCODE_SOURCE,
+            }
+        )
+    return projects
+
+
 def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
@@ -94,6 +124,23 @@ def parse_project_sessions(
     source: str = CLAUDE_SOURCE,
 ) -> list[dict]:
     """Parse all sessions for a project into structured dicts."""
+    if source == OPENCODE_SOURCE:
+        index = _get_opencode_project_index()
+        session_ids = index.get(project_dir_name, [])
+        sessions = []
+        for session_id in session_ids:
+            parsed = _parse_opencode_session(
+                session_id,
+                anonymizer=anonymizer,
+                include_thinking=include_thinking,
+                target_cwd=project_dir_name,
+            )
+            if parsed and parsed["messages"]:
+                parsed["project"] = _build_opencode_project_name(project_dir_name)
+                parsed["source"] = OPENCODE_SOURCE
+                sessions.append(parsed)
+        return sessions
+
     if source == CODEX_SOURCE:
         index = _get_codex_project_index()
         session_files = index.get(project_dir_name, [])
@@ -123,6 +170,98 @@ def parse_project_sessions(
             parsed["source"] = CLAUDE_SOURCE
             sessions.append(parsed)
     return sessions
+
+
+def _parse_opencode_session(
+    session_id: str,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+    target_cwd: str,
+) -> dict | None:
+    if not OPENCODE_DB_PATH.exists():
+        return None
+
+    messages: list[dict[str, Any]] = []
+    metadata: dict[str, Any] = {
+        "session_id": session_id,
+        "cwd": None,
+        "git_branch": None,
+        "model": None,
+        "start_time": None,
+        "end_time": None,
+    }
+    stats = _make_stats()
+
+    try:
+        with sqlite3.connect(OPENCODE_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            session_row = conn.execute(
+                "SELECT id, directory, time_created, time_updated FROM session WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if session_row is None:
+                return None
+
+            raw_cwd = session_row["directory"]
+            if isinstance(raw_cwd, str) and raw_cwd.strip():
+                if raw_cwd != target_cwd:
+                    return None
+                metadata["cwd"] = anonymizer.path(raw_cwd)
+            elif target_cwd != UNKNOWN_OPENCODE_CWD:
+                return None
+
+            metadata["start_time"] = _normalize_timestamp(session_row["time_created"])
+            metadata["end_time"] = _normalize_timestamp(session_row["time_updated"])
+
+            message_rows = conn.execute(
+                "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+                (session_id,),
+            ).fetchall()
+
+            for message_row in message_rows:
+                message_data = _load_json_field(message_row["data"])
+                role = message_data.get("role")
+                timestamp = _normalize_timestamp(message_row["time_created"])
+
+                model = _extract_opencode_model(message_data)
+                if metadata["model"] is None and model:
+                    metadata["model"] = model
+
+                part_rows = conn.execute(
+                    "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC",
+                    (message_row["id"],),
+                ).fetchall()
+                parts = [_load_json_field(part_row["data"]) for part_row in part_rows]
+
+                if role == "user":
+                    content = _extract_opencode_user_content(parts, anonymizer)
+                    if content is not None:
+                        messages.append({"role": "user", "content": content, "timestamp": timestamp})
+                        stats["user_messages"] += 1
+                        _update_time_bounds(metadata, timestamp)
+                elif role == "assistant":
+                    msg = _extract_opencode_assistant_content(parts, anonymizer, include_thinking)
+                    if msg:
+                        msg["timestamp"] = timestamp
+                        messages.append(msg)
+                        stats["assistant_messages"] += 1
+                        stats["tool_uses"] += len(msg.get("tool_uses", []))
+                        _update_time_bounds(metadata, timestamp)
+
+                    tokens = message_data.get("tokens", {})
+                    if isinstance(tokens, dict):
+                        cache = tokens.get("cache", {})
+                        cache_read = _safe_int(cache.get("read")) if isinstance(cache, dict) else 0
+                        cache_write = _safe_int(cache.get("write")) if isinstance(cache, dict) else 0
+                        stats["input_tokens"] += _safe_int(tokens.get("input")) + cache_read + cache_write
+                        stats["output_tokens"] += _safe_int(tokens.get("output"))
+    except (sqlite3.Error, OSError):
+        return None
+
+    if metadata["model"] is None:
+        metadata["model"] = "opencode-unknown"
+
+    return _make_session_result(metadata, messages, stats)
 
 
 def _make_stats() -> dict[str, int]:
@@ -414,6 +553,92 @@ def _safe_int(value: Any) -> int:
     return 0
 
 
+def _load_json_field(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _extract_opencode_model(message_data: dict[str, Any]) -> str | None:
+    model = message_data.get("model")
+    if not isinstance(model, dict):
+        return None
+    provider_id = model.get("providerID")
+    model_id = model.get("modelID")
+    if isinstance(provider_id, str) and provider_id.strip() and isinstance(model_id, str) and model_id.strip():
+        return f"{provider_id}/{model_id}"
+    if isinstance(model_id, str) and model_id.strip():
+        return model_id
+    return None
+
+
+def _extract_opencode_user_content(parts: list[dict[str, Any]], anonymizer: Anonymizer) -> str | None:
+    text_parts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") != "text":
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            text_parts.append(anonymizer.text(text.strip()))
+
+    if not text_parts:
+        return None
+    return "\n\n".join(text_parts)
+
+
+def _extract_opencode_assistant_content(
+    parts: list[dict[str, Any]], anonymizer: Anonymizer, include_thinking: bool,
+) -> dict[str, Any] | None:
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    tool_uses: list[dict[str, str | None]] = []
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+
+        if part_type == "text":
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(anonymizer.text(text.strip()))
+        elif part_type == "reasoning" and include_thinking:
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                thinking_parts.append(anonymizer.text(text.strip()))
+        elif part_type == "tool":
+            tool_name = part.get("tool")
+            state = part.get("state", {})
+            tool_input = state.get("input", {}) if isinstance(state, dict) else {}
+            tool_uses.append(
+                {
+                    "tool": tool_name,
+                    "input": _summarize_tool_input(tool_name, tool_input, anonymizer),
+                }
+            )
+
+    if not text_parts and not thinking_parts and not tool_uses:
+        return None
+
+    msg: dict[str, Any] = {"role": "assistant"}
+    if text_parts:
+        msg["content"] = "\n\n".join(text_parts)
+    if thinking_parts:
+        msg["thinking"] = "\n\n".join(thinking_parts)
+    if tool_uses:
+        msg["tool_uses"] = tool_uses
+    return msg
+
+
 def _get_codex_project_index(refresh: bool = False) -> dict[str, list[Path]]:
     global _CODEX_PROJECT_INDEX
     if refresh or not _CODEX_PROJECT_INDEX:
@@ -454,6 +679,40 @@ def _build_codex_project_name(cwd: str) -> str:
     if cwd == UNKNOWN_CODEX_CWD:
         return "codex:unknown"
     return f"codex:{Path(cwd).name or cwd}"
+
+
+def _build_opencode_project_name(cwd: str) -> str:
+    if cwd == UNKNOWN_OPENCODE_CWD:
+        return "opencode:unknown"
+    return f"opencode:{Path(cwd).name or cwd}"
+
+
+def _get_opencode_project_index(refresh: bool = False) -> dict[str, list[str]]:
+    global _OPENCODE_PROJECT_INDEX
+    if refresh or not _OPENCODE_PROJECT_INDEX:
+        _OPENCODE_PROJECT_INDEX = _build_opencode_project_index()
+    return _OPENCODE_PROJECT_INDEX
+
+
+def _build_opencode_project_index() -> dict[str, list[str]]:
+    if not OPENCODE_DB_PATH.exists():
+        return {}
+
+    index: dict[str, list[str]] = {}
+    try:
+        with sqlite3.connect(OPENCODE_DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT id, directory FROM session ORDER BY time_updated DESC, id DESC"
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    for session_id, cwd in rows:
+        normalized_cwd = cwd if isinstance(cwd, str) and cwd.strip() else UNKNOWN_OPENCODE_CWD
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        index.setdefault(normalized_cwd, []).append(session_id)
+    return index
 
 
 def _process_entry(
@@ -540,7 +799,7 @@ def _extract_assistant_content(
     if not text_parts and not tool_uses and not thinking_parts:
         return None
 
-    msg = {"role": "assistant"}
+    msg: dict[str, Any] = {"role": "assistant"}
     if text_parts:
         msg["content"] = "\n\n".join(text_parts)
     if thinking_parts:
