@@ -29,29 +29,25 @@ def anonymize_text(text: str, username: str, username_hash: str, home: str | Non
 
     # When username is < 4 chars, replace with more specific patterns
 
-    # Replace /Users/<username> , \Users\<username> , \\Users\\<username>
+    # Match /Users/username , \Users\username , \\Users\\username , -Users-username (hyphen-encoded path like Claude Code and HuggingFace cache)
+    # Match conventional indicators of home dir: 'Users' and 'home'
     # Ignore case for Windows-like pattern
-    text = re.sub(rf"([/\\]+Users[/\\]+){escaped}(?=[^a-zA-Z0-9]|$)", rf"\g<1>{username_hash}", text, flags=re.IGNORECASE)
-
-    # Replace /home/<username>
-    text = re.sub(rf"/home/{escaped}(?=[^a-zA-Z0-9]|$)", f"/home/{username_hash}", text)
+    text = re.sub(rf"([/\\-]+(Users|home)[/\\-]+){escaped}(?=[^a-zA-Z0-9]|$)", rf"\g<1>{username_hash}", text, flags=re.IGNORECASE)
 
     # If home is not conventional, replace it with more specific pattern
     if home and not home.startswith(("/Users/", "/home/", "C:\\Users\\")):
-        # Escape home and replace / or \ with `r"[/\\]+"`
+        # Escape home and replace / or \ with `r"[/\\-]+"`
         home_escaped = home.replace("\\", "/")
         home_escaped = re.escape(home_escaped)
-        home_escaped = home_escaped.replace("/", r"[/\\]+")
+        home_escaped = home_escaped.replace("/", r"[/\\-]+")
+        # In WSL and MSYS2, C:\ may be represented by /c/
+        home_escaped = home_escaped.replace(":", ":?")
 
         def f(match):
             # match.group(0) is a non-escaped string
             return re.sub(rf"(?<![a-zA-Z0-9]){escaped}(?![a-zA-Z0-9])", username_hash, match.group(0), flags=re.IGNORECASE)
 
         text = re.sub(home_escaped, f, text, flags=re.IGNORECASE)
-
-    # Catch hyphen-encoded paths: -Users-username- or -Users-username/
-    text = re.sub(rf"-Users-{escaped}(?=[^a-zA-Z0-9]|$)", f"-Users-{username_hash}", text, flags=re.IGNORECASE)
-    text = re.sub(rf"-home-{escaped}(?=[^a-zA-Z0-9]|$)", f"-home-{username_hash}", text)
 
     return text
 
