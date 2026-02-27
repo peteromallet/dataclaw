@@ -68,6 +68,34 @@ class TestAnonymizePath:
         )
         assert result == "/var/log/syslog"
 
+    def test_windows_users_path(self):
+        result = anonymize_path(
+            r"C:\Users\bob\Documents\file.txt",
+            "bob", "user_abc12345",
+        )
+        assert result == r"C:\Users\user_abc12345\Documents\file.txt"
+
+    def test_windows_users_path_double_backslashes(self):
+        result = anonymize_path(
+            r"\\Users\\bob\\Documents\\file.txt",
+            "bob", "user_abc12345",
+        )
+        assert result == r"\\Users\\user_abc12345\\Documents\\file.txt"
+
+    def test_windows_custom_home_path(self):
+        result = anonymize_path(
+            "C:\\custom_home\\bob\\project\\file.py",
+            "bob", "user_abc12345", home=r"C:\custom_home\bob",
+        )
+        assert result == "C:\\custom_home\\user_abc12345\\project\\file.py"
+
+    def test_msys2_custom_home_path(self):
+        result = anonymize_path(
+            "/c/custom_home/bob/project/file.py",
+            "bob", "user_abc12345", home=r"C:\custom_home\bob",
+        )
+        assert result == "/c/custom_home/user_abc12345/project/file.py"
+
 
 # --- anonymize_text ---
 
