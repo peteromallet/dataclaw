@@ -39,56 +39,62 @@ class TestAnonymizePath:
     def test_empty_path(self):
         assert anonymize_path("", "alice", "user_abc12345") == ""
 
-    def test_documents_prefix_stripped(self):
+    def test_global_replace(self):
+        # if username is >= 4 chars, username is hashed using global replace
         result = anonymize_path(
-            "/Users/alice/Documents/myproject/src/main.py",
-            "alice", "user_abc12345", home="/Users/alice",
+            "/Users/alice/something",
+            "alice", "user_abc12345"
         )
-        assert result == "myproject/src/main.py"
-
-    def test_downloads_prefix_stripped(self):
-        result = anonymize_path(
-            "/Users/alice/Downloads/file.zip",
-            "alice", "user_abc12345", home="/Users/alice",
-        )
-        assert result == "file.zip"
-
-    def test_desktop_prefix_stripped(self):
-        result = anonymize_path(
-            "/Users/alice/Desktop/notes.txt",
-            "alice", "user_abc12345", home="/Users/alice",
-        )
-        assert result == "notes.txt"
+        assert result == "/Users/user_abc12345/something"
 
     def test_bare_home_hashed(self):
         result = anonymize_path(
-            "/Users/alice/somedir/file.py",
-            "alice", "user_abc12345", home="/Users/alice",
+            "/Users/s/somedir/file.py",
+            "s", "user_abc12345", home="/Users/s",
         )
-        assert result == "user_abc12345/somedir/file.py"
+        assert result == "/Users/user_abc12345/somedir/file.py"
 
     def test_linux_home_path(self):
         result = anonymize_path(
-            "/home/alice/Documents/project/file.py",
-            "alice", "user_abc12345", home="/home/alice",
+            "/home/s/Documents/project/file.py",
+            "s", "user_abc12345", home="/home/s",
         )
-        assert result == "project/file.py"
+        assert result == "/home/user_abc12345/Documents/project/file.py"
 
     def test_path_not_under_home(self):
         result = anonymize_path(
             "/var/log/syslog",
-            "alice", "user_abc12345", home="/Users/alice",
+            "s", "user_abc12345", home="/Users/s",
         )
         assert result == "/var/log/syslog"
 
-    def test_fallback_users_replacement(self):
-        # Path with username not matching the prefix set
+    def test_windows_users_path(self):
         result = anonymize_path(
-            "/tmp/Users/alice/something",
-            "alice", "user_abc12345", home="/Users/alice",
+            r"C:\Users\bob\Documents\file.txt",
+            "bob", "user_abc12345",
         )
-        # Falls through prefix matching, hits the fallback .replace
-        assert "user_abc12345" in result or "/tmp/" in result
+        assert result == r"C:\Users\user_abc12345\Documents\file.txt"
+
+    def test_windows_users_path_double_backslashes(self):
+        result = anonymize_path(
+            r"\\Users\\bob\\Documents\\file.txt",
+            "bob", "user_abc12345",
+        )
+        assert result == r"\\Users\\user_abc12345\\Documents\\file.txt"
+
+    def test_windows_custom_home_path(self):
+        result = anonymize_path(
+            "C:\\custom_home\\bob\\project\\file.py",
+            "bob", "user_abc12345", home=r"C:\custom_home\bob",
+        )
+        assert result == "C:\\custom_home\\user_abc12345\\project\\file.py"
+
+    def test_msys2_custom_home_path(self):
+        result = anonymize_path(
+            "/c/custom_home/bob/project/file.py",
+            "bob", "user_abc12345", home=r"C:\custom_home\bob",
+        )
+        assert result == "/c/custom_home/user_abc12345/project/file.py"
 
 
 # --- anonymize_text ---
@@ -109,40 +115,35 @@ class TestAnonymizeText:
             "File at /Users/alice/project/main.py",
             "alice", "user_abc12345",
         )
-        assert "/user_abc12345/project/main.py" in result
+        assert result == "File at /Users/user_abc12345/project/main.py"
 
     def test_home_path_replaced(self):
         result = anonymize_text(
             "File at /home/alice/project/main.py",
             "alice", "user_abc12345",
         )
-        assert "/user_abc12345/project/main.py" in result
+        assert result == "File at /home/user_abc12345/project/main.py"
 
     def test_hyphen_encoded_path(self):
         result = anonymize_text(
             "-Users-alice-Documents-myproject",
             "alice", "user_abc12345",
         )
-        assert "-Users-user_abc12345" in result
+        assert result == "-Users-user_abc12345-Documents-myproject"
 
     def test_temp_path(self):
-        # The hyphen-encoded path regex runs before the temp path regex,
-        # so the username gets replaced but claude-XXX may not trigger.
-        # The important thing is the username is anonymized.
         result = anonymize_text(
             "/private/tmp/claude-501/-Users-alice-Documents-proj/foo",
             "alice", "user_abc12345",
         )
-        assert "alice" not in result
-        assert "user_abc12345" in result
+        assert result == "/private/tmp/claude-501/-Users-user_abc12345-Documents-proj/foo"
 
     def test_bare_username_replaced(self):
         result = anonymize_text(
             "Hello alice, welcome back",
             "alice", "user_abc12345",
         )
-        assert "alice" not in result
-        assert "user_abc12345" in result
+        assert result == "Hello user_abc12345, welcome back"
 
     def test_short_username_not_replaced_bare(self):
         # Usernames < 4 chars should NOT be replaced as bare words
@@ -150,7 +151,7 @@ class TestAnonymizeText:
             "Hello bob, welcome back",
             "bob", "user_abc12345",
         )
-        assert "bob" in result  # bare replacement skipped for short username
+        assert result == "Hello bob, welcome back"
 
     def test_short_username_path_still_replaced(self):
         # Even short usernames should be replaced in path contexts
@@ -158,7 +159,7 @@ class TestAnonymizeText:
             "File at /Users/bob/project",
             "bob", "user_abc12345",
         )
-        assert "/user_abc12345/project" in result
+        assert result == "File at /Users/user_abc12345/project"
 
 
 # --- Anonymizer class ---
