@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -1189,6 +1191,12 @@ def prep(source_filter: str = "auto") -> None:
 
 
 def main() -> None:
+    # If not in UTF-8 mode, then rerun in UTF-8 mode
+    if not sys.flags.utf8_mode:
+        os.environ['PYTHONUTF8'] = '1'
+        ret = subprocess.run(sys.argv).returncode
+        sys.exit(ret)
+
     parser = argparse.ArgumentParser(description="DataClaw — Claude/Codex -> Hugging Face")
     sub = parser.add_subparsers(dest="command")
 
