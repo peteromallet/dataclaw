@@ -41,7 +41,7 @@ STEP 3B — PRESENT ALL FOLDERS (REQUIRED BEFORE EXPORT)
   Do not export until folder selection is explicitly confirmed.
 
 STEP 4 — REVIEW + CONFIRM (REQUIRED BEFORE PUSH)
-  dataclaw export --no-push --output /tmp/dataclaw_export.jsonl
+  dataclaw export --no-push --output dataclaw_export.jsonl
   Review PII findings and apply excludes/redactions as needed.
   Full name is requested for an exact-name privacy scan against the export.
   If the user declines sharing full name, use --skip-full-name-scan and attest the skip reason.

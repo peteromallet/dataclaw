@@ -89,9 +89,10 @@ def _extract_project_path_from_sessions(project_hash: str) -> str | None:
         for msg in data.get("messages", []):
             for tc in msg.get("toolCalls", []):
                 fp = tc.get("args", {}).get("file_path") or tc.get("args", {}).get("path", "")
-                if fp.startswith("/"):
+                fp = Path(fp)
+                if fp.is_absolute():
                     # Extract the shallowest directory and verify its hash matches
-                    parts = Path(fp).parts  # e.g. ('/', 'home', 'wd', 'project', ...)
+                    parts = fp.parts  # e.g. ('/', 'home', 'username', 'project', ...) or ('C:\\', 'Users', 'username', 'project')
                     for depth in range(3, len(parts)):
                         candidate = str(Path(*parts[:depth + 1]))
                         if hashlib.sha256(candidate.encode()).hexdigest() == project_hash:
@@ -2017,31 +2018,35 @@ def _build_project_name(dir_name: str) -> str:
               '-home-bob-project' -> 'project'
               'standalone' -> 'standalone'
     """
-    path = dir_name.replace("-", "/")
-    path = path.lstrip("/")
-    parts = path.split("/")
+    parts = dir_name.lstrip("-").split("-")
     common_dirs = {"Documents", "Downloads", "Desktop"}
 
-    if len(parts) >= 2 and parts[0] == "Users":
-        if len(parts) >= 4 and parts[2] in common_dirs:
-            meaningful = parts[3:]
-        elif len(parts) >= 3 and parts[2] not in common_dirs:
-            meaningful = parts[2:]
+    # Find where 'Users' or 'home' is in the path, usually at 0 or 1
+    home_idx = -1
+    for i, p in enumerate(parts):
+        if p in {"Users", "home"}:
+            home_idx = i
+            break
+
+    if home_idx >= 0:
+        if len(parts) > home_idx + 3 and parts[home_idx + 2] in common_dirs:
+            # Skip common_dirs
+            meaningful = parts[home_idx + 3:]
+        elif len(parts) > home_idx + 2 and parts[home_idx + 2] not in common_dirs:
+            # Skip username
+            meaningful = parts[home_idx + 2:]
         else:
             meaningful = []
-    elif len(parts) >= 2 and parts[0] == "home":
-        meaningful = parts[2:] if len(parts) > 2 else []
     else:
         meaningful = parts
 
     if meaningful:
-        segments = dir_name.lstrip("-").split("-")
-        prefix_parts = len(parts) - len(meaningful)
-        return "-".join(segments[prefix_parts:]) or dir_name
-    else:
-        if len(parts) >= 2 and parts[0] in ("Users", "home"):
-            if len(parts) == 2:
-                return "~home"
-            if len(parts) == 3 and parts[2] in common_dirs:
-                return f"~{parts[2]}"
-        return dir_name.strip("-") or "unknown"
+        return "-".join(meaningful)
+
+    if home_idx >= 0:
+        if len(parts) == home_idx + 3 and parts[home_idx + 2] in common_dirs:
+            return f"~{parts[home_idx + 2]}"
+        if len(parts) == home_idx + 2:
+            return "~home"
+
+    return dir_name.strip("-") or "unknown"

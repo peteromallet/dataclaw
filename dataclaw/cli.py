@@ -44,7 +44,7 @@ CONFIRM_COMMAND_SKIP_FULL_NAME_EXAMPLE = (
 )
 
 EXPORT_REVIEW_PUBLISH_STEPS = [
-    "Step 1/3: Export locally only: dataclaw export --no-push --output /tmp/dataclaw_export.jsonl",
+    "Step 1/3: Export locally only: dataclaw export --no-push --output dataclaw_export.jsonl",
     "Step 2/3: Review/redact, then run confirm: dataclaw confirm ...",
     "Step 3/3: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
@@ -53,7 +53,7 @@ SETUP_TO_PUBLISH_STEPS = [
     "Step 1/6: Run prep/list to review project scope: dataclaw prep && dataclaw list",
     "Step 2/6: Explicitly choose source scope: dataclaw config --source <claude|codex|gemini|all>",
     "Step 3/6: Configure exclusions/redactions and confirm projects: dataclaw config ...",
-    "Step 4/6: Export locally only: dataclaw export --no-push --output /tmp/dataclaw_export.jsonl",
+    "Step 4/6: Export locally only: dataclaw export --no-push --output dataclaw_export.jsonl",
     "Step 5/6: Review and confirm: dataclaw confirm ...",
     "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
@@ -253,7 +253,7 @@ def _build_status_next_steps(
         steps.extend([
             "Ask about GitHub/Discord usernames to anonymize and sensitive strings to redact. "
             "Configure: dataclaw config --redact-usernames \"handle1\" and dataclaw config --redact \"string1\"",
-            "When done configuring, export locally: dataclaw export --no-push --output /tmp/dataclaw_export.jsonl",
+            "When done configuring, export locally: dataclaw export --no-push --output dataclaw_export.jsonl",
         ])
         # next_command is null because user input is needed before exporting
         return (steps, None)
@@ -645,7 +645,7 @@ def _find_export_file(file_path: Path | None) -> Path:
     if file_path and file_path.exists():
         return file_path
     if file_path is None:
-        for c in [Path("/tmp/dataclaw_export.jsonl"), Path("dataclaw_conversations.jsonl")]:
+        for c in [Path("dataclaw_export.jsonl"), Path("dataclaw_conversations.jsonl")]:
             if c.exists():
                 return c
     print(json.dumps({
@@ -653,7 +653,7 @@ def _find_export_file(file_path: Path | None) -> Path:
         "hint": "Run step 1 first to generate a local export file.",
         "blocked_on_step": "Step 1/3",
         "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-        "next_command": "dataclaw export --no-push --output /tmp/dataclaw_export.jsonl",
+        "next_command": "dataclaw export --no-push --output dataclaw_export.jsonl",
     }, indent=2))
     sys.exit(1)
 

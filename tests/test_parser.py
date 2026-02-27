@@ -58,6 +58,11 @@ class TestBuildProjectName:
     def test_home_bare(self):
         assert _build_project_name("-home-bob") == "~home"
 
+    def test_windows_paths(self):
+        assert _build_project_name("C-Users-bob-Documents-proj") == "proj"
+        assert _build_project_name("D-Users-alice-code-myapp") == "code-myapp"
+        assert _build_project_name("E-Users-charlie") == "~home"
+
     def test_non_common_dir(self):
         # /Users/alice/code/myproject
         result = _build_project_name("-Users-alice-code-myproject")
