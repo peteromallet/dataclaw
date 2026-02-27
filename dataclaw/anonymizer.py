@@ -15,58 +15,49 @@ def _detect_home_dir() -> tuple[str, str]:
     return home, username
 
 
-def anonymize_path(path: str, username: str, username_hash: str, home: str | None = None) -> str:
-    """Strip a path to project-relative and hash the username."""
-    if not path:
-        return path
-
-    if home is None:
-        home = os.path.expanduser("~")
-    prefixes = set()
-    for base in (f"/Users/{username}", f"/home/{username}", home):
-        for subdir in ("Documents", "Downloads", "Desktop"):
-            prefixes.add(f"{base}/{subdir}/")
-        prefixes.add(f"{base}/")
-
-    # Try longest prefixes first (subdirectory matches before bare home)
-    home_patterns = sorted(prefixes, key=len, reverse=True)
-
-    for prefix in home_patterns:
-        if path.startswith(prefix):
-            rest = path[len(prefix):]
-            if "/Documents/" in prefix or "/Downloads/" in prefix or "/Desktop/" in prefix:
-                return rest
-            return f"{username_hash}/{rest}"
-
-    path = path.replace(f"/Users/{username}/", f"/{username_hash}/")
-    path = path.replace(f"/home/{username}/", f"/{username_hash}/")
-
-    return path
-
-
-def anonymize_text(text: str, username: str, username_hash: str) -> str:
+def anonymize_text(text: str, username: str, username_hash: str, home: str | None = None) -> str:
     if not text or not username:
         return text
 
     escaped = re.escape(username)
 
-    # Replace /Users/<username> and /home/<username>
-    text = re.sub(rf"/Users/{escaped}(?=/|[^a-zA-Z0-9_-]|$)", f"/{username_hash}", text)
-    text = re.sub(rf"/home/{escaped}(?=/|[^a-zA-Z0-9_-]|$)", f"/{username_hash}", text)
-
-    # Catch hyphen-encoded paths: -Users-peteromalley- or -Users-peteromalley/
-    text = re.sub(rf"-Users-{escaped}(?=-|/|$)", f"-Users-{username_hash}", text)
-    text = re.sub(rf"-home-{escaped}(?=-|/|$)", f"-home-{username_hash}", text)
-
-    # Catch temp paths like /private/tmp/claude-501/-Users-peteromalley/
-    text = re.sub(rf"claude-\d+/-Users-{escaped}", f"claude-XXX/-Users-{username_hash}", text)
-
-    # Final pass: replace bare username in remaining contexts (ls output, prose, etc.)
+    # Replace bare username in contexts (ls output, prose, etc.)
     # Only if username is >= 4 chars to avoid false positives
+    # \b does not match word boundaries around underscore, but we need to match them
     if len(username) >= 4:
-        text = re.sub(rf"\b{escaped}\b", username_hash, text)
+        return re.sub(rf"(?<![a-zA-Z0-9]){escaped}(?![a-zA-Z0-9])", username_hash, text, flags=re.IGNORECASE)
+
+    # When username is < 4 chars, replace with more specific patterns
+
+    # Replace /Users/<username> , \Users\<username> , \\Users\\<username>
+    # Ignore case for Windows-like pattern
+    text = re.sub(rf"([/\\]+Users[/\\]+){escaped}(?=[^a-zA-Z0-9]|$)", rf"\g<1>{username_hash}", text, flags=re.IGNORECASE)
+
+    # Replace /home/<username>
+    text = re.sub(rf"/home/{escaped}(?=[^a-zA-Z0-9]|$)", f"/home/{username_hash}", text)
+
+    # If home is not conventional, replace it with more specific pattern
+    if home and not home.startswith(("/Users/", "/home/", "C:\\Users\\")):
+        # Escape home and replace / or \ with `r"[/\\]+"`
+        home_escaped = home.replace("\\", "/")
+        home_escaped = re.escape(home_escaped)
+        home_escaped = home_escaped.replace("/", r"[/\\]+")
+
+        def f(match):
+            # match.group(0) is a non-escaped string
+            return re.sub(rf"(?<![a-zA-Z0-9]){escaped}(?![a-zA-Z0-9])", username_hash, match.group(0), flags=re.IGNORECASE)
+
+        text = re.sub(home_escaped, f, text, flags=re.IGNORECASE)
+
+    # Catch hyphen-encoded paths: -Users-username- or -Users-username/
+    text = re.sub(rf"-Users-{escaped}(?=[^a-zA-Z0-9]|$)", f"-Users-{username_hash}", text, flags=re.IGNORECASE)
+    text = re.sub(rf"-home-{escaped}(?=[^a-zA-Z0-9]|$)", f"-home-{username_hash}", text)
 
     return text
+
+
+# Backward compatibility
+anonymize_path = anonymize_text
 
 
 class Anonymizer:
@@ -84,22 +75,18 @@ class Anonymizer:
                 self._extra.append((name, _hash_username(name)))
 
     def path(self, file_path: str) -> str:
-        result = anonymize_path(file_path, self.username, self.username_hash, self.home)
-        result = anonymize_text(result, self.username, self.username_hash)
-        for name, hashed in self._extra:
-            result = _replace_username(result, name, hashed)
-        return result
+        return self.text(file_path)
 
     def text(self, content: str) -> str:
-        result = anonymize_text(content, self.username, self.username_hash)
+        result = anonymize_text(content, self.username, self.username_hash, self.home)
         for name, hashed in self._extra:
             result = _replace_username(result, name, hashed)
         return result
 
 
 def _replace_username(text: str, username: str, username_hash: str) -> str:
-    if not text or not username or len(username) < 3:
+    if not text or not username or len(username) < 4:
         return text
     escaped = re.escape(username)
-    text = re.sub(escaped, username_hash, text, flags=re.IGNORECASE)
+    text = re.sub(rf"(?<![a-zA-Z0-9]){escaped}(?![a-zA-Z0-9])", username_hash, text, flags=re.IGNORECASE)
     return text
