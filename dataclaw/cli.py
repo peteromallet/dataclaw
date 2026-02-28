@@ -12,7 +12,7 @@ from typing import Any, Mapping, cast
 
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, CUSTOM_DIR, GEMINI_DIR, KIMI_DIR, OPENCODE_DIR, OPENCLAW_DIR, discover_projects, parse_project_sessions
+from .parser import CLAUDE_DIR, CODEX_DIR, CURSOR_DB, CUSTOM_DIR, GEMINI_DIR, KIMI_DIR, OPENCODE_DIR, OPENCLAW_DIR, discover_projects, parse_project_sessions
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -58,8 +58,8 @@ SETUP_TO_PUBLISH_STEPS = [
     "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
 
-EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "custom", "gemini", "kimi", "opencode", "openclaw", "all", "both"}
-SOURCE_CHOICES = ["auto", "claude", "codex", "custom", "gemini", "kimi", "opencode", "openclaw", "all"]
+EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "cursor", "custom", "gemini", "kimi", "opencode", "openclaw", "all", "both"}
+SOURCE_CHOICES = ["auto", "claude", "codex", "cursor", "custom", "gemini", "kimi", "opencode", "openclaw", "all"]
 
 
 def _mask_secret(s: str) -> str:
@@ -91,9 +91,11 @@ def _source_label(source_filter: str) -> str:
         return "OpenClaw"
     if source_filter == "kimi":
         return "Kimi CLI"
+    if source_filter == "cursor":
+        return "Cursor"
     if source_filter == "custom":
         return "Custom"
-    return "Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, or Custom"
+    return "Claude Code, Codex, Cursor, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, or Custom"
 
 
 def _normalize_source_filter(source_filter: str) -> str:
@@ -139,9 +141,11 @@ def _has_session_sources(source_filter: str = "auto") -> bool:
         return OPENCLAW_DIR.exists()
     if source_filter == "kimi":
         return KIMI_DIR.exists()
+    if source_filter == "cursor":
+        return CURSOR_DB.exists()
     if source_filter == "custom":
         return CUSTOM_DIR.exists()
-    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or CUSTOM_DIR.exists() or GEMINI_DIR.exists() or KIMI_DIR.exists() or OPENCODE_DIR.exists() or OPENCLAW_DIR.exists()
+    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or CURSOR_DB.exists() or CUSTOM_DIR.exists() or GEMINI_DIR.exists() or KIMI_DIR.exists() or OPENCODE_DIR.exists() or OPENCLAW_DIR.exists()
 
 
 def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list[dict]:
