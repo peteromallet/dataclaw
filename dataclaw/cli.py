@@ -1192,9 +1192,9 @@ def prep(source_filter: str = "auto") -> None:
 
 def main() -> None:
     # If not in UTF-8 mode, then rerun in UTF-8 mode
-    if not sys.flags.utf8_mode:
+    if not sys.flags.utf8_mode and "pytest" not in sys.modules:
         os.environ['PYTHONUTF8'] = '1'
-        ret = subprocess.run(sys.argv).returncode
+        ret = subprocess.run([sys.executable, "-m", "dataclaw.cli"] + sys.argv[1:]).returncode
         sys.exit(ret)
 
     parser = argparse.ArgumentParser(description="DataClaw — Claude/Codex -> Hugging Face")
