@@ -7,7 +7,7 @@ name = "dataclaw"
 version = "0.3.2"
 description = "Export your coding agent conversations to Hugging Face as structured data"
 requires-python = ">=3.10"
-license = "MIT"
+license = {text = "MIT"}
 readme = "README.md"
 authors = [
     {name = "Banodoco"},

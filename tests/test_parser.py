@@ -439,6 +439,8 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", tmp_path / "no-cursor.vscdb")
+        monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
 
     def _write_opencode_db(self, db_path):
         conn = sqlite3.connect(db_path)
@@ -991,6 +993,8 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", tmp_path / "no-cursor.vscdb")
+        monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
         self._disable_codex(tmp_path, monkeypatch)
@@ -1591,6 +1595,8 @@ class TestDiscoverOpenclawProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", tmp_path / "no-cursor.vscdb")
+        monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
 
     def test_discover_openclaw_projects(self, tmp_path, monkeypatch, mock_anonymizer):
         self._disable_others(tmp_path, monkeypatch)
@@ -1677,6 +1683,8 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", tmp_path / "no-cursor.vscdb")
+        monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
 
     def _make_valid_session(self, session_id="s1", model="gpt-4", content="hello"):
         return json.dumps({
@@ -1778,3 +1786,295 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", custom_dir)
         sessions = parse_project_sessions("nope", mock_anonymizer, source="custom")
         assert sessions == []
+
+
+def _write_cursor_db(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE cursorDiskKV(key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    return conn
+
+
+def _insert_cursor_conversation(conn, composer_id, bubbles):
+    headers = [{"bubbleId": b["id"], "type": b["type"]} for b in bubbles]
+    conn.execute(
+        "INSERT INTO cursorDiskKV VALUES(?, ?)",
+        (f"composerData:{composer_id}", json.dumps({"fullConversationHeadersOnly": headers})),
+    )
+    for b in bubbles:
+        data = dict(b)
+        data.pop("id")
+        conn.execute(
+            "INSERT INTO cursorDiskKV VALUES(?, ?)",
+            (f"bubbleId:{composer_id}:{b['id']}", json.dumps(data)),
+        )
+
+
+class TestCursorDiscoverProjects:
+    def _disable_others(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi")
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+        monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
+
+    def test_discover_cursor_projects(self, tmp_path, monkeypatch):
+        self._disable_others(tmp_path, monkeypatch)
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        _insert_cursor_conversation(conn, "conv-1", [
+            {"id": "b1", "type": 1, "text": "Hello", "createdAt": 1706000000000,
+             "workspaceUris": ["file:///Users/testuser/work/repo"]},
+            {"id": "b2", "type": 2, "text": "Hi there!", "createdAt": 1706000001000},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        projects = discover_projects()
+        assert len(projects) == 1
+        assert projects[0]["source"] == "cursor"
+        assert projects[0]["display_name"] == "cursor:repo"
+        assert projects[0]["session_count"] == 1
+
+    def test_discover_groups_by_workspace(self, tmp_path, monkeypatch):
+        self._disable_others(tmp_path, monkeypatch)
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        for cid, uri in [("c1", "file:///Users/alice/proj-a"), ("c2", "file:///Users/alice/proj-a"), ("c3", "file:///Users/alice/proj-b")]:
+            _insert_cursor_conversation(conn, cid, [
+                {"id": "b1", "type": 1, "text": "msg", "createdAt": 1706000000000, "workspaceUris": [uri]},
+                {"id": "b2", "type": 2, "text": "reply", "createdAt": 1706000001000},
+            ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        projects = discover_projects()
+        assert len(projects) == 2
+        names = {p["display_name"] for p in projects}
+        assert names == {"cursor:proj-a", "cursor:proj-b"}
+        counts = {p["display_name"]: p["session_count"] for p in projects}
+        assert counts["cursor:proj-a"] == 2
+        assert counts["cursor:proj-b"] == 1
+
+    def test_discover_no_db(self, tmp_path, monkeypatch):
+        self._disable_others(tmp_path, monkeypatch)
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", tmp_path / "nonexistent.vscdb")
+        projects = discover_projects()
+        assert projects == []
+
+    def test_discover_skips_single_bubble_conversations(self, tmp_path, monkeypatch):
+        self._disable_others(tmp_path, monkeypatch)
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        conn.execute(
+            "INSERT INTO cursorDiskKV VALUES(?, ?)",
+            ("composerData:lonely", json.dumps({"fullConversationHeadersOnly": [{"bubbleId": "b1", "type": 1}]})),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        projects = discover_projects()
+        assert projects == []
+
+
+class TestCursorParseSessions:
+    def _disable_others(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi")
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+        monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
+
+    def test_basic_conversation(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cwd = "/Users/testuser/work/myapp"
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        _insert_cursor_conversation(conn, "conv-1", [
+            {"id": "b1", "type": 1, "text": "Fix the bug", "createdAt": 1706000000000,
+             "workspaceUris": [f"file://{cwd}"]},
+            {"id": "b2", "type": 2, "text": "I'll fix it now.", "createdAt": 1706000001000,
+             "modelInfo": {"modelName": "claude-sonnet-4-20250514"},
+             "tokenCount": {"inputTokens": 100, "outputTokens": 30}},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor")
+        assert len(sessions) == 1
+        s = sessions[0]
+        assert s["session_id"] == "conv-1"
+        assert s["source"] == "cursor"
+        assert s["project"] == "cursor:myapp"
+        assert s["model"] == "claude-sonnet-4-20250514"
+        assert len(s["messages"]) == 2
+        assert s["messages"][0]["role"] == "user"
+        assert "Fix the bug" in s["messages"][0]["content"]
+        assert s["messages"][1]["role"] == "assistant"
+        assert "fix it" in s["messages"][1]["content"]
+        assert s["stats"]["user_messages"] == 1
+        assert s["stats"]["assistant_messages"] == 1
+        assert s["stats"]["input_tokens"] == 100
+        assert s["stats"]["output_tokens"] == 30
+
+    def test_tool_call(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cwd = "/Users/testuser/work/myapp"
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        _insert_cursor_conversation(conn, "conv-2", [
+            {"id": "b1", "type": 1, "text": "Read the file", "createdAt": 1706000000000,
+             "workspaceUris": [f"file://{cwd}"]},
+            {"id": "b2", "type": 2, "text": "", "createdAt": 1706000001000,
+             "toolFormerData": {
+                 "name": "Read",
+                 "params": json.dumps({"file_path": "/tmp/test.py"}),
+                 "result": json.dumps("print('hello')"),
+                 "status": "completed",
+             },
+             "modelInfo": {"modelName": "claude-sonnet-4-20250514"},
+             "tokenCount": {"inputTokens": 50, "outputTokens": 10}},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor")
+        assert len(sessions) == 1
+        s = sessions[0]
+        assert len(s["messages"]) == 2
+        tool_msg = s["messages"][1]
+        assert tool_msg["role"] == "assistant"
+        assert len(tool_msg["tool_uses"]) == 1
+        tu = tool_msg["tool_uses"][0]
+        assert tu["tool"] == "Read"
+        assert tu["status"] == "completed"
+        assert "hello" in tu["output"]["text"]
+        assert s["stats"]["tool_uses"] == 1
+
+    def test_mcp_tool_prefix_stripped(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cwd = "/Users/testuser/work/myapp"
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        _insert_cursor_conversation(conn, "conv-3", [
+            {"id": "b1", "type": 1, "text": "search", "createdAt": 1706000000000,
+             "workspaceUris": [f"file://{cwd}"]},
+            {"id": "b2", "type": 2, "text": "", "createdAt": 1706000001000,
+             "toolFormerData": {
+                 "name": "mcp_server_toolname",
+                 "params": "{}",
+                 "result": json.dumps("ok"),
+                 "status": "completed",
+             }},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor")
+        tu = sessions[0]["messages"][1]["tool_uses"][0]
+        assert tu["tool"] == "toolname"
+
+    def test_thinking_included(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cwd = "/Users/testuser/work/myapp"
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        _insert_cursor_conversation(conn, "conv-4", [
+            {"id": "b1", "type": 1, "text": "Explain X", "createdAt": 1706000000000,
+             "workspaceUris": [f"file://{cwd}"]},
+            {"id": "b2", "type": 2, "text": "Here's the answer.", "createdAt": 1706000001000,
+             "thinking": {"text": "Let me reason about X..."},
+             "modelInfo": {"modelName": "claude-sonnet-4-20250514"}},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor", include_thinking=True)
+        msg = sessions[0]["messages"][1]
+        assert "thinking" in msg
+        assert "reason about X" in msg["thinking"]
+
+        sessions_no = parse_project_sessions(cwd, mock_anonymizer, source="cursor", include_thinking=False)
+        msg_no = sessions_no[0]["messages"][1]
+        assert "thinking" not in msg_no
+
+    def test_unknown_workspace_grouped(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        _insert_cursor_conversation(conn, "conv-5", [
+            {"id": "b1", "type": 1, "text": "Hello", "createdAt": 1706000000000},
+            {"id": "b2", "type": 2, "text": "Hi", "createdAt": 1706000001000},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions("<unknown-cwd>", mock_anonymizer, source="cursor")
+        assert len(sessions) == 1
+        assert sessions[0]["project"] == "cursor:unknown"
+
+    def test_parse_nonexistent_project(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions("/no/such/path", mock_anonymizer, source="cursor")
+        assert sessions == []
+
+    def test_nested_json_params_unwrapped(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cwd = "/Users/testuser/work/myapp"
+        db_path = tmp_path / "state.vscdb"
+        conn = _write_cursor_db(db_path)
+        inner_params = {"file_path": "/tmp/foo.py"}
+        wrapped_params = {"tools": [{"parameters": json.dumps(inner_params)}]}
+        _insert_cursor_conversation(conn, "conv-6", [
+            {"id": "b1", "type": 1, "text": "read", "createdAt": 1706000000000,
+             "workspaceUris": [f"file://{cwd}"]},
+            {"id": "b2", "type": 2, "text": "", "createdAt": 1706000001000,
+             "toolFormerData": {
+                 "name": "Read",
+                 "params": json.dumps(wrapped_params),
+                 "result": json.dumps("contents"),
+                 "status": "completed",
+             }},
+        ])
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parser.CURSOR_DB", db_path)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor")
+        tu = sessions[0]["messages"][1]["tool_uses"][0]
+        assert "file_path" in tu["input"]
