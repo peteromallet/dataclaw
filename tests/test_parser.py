@@ -429,10 +429,12 @@ class TestParseSessionFile:
 class TestDiscoverProjects:
     def _disable_codex(self, tmp_path, monkeypatch):
         monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude-projects")
+        monkeypatch.setattr("dataclaw.parser.CLAUDE_BACKUP_PROJECTS_DIR", tmp_path / "no-claude-backup")
         monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
         monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
         monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.GEMINI_BACKUP_DIR", tmp_path / "no-gemini-backup")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
@@ -981,10 +983,12 @@ class TestDiscoverSubagentProjects:
     """Verify discover_projects and parse_project_sessions include subagent-only sessions."""
 
     def _disable_codex(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.CLAUDE_BACKUP_PROJECTS_DIR", tmp_path / "no-claude-backup")
         monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
         monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
         monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.GEMINI_BACKUP_DIR", tmp_path / "no-gemini-backup")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
@@ -1582,10 +1586,12 @@ class TestParseOpenclawSessionFile:
 class TestDiscoverOpenclawProjects:
     def _disable_others(self, tmp_path, monkeypatch):
         monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CLAUDE_BACKUP_PROJECTS_DIR", tmp_path / "no-claude-backup")
         monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
         monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
         monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.GEMINI_BACKUP_DIR", tmp_path / "no-gemini-backup")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
@@ -1668,10 +1674,12 @@ class TestDiscoverOpenclawProjects:
 class TestDiscoverCustomProjects:
     def _disable_others(self, tmp_path, monkeypatch):
         monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CLAUDE_BACKUP_PROJECTS_DIR", tmp_path / "no-claude-backup")
         monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
         monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
         monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.GEMINI_BACKUP_DIR", tmp_path / "no-gemini-backup")
         monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
