@@ -1961,119 +1961,43 @@ def _extract_assistant_content(
     return msg
 
 
+_PATH_KEYS = frozenset({
+    "file_path", "path", "dir", "dir_path", "cwd", "workdir",
+    "targetFile", "targetDirectory", "relativeWorkspacePath", "rootDir",
+})
+_CMD_KEYS = frozenset({"command", "cmd"})
+_TEXT_KEYS = frozenset({
+    "content", "text", "prompt", "query", "url", "pattern",
+    "old_string", "new_string", "patch", "patchText", "chars",
+    "explanation", "search_term", "streamingContent",
+})
+
+
+def _anonymize_value(key: str, value: Any, anonymizer: Anonymizer) -> Any:
+    if isinstance(value, str):
+        if key in _PATH_KEYS:
+            return anonymizer.path(value)
+        if key in _CMD_KEYS:
+            redacted, _ = redact_text(value)
+            return anonymizer.text(redacted)
+        return anonymizer.text(value)
+    if isinstance(value, dict):
+        return {k: _anonymize_value(k, v, anonymizer) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_anonymize_value(key, item, anonymizer) for item in value]
+    return value
+
+
 def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> dict:
-    """Return a structured dict for a tool's input args, with paths/content anonymized."""
+    """Return a structured dict for a tool's input args, with paths/content anonymized.
+
+    Preserves all original fields; applies path anonymization to known path keys,
+    secret redaction to known command keys, and text anonymization to all other strings.
+    """
     if not isinstance(input_data, dict):
         return {"raw": anonymizer.text(str(input_data))}
 
-    name = (tool_name or "").lower()
-
-    # Claude Code tools
-    if name in ("read", "edit"):
-        return {"file_path": anonymizer.path(input_data.get("file_path", ""))}
-    if name == "write":
-        return {
-            "file_path": anonymizer.path(input_data.get("file_path", "")),
-            "content": anonymizer.text(input_data.get("content", "")),
-        }
-    if name == "bash":
-        cmd, _ = redact_text(input_data.get("command", ""))
-        return {"command": anonymizer.text(cmd)}
-    if name == "grep":
-        pattern, _ = redact_text(input_data.get("pattern", ""))
-        return {"pattern": anonymizer.text(pattern), "path": anonymizer.path(input_data.get("path", ""))}
-    if name == "glob":
-        return {"pattern": input_data.get("pattern", ""), "path": anonymizer.path(input_data.get("path", ""))}
-    if name == "task":
-        return {"prompt": anonymizer.text(input_data.get("prompt", ""))}
-    if name == "websearch":
-        return {"query": anonymizer.text(input_data.get("query", ""))}
-    if name == "webfetch":
-        return {"url": anonymizer.text(input_data.get("url", ""))}
-    if name == "apply_patch":
-        return {"patch": anonymizer.text(input_data.get("patchText", ""))}
-    if name == "codesearch":
-        return {"query": anonymizer.text(input_data.get("query", ""))}
-
-    # Codex tools
-    if name == "exec_command":
-        cmd, _ = redact_text(input_data.get("cmd", ""))
-        return {"cmd": anonymizer.text(cmd)}
-    if name == "shell_command":
-        cmd, _ = redact_text(input_data.get("command", ""))
-        return {
-            "command": anonymizer.text(cmd),
-            "workdir": anonymizer.path(input_data.get("workdir", "")),
-        }
-    if name == "write_stdin":
-        return {
-            "session_id": input_data.get("session_id"),
-            "chars": anonymizer.text(input_data.get("chars", "")),
-            "yield_time_ms": input_data.get("yield_time_ms"),
-            "max_output_tokens": input_data.get("max_output_tokens"),
-        }
-    if name == "update_plan":
-        plan = input_data.get("plan", [])
-        return {
-            "explanation": anonymizer.text(input_data.get("explanation", "")),
-            "plan": [anonymizer.text(str(p)) if isinstance(p, str) else p for p in plan],
-        }
-
-    # Cursor tools
-    if name in ("read_file", "read_file_v2"):
-        return {"file_path": anonymizer.path(input_data.get("targetFile", input_data.get("file_path", "")))}
-    if name in ("edit_file", "edit_file_v2"):
-        result: dict[str, Any] = {"file_path": anonymizer.path(
-            input_data.get("relativeWorkspacePath", input_data.get("targetFile", ""))
-        )}
-        content = input_data.get("streamingContent") or input_data.get("content")
-        if content:
-            result["content"] = anonymizer.text(str(content))
-        return result
-    if name == "search_replace":
-        return {
-            "file_path": anonymizer.path(input_data.get("targetFile", input_data.get("file_path", ""))),
-            "old_string": anonymizer.text(input_data.get("old_string", "")),
-            "new_string": anonymizer.text(input_data.get("new_string", "")),
-        }
-    if name in ("run_terminal_cmd", "run_terminal_command_v2"):
-        cmd, _ = redact_text(input_data.get("command", ""))
-        result = {"command": anonymizer.text(cmd)}
-        cwd = input_data.get("cwd")
-        if cwd:
-            result["cwd"] = anonymizer.path(cwd)
-        return result
-    if name == "codebase_search":
-        result = {"query": anonymizer.text(input_data.get("query", ""))}
-        inc = input_data.get("includePattern")
-        if inc:
-            result["include"] = inc
-        return result
-    if name == "grep_search":
-        pi = input_data.get("patternInfo", {})
-        pattern = pi.get("pattern", "") if isinstance(pi, dict) else str(pi)
-        return {"pattern": anonymizer.text(pattern)}
-    if name in ("list_dir", "list_dir_v2"):
-        return {"dir_path": anonymizer.path(input_data.get("targetDirectory", ""))}
-    if name == "ripgrep_raw_search":
-        return {
-            "query": anonymizer.text(input_data.get("query", "")),
-            "dir": anonymizer.path(input_data.get("rootDir", "")),
-        }
-    if name == "glob_file_search":
-        return {
-            "pattern": input_data.get("pattern", ""),
-            "dir": anonymizer.path(input_data.get("rootDir", "")),
-        }
-    if name == "semantic_search_full":
-        return {"query": anonymizer.text(input_data.get("query", ""))}
-    if name == "web_search":
-        return {"query": anonymizer.text(input_data.get("query", input_data.get("search_term", "")))}
-    if name == "web_fetch":
-        return {"url": anonymizer.text(input_data.get("url", ""))}
-
-    # Fallback: anonymize all string values
-    return {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in input_data.items()}
+    return {k: _anonymize_value(k, v, anonymizer) for k, v in input_data.items()}
 
 
 def _normalize_timestamp(value) -> str | None:
