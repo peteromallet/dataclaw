@@ -47,6 +47,12 @@ UNKNOWN_KIMI_CWD = "<unknown-cwd>"
 
 CUSTOM_DIR = Path.home() / ".dataclaw" / "custom"
 
+# Backup directory — session files are copied here by `dataclaw backup-sessions`
+# to survive automatic cleanup by coding tools (Claude Code, Gemini CLI, etc.)
+BACKUP_BASE_DIR = Path.home() / ".dataclaw" / "session_backup"
+CLAUDE_BACKUP_PROJECTS_DIR = BACKUP_BASE_DIR / "claude" / "projects"
+GEMINI_BACKUP_DIR = BACKUP_BASE_DIR / "gemini"
+
 _CODEX_PROJECT_INDEX: dict[str, list[Path]] = {}
 _GEMINI_HASH_MAP: dict[str, str] = {}
 _OPENCODE_PROJECT_INDEX: dict[str, list[str]] = {}
@@ -145,26 +151,42 @@ def discover_projects() -> list[dict]:
 
 
 def _discover_claude_projects() -> list[dict]:
-    if not PROJECTS_DIR.exists():
+    base_dirs = [d for d in [PROJECTS_DIR, CLAUDE_BACKUP_PROJECTS_DIR] if d.exists()]
+    if not base_dirs:
         return []
 
+    # Collect all project dirs from both original and backup, merging by dir name
+    all_project_dirs: dict[str, list[Path]] = {}
+    for base_dir in base_dirs:
+        for project_dir in sorted(base_dir.iterdir()):
+            if not project_dir.is_dir():
+                continue
+            all_project_dirs.setdefault(project_dir.name, []).append(project_dir)
+
     projects = []
-    for project_dir in sorted(PROJECTS_DIR.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        root_sessions = list(project_dir.glob("*.jsonl"))
-        subagent_sessions = _find_subagent_only_sessions(project_dir)
-        total_count = len(root_sessions) + len(subagent_sessions)
+    for dir_name, dirs in sorted(all_project_dirs.items()):
+        # Merge session files across dirs, deduplicating by filename
+        seen_files: dict[str, Path] = {}
+        for d in dirs:
+            for f in d.glob("*.jsonl"):
+                seen_files.setdefault(f.name, f)
+
+        # Collect subagent-only session dirs from all locations
+        subagent_sessions: list[Path] = []
+        for d in dirs:
+            subagent_sessions.extend(_find_subagent_only_sessions(d))
+
+        total_count = len(seen_files) + len(subagent_sessions)
         if total_count == 0:
             continue
-        total_size = sum(f.stat().st_size for f in root_sessions)
+        total_size = sum(f.stat().st_size for f in seen_files.values())
         for session_dir in subagent_sessions:
             for sa_file in (session_dir / "subagents").glob("agent-*.jsonl"):
                 total_size += sa_file.stat().st_size
         projects.append(
             {
-                "dir_name": project_dir.name,
-                "display_name": _build_project_name(project_dir.name),
+                "dir_name": dir_name,
+                "display_name": _build_project_name(dir_name),
                 "session_count": total_count,
                 "total_size_bytes": total_size,
                 "source": CLAUDE_SOURCE,
@@ -192,25 +214,36 @@ def _discover_codex_projects() -> list[dict]:
 
 
 def _discover_gemini_projects() -> list[dict]:
-    if not GEMINI_DIR.exists():
+    base_dirs = [d for d in [GEMINI_DIR, GEMINI_BACKUP_DIR] if d.exists()]
+    if not base_dirs:
         return []
 
+    # Collect all project dirs from both original and backup, merging by hash name
+    all_project_dirs: dict[str, list[Path]] = {}
+    for base_dir in base_dirs:
+        for project_dir in sorted(base_dir.iterdir()):
+            if not project_dir.is_dir() or project_dir.name == "bin":
+                continue
+            chats_dir = project_dir / "chats"
+            if not chats_dir.exists():
+                continue
+            all_project_dirs.setdefault(project_dir.name, []).append(project_dir)
+
     projects = []
-    for project_dir in sorted(GEMINI_DIR.iterdir()):
-        if not project_dir.is_dir() or project_dir.name == "bin":
-            continue
-        chats_dir = project_dir / "chats"
-        if not chats_dir.exists():
-            continue
-        sessions = list(chats_dir.glob("session-*.json"))
-        if not sessions:
+    for project_hash, dirs in all_project_dirs.items():
+        # Merge session files across dirs, deduplicating by filename
+        seen_files: dict[str, Path] = {}
+        for d in dirs:
+            for f in (d / "chats").glob("session-*.json"):
+                seen_files.setdefault(f.name, f)
+        if not seen_files:
             continue
         projects.append(
             {
-                "dir_name": project_dir.name,
-                "display_name": f"gemini:{_resolve_gemini_hash(project_dir.name)}",
-                "session_count": len(sessions),
-                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+                "dir_name": project_hash,
+                "display_name": f"gemini:{_resolve_gemini_hash(project_hash)}",
+                "session_count": len(seen_files),
+                "total_size_bytes": sum(f.stat().st_size for f in seen_files.values()),
                 "source": GEMINI_SOURCE,
             }
         )
@@ -465,11 +498,17 @@ def parse_project_sessions(
         return sessions
 
     if source == GEMINI_SOURCE:
-        project_path = GEMINI_DIR / project_dir_name / "chats"
-        if not project_path.exists():
+        # Merge session files from original dir and backup, deduplicating by filename
+        session_file_map: dict[str, Path] = {}
+        for base_dir in [GEMINI_DIR, GEMINI_BACKUP_DIR]:
+            chats_dir = base_dir / project_dir_name / "chats"
+            if chats_dir.exists():
+                for f in chats_dir.glob("session-*.json"):
+                    session_file_map.setdefault(f.name, f)
+        if not session_file_map:
             return []
         sessions = []
-        for session_file in sorted(project_path.glob("session-*.json")):
+        for session_file in sorted(session_file_map.values()):
             parsed = _parse_gemini_session_file(session_file, anonymizer, include_thinking)
             if parsed and parsed["messages"]:
                 parsed["project"] = f"gemini:{_resolve_gemini_hash(project_dir_name)}"
@@ -511,24 +550,45 @@ def parse_project_sessions(
                 sessions.append(parsed)
         return sessions
 
-    project_path = PROJECTS_DIR / project_dir_name
-    if not project_path.exists():
+    # Merge session files from original dir and backup, deduplicating by filename
+    session_file_map: dict[str, Path] = {}
+    project_dirs = []
+    for base_dir in [PROJECTS_DIR, CLAUDE_BACKUP_PROJECTS_DIR]:
+        project_path = base_dir / project_dir_name
+        if project_path.exists():
+            project_dirs.append(project_path)
+            for f in project_path.glob("*.jsonl"):
+                session_file_map.setdefault(f.name, f)
+
+    if not project_dirs:
         return []
 
     sessions = []
-    for session_file in sorted(project_path.glob("*.jsonl")):
+    seen_session_ids: set[str] = set()
+    for session_file in sorted(session_file_map.values()):
         parsed = _parse_claude_session_file(session_file, anonymizer, include_thinking)
         if parsed and parsed["messages"]:
+            session_id = parsed.get("session_id", "")
+            if session_id and session_id in seen_session_ids:
+                continue
+            if session_id:
+                seen_session_ids.add(session_id)
             parsed["project"] = _build_project_name(project_dir_name)
             parsed["source"] = CLAUDE_SOURCE
             sessions.append(parsed)
 
-    for session_dir in _find_subagent_only_sessions(project_path):
-        parsed = _parse_subagent_session(session_dir, anonymizer, include_thinking)
-        if parsed and parsed["messages"]:
-            parsed["project"] = _build_project_name(project_dir_name)
-            parsed["source"] = CLAUDE_SOURCE
-            sessions.append(parsed)
+    for project_path in project_dirs:
+        for session_dir in _find_subagent_only_sessions(project_path):
+            parsed = _parse_subagent_session(session_dir, anonymizer, include_thinking)
+            if parsed and parsed["messages"]:
+                session_id = parsed.get("session_id", "")
+                if session_id and session_id in seen_session_ids:
+                    continue
+                if session_id:
+                    seen_session_ids.add(session_id)
+                parsed["project"] = _build_project_name(project_dir_name)
+                parsed["source"] = CLAUDE_SOURCE
+                sessions.append(parsed)
 
     return sessions
 

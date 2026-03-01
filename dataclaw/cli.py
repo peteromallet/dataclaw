@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -12,7 +13,21 @@ from typing import Any, Mapping, cast
 
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, CUSTOM_DIR, GEMINI_DIR, KIMI_DIR, OPENCODE_DIR, OPENCLAW_DIR, discover_projects, parse_project_sessions
+from .parser import (
+    BACKUP_BASE_DIR,
+    CLAUDE_BACKUP_PROJECTS_DIR,
+    CLAUDE_DIR,
+    CODEX_DIR,
+    CUSTOM_DIR,
+    GEMINI_BACKUP_DIR,
+    GEMINI_DIR,
+    KIMI_DIR,
+    OPENCODE_DIR,
+    OPENCLAW_DIR,
+    PROJECTS_DIR,
+    discover_projects,
+    parse_project_sessions,
+)
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -607,6 +622,85 @@ def update_skill(target: str) -> None:
         "next_steps": ["Run: dataclaw prep"],
         "next_command": "dataclaw prep",
     }, indent=2))
+
+
+def backup_sessions(source_filter: str = "auto") -> None:
+    """Copy session files to ~/.dataclaw/session_backup/ to prevent tool auto-deletion.
+
+    Claude Code and Gemini CLI automatically delete sessions older than 30 days.
+    This command copies all session files to a safe location that dataclaw also
+    reads from, so older sessions are preserved even after tool cleanup.
+
+    Run periodically (e.g. via cron) to keep the backup current.
+    """
+    source_filter = _normalize_source_filter(source_filter)
+    backed_up = 0
+    already_current = 0
+    errors: list[str] = []
+
+    def _copy_file(src: Path, dest: Path) -> None:
+        nonlocal backed_up, already_current
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists() or dest.stat().st_mtime < src.stat().st_mtime:
+            try:
+                shutil.copy2(src, dest)
+                backed_up += 1
+            except OSError as e:
+                errors.append(str(e))
+        else:
+            already_current += 1
+
+    # Back up Claude Code sessions
+    if source_filter in ("auto", "claude") and PROJECTS_DIR.exists():
+        for project_dir in PROJECTS_DIR.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for session_file in project_dir.glob("*.jsonl"):
+                dest = CLAUDE_BACKUP_PROJECTS_DIR / project_dir.name / session_file.name
+                _copy_file(session_file, dest)
+            # Back up subagent sessions
+            for subagent_dir in project_dir.iterdir():
+                if not subagent_dir.is_dir():
+                    continue
+                sa_dir = subagent_dir / "subagents"
+                if not sa_dir.is_dir():
+                    continue
+                for sa_file in sa_dir.glob("agent-*.jsonl"):
+                    dest = (
+                        CLAUDE_BACKUP_PROJECTS_DIR
+                        / project_dir.name
+                        / subagent_dir.name
+                        / "subagents"
+                        / sa_file.name
+                    )
+                    _copy_file(sa_file, dest)
+
+    # Back up Gemini CLI sessions
+    if source_filter in ("auto", "gemini") and GEMINI_DIR.exists():
+        for project_dir in GEMINI_DIR.iterdir():
+            if not project_dir.is_dir() or project_dir.name == "bin":
+                continue
+            chats_dir = project_dir / "chats"
+            if not chats_dir.exists():
+                continue
+            for session_file in chats_dir.glob("session-*.json"):
+                dest = GEMINI_BACKUP_DIR / project_dir.name / "chats" / session_file.name
+                _copy_file(session_file, dest)
+
+    result: dict[str, Any] = {
+        "backed_up": backed_up,
+        "already_current": already_current,
+        "backup_dir": str(BACKUP_BASE_DIR),
+        "next_steps": [
+            "Run periodically to keep sessions safe: dataclaw backup-sessions",
+            "Automate with cron (runs every hour): add to crontab via `crontab -e`:",
+            "  0 * * * * dataclaw backup-sessions",
+        ],
+    }
+    if errors:
+        result["warning"] = f"{len(errors)} file(s) could not be backed up."
+        result["errors"] = errors[:5]
+    print(json.dumps(result, indent=2))
 
 
 def status() -> None:
@@ -1213,6 +1307,17 @@ def main() -> None:
     us = sub.add_parser("update-skill", help="Install/update the dataclaw skill for a coding agent")
     us.add_argument("target", choices=["claude"], help="Agent to install skill for")
 
+    bs = sub.add_parser(
+        "backup-sessions",
+        help="Copy session files to ~/.dataclaw/session_backup/ to prevent tool auto-deletion",
+    )
+    bs.add_argument(
+        "--source",
+        choices=SOURCE_CHOICES,
+        default="auto",
+        help="Which source(s) to back up (default: all detected)",
+    )
+
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
     cfg.add_argument("--source", choices=sorted(EXPLICIT_SOURCE_CHOICES),
@@ -1282,6 +1387,10 @@ def main() -> None:
 
     if command == "update-skill":
         update_skill(args.target)
+        return
+
+    if command == "backup-sessions":
+        backup_sessions(source_filter=args.source)
         return
 
     if command == "list":

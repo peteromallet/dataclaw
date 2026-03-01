@@ -134,6 +134,48 @@ dataclaw export --publish-attestation "User explicitly approved publishing to Hu
 | `dataclaw export --all-projects` | Include everything (ignore exclusions) |
 | `dataclaw export --no-thinking` | Exclude extended thinking blocks |
 | `dataclaw update-skill claude` | Install/update the dataclaw skill for Claude Code |
+| `dataclaw backup-sessions` | Copy session files to a safe location to prevent tool auto-deletion |
+| `dataclaw backup-sessions --source claude` | Back up only Claude Code sessions |
+| `dataclaw backup-sessions --source gemini` | Back up only Gemini CLI sessions |
+
+</details>
+
+<details>
+<summary><b>Preventing session deletion</b></summary>
+
+Claude Code and Gemini CLI automatically delete sessions older than 30 days. To avoid losing data before you export:
+
+### Option 1 — Run `dataclaw backup-sessions` periodically (recommended)
+
+```bash
+dataclaw backup-sessions
+```
+
+This copies all session files to `~/.dataclaw/session_backup/`. DataClaw automatically reads from this backup when the original files have been deleted by a tool's cleanup routine.
+
+**Set up automatic hourly backups with cron:**
+
+```bash
+# Open your crontab
+crontab -e
+
+# Add this line to run every hour
+0 * * * * dataclaw backup-sessions
+```
+
+### Option 2 — Configure tools to retain sessions longer
+
+**Claude Code** — add to `~/.claude/settings.json`:
+
+```json
+{
+  "cleanupPeriodDays": 0
+}
+```
+
+Setting `cleanupPeriodDays` to `0` disables automatic cleanup entirely.
+
+**Gemini CLI** — automatic session cleanup can be disabled by setting the retention period in `~/.gemini/settings.json` if your version supports it. Check your Gemini CLI documentation for the specific setting.
 
 </details>
 
