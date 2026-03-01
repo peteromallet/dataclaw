@@ -1,4 +1,4 @@
-"""Parse Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw session data into conversations."""
+"""Parse Claude Code, Codex, Cursor, Gemini CLI, OpenCode, and OpenClaw session data into conversations."""
 
 import dataclasses
 import hashlib
@@ -44,6 +44,10 @@ KIMI_DIR = Path.home() / ".kimi"
 KIMI_SESSIONS_DIR = KIMI_DIR / "sessions"
 KIMI_CONFIG_PATH = KIMI_DIR / "kimi.json"
 UNKNOWN_KIMI_CWD = "<unknown-cwd>"
+
+from .parsers import cursor as _cursor_mod
+CURSOR_SOURCE = _cursor_mod.CURSOR_SOURCE
+CURSOR_DB = _cursor_mod.CURSOR_DB
 
 CUSTOM_DIR = Path.home() / ".dataclaw" / "custom"
 
@@ -140,6 +144,7 @@ def discover_projects() -> list[dict]:
     projects.extend(_discover_opencode_projects())
     projects.extend(_discover_openclaw_projects())
     projects.extend(_discover_kimi_projects())
+    projects.extend(_cursor_mod.discover_projects())
     projects.extend(_discover_custom_projects())
     return sorted(projects, key=lambda p: (p["display_name"], p["source"]))
 
@@ -492,6 +497,32 @@ def parse_project_sessions(
                 parsed["project"] = _build_opencode_project_name(project_dir_name)
                 parsed["source"] = OPENCODE_SOURCE
                 sessions.append(parsed)
+        return sessions
+
+    if source == CURSOR_SOURCE:
+        index = _cursor_mod.get_project_index()
+        composer_ids = index.get(project_dir_name, [])
+        if not composer_ids:
+            return []
+        sessions = []
+        try:
+            with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
+                for cid in composer_ids:
+                    parsed = _cursor_mod.parse_session(
+                        cid, conn, anonymizer, include_thinking,
+                        _make_stats=_make_stats,
+                        _make_session_result=_make_session_result,
+                        _parse_tool_input=_parse_tool_input,
+                        _update_time_bounds=_update_time_bounds,
+                        _normalize_timestamp=_normalize_timestamp,
+                        _safe_int=_safe_int,
+                    )
+                    if parsed and parsed["messages"]:
+                        parsed["project"] = _cursor_mod.build_project_name(project_dir_name)
+                        parsed["source"] = CURSOR_SOURCE
+                        sessions.append(parsed)
+        except sqlite3.Error:
+            pass
         return sessions
 
     if source == CODEX_SOURCE:
@@ -1930,66 +1961,44 @@ def _extract_assistant_content(
     return msg
 
 
+_PATH_KEYS = frozenset({
+    "file_path", "path", "dir", "dir_path", "cwd", "workdir",
+    "targetFile", "targetDirectory", "relativeWorkspacePath", "rootDir",
+})
+_CMD_KEYS = frozenset({"command", "cmd"})
+_TEXT_KEYS = frozenset({
+    "content", "text", "prompt", "query", "url", "pattern",
+    "old_string", "new_string", "patch", "patchText", "chars",
+    "explanation", "search_term", "streamingContent",
+})
+
+
+def _anonymize_value(key: str, value: Any, anonymizer: Anonymizer) -> Any:
+    if isinstance(value, str):
+        if key in _PATH_KEYS:
+            return anonymizer.path(value)
+        if key in _CMD_KEYS:
+            redacted, _ = redact_text(value)
+            return anonymizer.text(redacted)
+        return anonymizer.text(value)
+    if isinstance(value, dict):
+        return {k: _anonymize_value(k, v, anonymizer) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_anonymize_value(key, item, anonymizer) for item in value]
+    return value
+
+
 def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> dict:
-    """Return a structured dict for a tool's input args, with paths/content anonymized."""
+    """Return a structured dict for a tool's input args, with paths/content anonymized.
+
+    Preserves all original fields; applies path anonymization to known path keys,
+    secret redaction to known command keys, and text anonymization to all other strings.
+    """
     if not isinstance(input_data, dict):
         return {"raw": anonymizer.text(str(input_data))}
 
-    name = (tool_name or "").lower()
+    return {k: _anonymize_value(k, v, anonymizer) for k, v in input_data.items()}
 
-    # Claude Code tools
-    if name in ("read", "edit"):
-        return {"file_path": anonymizer.path(input_data.get("file_path", ""))}
-    if name == "write":
-        return {
-            "file_path": anonymizer.path(input_data.get("file_path", "")),
-            "content": anonymizer.text(input_data.get("content", "")),
-        }
-    if name == "bash":
-        cmd, _ = redact_text(input_data.get("command", ""))
-        return {"command": anonymizer.text(cmd)}
-    if name == "grep":
-        pattern, _ = redact_text(input_data.get("pattern", ""))
-        return {"pattern": anonymizer.text(pattern), "path": anonymizer.path(input_data.get("path", ""))}
-    if name == "glob":
-        return {"pattern": input_data.get("pattern", ""), "path": anonymizer.path(input_data.get("path", ""))}
-    if name == "task":
-        return {"prompt": anonymizer.text(input_data.get("prompt", ""))}
-    if name == "websearch":
-        return {"query": anonymizer.text(input_data.get("query", ""))}
-    if name == "webfetch":
-        return {"url": anonymizer.text(input_data.get("url", ""))}
-    if name == "apply_patch":
-        return {"patch": anonymizer.text(input_data.get("patchText", ""))}
-    if name == "codesearch":
-        return {"query": anonymizer.text(input_data.get("query", ""))}
-
-    # Codex tools
-    if name == "exec_command":
-        cmd, _ = redact_text(input_data.get("cmd", ""))
-        return {"cmd": anonymizer.text(cmd)}
-    if name == "shell_command":
-        cmd, _ = redact_text(input_data.get("command", ""))
-        return {
-            "command": anonymizer.text(cmd),
-            "workdir": anonymizer.path(input_data.get("workdir", "")),
-        }
-    if name == "write_stdin":
-        return {
-            "session_id": input_data.get("session_id"),
-            "chars": anonymizer.text(input_data.get("chars", "")),
-            "yield_time_ms": input_data.get("yield_time_ms"),
-            "max_output_tokens": input_data.get("max_output_tokens"),
-        }
-    if name == "update_plan":
-        plan = input_data.get("plan", [])
-        return {
-            "explanation": anonymizer.text(input_data.get("explanation", "")),
-            "plan": [anonymizer.text(str(p)) if isinstance(p, str) else p for p in plan],
-        }
-
-    # Fallback: anonymize all string values
-    return {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in input_data.items()}
 
 def _normalize_timestamp(value) -> str | None:
     if value is None:
