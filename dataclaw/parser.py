@@ -79,7 +79,7 @@ def _extract_project_path_from_sessions(project_hash: str) -> str | None:
         return None
     for session_file in sorted(chats_dir.glob("session-*.json"), reverse=True):
         try:
-            data = json.loads(session_file.read_text())
+            data = json.loads(session_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         for msg in data.get("messages", []):
@@ -121,7 +121,7 @@ def _resolve_gemini_hash(project_hash: str) -> str:
 
 def _iter_jsonl(filepath: Path):
     """Yield parsed JSON objects from a JSONL file, skipping blank/malformed lines."""
-    with open(filepath) as f:
+    with open(filepath, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -263,7 +263,7 @@ def _load_kimi_work_dirs() -> dict[str, str]:
     if not KIMI_CONFIG_PATH.exists():
         return {}
     try:
-        data = json.loads(KIMI_CONFIG_PATH.read_text())
+        data = json.loads(KIMI_CONFIG_PATH.read_text(encoding="utf-8"))
         work_dirs = data.get("work_dirs", [])
         return {
             entry.get("path", ""): entry.get("path", "")
