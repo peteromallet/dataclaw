@@ -34,6 +34,10 @@ GEMINI_DIR = Path.home() / ".gemini" / "tmp"
 
 OPENCODE_DIR = Path.home() / ".local" / "share" / "opencode"
 OPENCODE_DB_PATH = OPENCODE_DIR / "opencode.db"
+OPENCODE_STORAGE_DIR = OPENCODE_DIR / "storage"
+OPENCODE_PROJECT_DIR = OPENCODE_STORAGE_DIR / "project"
+OPENCODE_SESSION_DIR = OPENCODE_STORAGE_DIR / "session"
+OPENCODE_MESSAGE_DIR = OPENCODE_STORAGE_DIR / "message"
 UNKNOWN_OPENCODE_CWD = "<unknown-cwd>"
 
 OPENCLAW_DIR = Path.home() / ".openclaw"
@@ -52,6 +56,57 @@ _GEMINI_HASH_MAP: dict[str, str] = {}
 _OPENCODE_PROJECT_INDEX: dict[str, list[str]] = {}
 _OPENCLAW_PROJECT_INDEX: dict[str, list[Path]] = {}
 _KIMI_PROJECT_INDEX: dict[str, list[Path]] = {}
+
+
+def _is_opencode_v2_storage() -> bool:
+    """Detect if OpenCode uses the new JSON storage format"""
+    return OPENCODE_PROJECT_DIR.exists() and any(OPENCODE_PROJECT_DIR.glob("*.json"))
+
+
+def _build_opencode_project_index_v2() -> dict[str, list[str]]:
+    """Build project index for new OpenCode (JSON format)"""
+    if not _is_opencode_v2_storage():
+        return {}
+
+    index: dict[str, list[str]] = {}
+    project_cwd_map: dict[str, str] = {}
+
+    try:
+        for project_file in OPENCODE_PROJECT_DIR.glob("*.json"):
+            try:
+                project_data = json.loads(project_file.read_text(encoding="utf-8"))
+                project_id = project_data.get("id")
+                if not project_id:
+                    continue
+                worktree = project_data.get("worktree", "")
+                project_cwd_map[project_id] = worktree if worktree.strip() else UNKNOWN_OPENCODE_CWD
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if OPENCODE_SESSION_DIR.exists():
+            for project_dir in OPENCODE_SESSION_DIR.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                project_id = project_dir.name
+
+                if project_id == "global":
+                    for session_file in project_dir.glob("ses_*.json"):
+                        try:
+                            session_data = json.loads(session_file.read_text(encoding="utf-8"))
+                            directory = session_data.get("directory", "")
+                            cwd = directory if directory.strip() else "opencode:global"
+                            session_id = session_file.stem
+                            index.setdefault(cwd, []).append(session_id)
+                        except (json.JSONDecodeError, OSError):
+                            continue
+                else:
+                    cwd = project_cwd_map.get(project_id, UNKNOWN_OPENCODE_CWD)
+                    for session_file in project_dir.glob("ses_*.json"):
+                        session_id = session_file.stem
+                        index.setdefault(cwd, []).append(session_id)
+    except OSError:
+        pass
+    return index
 
 
 def _build_gemini_hash_map() -> dict[str, str]:
@@ -221,12 +276,14 @@ def _discover_opencode_projects() -> list[dict]:
     index = _get_opencode_project_index(refresh=True)
     total_sessions = sum(len(session_ids) for session_ids in index.values())
     db_size = OPENCODE_DB_PATH.stat().st_size if OPENCODE_DB_PATH.exists() else 0
+    storage_size = _get_opencode_storage_size() if _is_opencode_v2_storage() else 0
+    total_size = db_size + storage_size
 
     projects = []
     for cwd, session_ids in sorted(index.items()):
         if not session_ids:
             continue
-        estimated_size = int(db_size * (len(session_ids) / total_sessions)) if total_sessions else 0
+        estimated_size = int(total_size * (len(session_ids) / total_sessions)) if total_sessions else 0
         projects.append(
             {
                 "dir_name": cwd,
@@ -237,6 +294,30 @@ def _discover_opencode_projects() -> list[dict]:
             }
         )
     return projects
+
+
+def _get_opencode_storage_size() -> int:
+    """Calculate total size of new OpenCode storage directory"""
+    total = 0
+    try:
+        if OPENCODE_PROJECT_DIR.exists():
+            for f in OPENCODE_PROJECT_DIR.glob("*.json"):
+                total += f.stat().st_size
+        if OPENCODE_SESSION_DIR.exists():
+            for project_dir in OPENCODE_SESSION_DIR.iterdir():
+                if project_dir.is_dir():
+                    for f in project_dir.glob("*.json"):
+                        total += f.stat().st_size
+        if OPENCODE_MESSAGE_DIR.exists():
+            for session_dir in OPENCODE_MESSAGE_DIR.iterdir():
+                if session_dir.is_dir():
+                    for msg_dir in session_dir.iterdir():
+                        if msg_dir.is_dir():
+                            for f in msg_dir.glob("*.json"):
+                                total += f.stat().st_size
+    except OSError:
+        pass
+    return total
 
 
 def _discover_openclaw_projects() -> list[dict]:
@@ -539,6 +620,9 @@ def _parse_opencode_session(
     include_thinking: bool,
     target_cwd: str,
 ) -> dict | None:
+    if _is_opencode_v2_storage():
+        return _parse_opencode_session_v2(session_id, anonymizer, include_thinking, target_cwd)
+
     if not OPENCODE_DB_PATH.exists():
         return None
 
@@ -633,6 +717,119 @@ def _make_stats() -> dict[str, int]:
         "input_tokens": 0,
         "output_tokens": 0,
     }
+
+
+def _parse_opencode_session_v2(
+    session_id: str,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+    target_cwd: str,
+) -> dict | None:
+    """Parse new OpenCode (JSON format) session"""
+    if not _is_opencode_v2_storage():
+        return None
+
+    session_dir = OPENCODE_MESSAGE_DIR / session_id
+    if not session_dir.exists():
+        return None
+
+    messages: list[dict[str, Any]] = []
+    metadata: dict[str, Any] = {
+        "session_id": session_id,
+        "cwd": None,
+        "git_branch": None,
+        "model": None,
+        "start_time": None,
+        "end_time": None,
+    }
+    stats = _make_stats()
+
+    try:
+        message_files = sorted(session_dir.glob("msg_*.json"), key=lambda f: f.name)
+        for msg_file in message_files:
+            try:
+                msg_data = json.loads(msg_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            role = msg_data.get("role")
+            timestamp = _normalize_timestamp(msg_data.get("time", {}).get("created"))
+
+            if metadata["model"] is None:
+                model_info = msg_data.get("model", {})
+                if isinstance(model_info, dict):
+                    metadata["model"] = model_info.get("modelID")
+                elif isinstance(model_info, str):
+                    metadata["model"] = model_info
+
+            if role == "user":
+                content = _extract_opencode_v2_content(msg_data)
+                if content:
+                    messages.append({"role": "user", "content": content, "timestamp": timestamp})
+                    stats["user_messages"] += 1
+                    _update_time_bounds(metadata, timestamp)
+            elif role == "assistant":
+                msg = _extract_opencode_v2_assistant(msg_data, anonymizer, include_thinking)
+                if msg:
+                    msg["timestamp"] = timestamp
+                    messages.append(msg)
+                    stats["assistant_messages"] += 1
+                    stats["tool_uses"] += len(msg.get("tool_uses", []))
+                    _update_time_bounds(metadata, timestamp)
+
+                tokens = msg_data.get("tokens", {})
+                if isinstance(tokens, dict):
+                    cache = tokens.get("cache", {})
+                    cache_read = _safe_int(cache.get("read")) if isinstance(cache, dict) else 0
+                    cache_write = _safe_int(cache.get("write")) if isinstance(cache, dict) else 0
+                    stats["input_tokens"] += _safe_int(tokens.get("input")) + cache_read + cache_write
+                    stats["output_tokens"] += _safe_int(tokens.get("output"))
+
+                if timestamp and (metadata["end_time"] is None or timestamp > metadata["end_time"]):
+                    metadata["end_time"] = timestamp
+
+    except OSError:
+        return None
+
+    if metadata["model"] is None:
+        metadata["model"] = "opencode-unknown"
+
+    return _make_session_result(metadata, messages, stats)
+
+
+def _extract_opencode_v2_content(msg_data: dict) -> str | None:
+    """Extract user content from new OpenCode message"""
+    summary = msg_data.get("summary", {})
+    if isinstance(summary, dict):
+        body = summary.get("body")
+        if isinstance(body, str) and body.strip():
+            return body.strip()
+    return None
+
+
+def _extract_opencode_v2_assistant(
+    msg_data: dict,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    """Extract assistant response from new OpenCode message"""
+    summary = msg_data.get("summary", {})
+    content_parts = []
+
+    if isinstance(summary, dict):
+        body = summary.get("body")
+        if isinstance(body, str) and body.strip():
+            content_parts.append(anonymizer.text(body.strip()))
+
+    if not content_parts:
+        return None
+
+    msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": "\n\n".join(content_parts),
+        "tool_uses": [],
+    }
+    return msg
 
 
 def _make_session_result(
@@ -1650,6 +1847,8 @@ def _build_codex_project_name(cwd: str) -> str:
 
 
 def _build_opencode_project_name(cwd: str) -> str:
+    if cwd == "global":
+        return "opencode:global"
     if cwd == UNKNOWN_OPENCODE_CWD:
         return "opencode:unknown"
     return f"opencode:{Path(cwd).name or cwd}"
@@ -1764,6 +1963,8 @@ def _parse_kimi_session_file(
 
 
 def _build_opencode_project_index() -> dict[str, list[str]]:
+    if _is_opencode_v2_storage():
+        return _build_opencode_project_index_v2()
     if not OPENCODE_DB_PATH.exists():
         return {}
 
