@@ -1,5 +1,6 @@
 """Tests for dataclaw.parser — JSONL parsing and project discovery."""
 
+import hashlib
 import json
 import sqlite3
 
@@ -1664,6 +1665,42 @@ class TestDiscoverOpenclawProjects:
         assert len(projects) == 1
         assert projects[0]["session_count"] == 2
 
+
+class TestKimiProjects:
+    def _disable_others(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+
+    def test_parse_kimi_project_sessions_from_absolute_cwd(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+
+        cwd = "/Users/alice/projects/my-kimi-app"
+        project_hash = hashlib.md5(cwd.encode()).hexdigest()
+        context_dir = tmp_path / "kimi" / "sessions" / project_hash / "session-1"
+        context_dir.mkdir(parents=True)
+        (context_dir / "context.jsonl").write_text(
+            json.dumps({"role": "user", "content": "Hello from Kimi"}) + "\n"
+            + json.dumps({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hi there"}],
+            }) + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "kimi" / "sessions")
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="kimi")
+
+        assert len(sessions) == 1
+        assert sessions[0]["source"] == "kimi"
+        assert sessions[0]["project"] == "kimi:my-kimi-app"
+        assert sessions[0]["messages"][0]["content"] == "Hello from Kimi"
 
 class TestDiscoverCustomProjects:
     def _disable_others(self, tmp_path, monkeypatch):
