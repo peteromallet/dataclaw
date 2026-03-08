@@ -157,10 +157,13 @@ def _discover_claude_projects() -> list[dict]:
         total_count = len(root_sessions) + len(subagent_sessions)
         if total_count == 0:
             continue
-        total_size = sum(f.stat().st_size for f in root_sessions)
-        for session_dir in subagent_sessions:
-            for sa_file in (session_dir / "subagents").glob("agent-*.jsonl"):
-                total_size += sa_file.stat().st_size
+        try:
+            total_size = sum(f.stat().st_size for f in root_sessions)
+            for session_dir in subagent_sessions:
+                for sa_file in (session_dir / "subagents").glob("agent-*.jsonl"):
+                    total_size += sa_file.stat().st_size
+        except OSError:
+            total_size = 0
         projects.append(
             {
                 "dir_name": project_dir.name,
@@ -184,7 +187,7 @@ def _discover_codex_projects() -> list[dict]:
                 "dir_name": cwd,
                 "display_name": _build_codex_project_name(cwd),
                 "session_count": len(session_files),
-                "total_size_bytes": sum(f.stat().st_size for f in session_files),
+                "total_size_bytes": sum(f.stat().st_size for f in session_files if f.exists()),
                 "source": CODEX_SOURCE,
             }
         )
@@ -210,7 +213,7 @@ def _discover_gemini_projects() -> list[dict]:
                 "dir_name": project_dir.name,
                 "display_name": f"gemini:{_resolve_gemini_hash(project_dir.name)}",
                 "session_count": len(sessions),
-                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+                "total_size_bytes": sum(f.stat().st_size for f in sessions if f.exists()),
                 "source": GEMINI_SOURCE,
             }
         )
@@ -277,6 +280,11 @@ def _load_kimi_work_dirs() -> dict[str, str]:
 def _get_kimi_project_hash(cwd: str) -> str:
     """Generate Kimi project hash from working directory path (MD5)."""
     return hashlib.md5(cwd.encode()).hexdigest()
+
+
+def _is_kimi_project_hash(value: str) -> bool:
+    """Kimi session directories are named by 32-char lowercase MD5 hashes."""
+    return len(value) == 32 and all(ch in "0123456789abcdef" for ch in value.lower())
 
 
 def _discover_kimi_projects() -> list[dict]:
@@ -428,7 +436,7 @@ def parse_project_sessions(
         return _parse_custom_sessions(project_dir_name, anonymizer)
 
     if source == KIMI_SOURCE:
-        project_hash = _get_kimi_project_hash(project_dir_name)
+        project_hash = project_dir_name if _is_kimi_project_hash(project_dir_name) else _get_kimi_project_hash(project_dir_name)
         project_path = KIMI_SESSIONS_DIR / project_hash
         if not project_path.exists():
             return []
@@ -944,8 +952,8 @@ def _parse_gemini_session_file(
 
             tokens = msg_data.get("tokens", {})
             if tokens:
-                stats["input_tokens"] += tokens.get("input", 0) + tokens.get("cached", 0)
-                stats["output_tokens"] += tokens.get("output", 0)
+                stats["input_tokens"] += _safe_int(tokens.get("input", 0)) + _safe_int(tokens.get("cached", 0))
+                stats["output_tokens"] += _safe_int(tokens.get("output", 0))
 
             msg = {"role": "assistant"}
             if timestamp:
@@ -1502,9 +1510,10 @@ def _parse_codex_tool_arguments(arguments: Any) -> Any:
 def _update_time_bounds(metadata: dict[str, Any], timestamp: str | None) -> None:
     if timestamp is None:
         return
-    if metadata["start_time"] is None:
+    if metadata["start_time"] is None or timestamp < metadata["start_time"]:
         metadata["start_time"] = timestamp
-    metadata["end_time"] = timestamp
+    if metadata["end_time"] is None or timestamp > metadata["end_time"]:
+        metadata["end_time"] = timestamp
 
 
 def _safe_int(value: Any) -> int:
@@ -1873,7 +1882,7 @@ def _extract_user_content(entry: dict[str, Any], anonymizer: Anonymizer) -> str 
     msg_data = entry.get("message", {})
     content = msg_data.get("content", "")
     if isinstance(content, list):
-        text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
         content = "\n".join(text_parts)
     if not content or not content.strip():
         return None
@@ -1997,7 +2006,10 @@ def _normalize_timestamp(value) -> str | None:
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
+        # Heuristic: values > 1e12 are milliseconds, otherwise seconds
+        if value > 1e12:
+            value = value / 1000
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
     return None
 
 

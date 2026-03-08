@@ -51,7 +51,7 @@ EXPORT_REVIEW_PUBLISH_STEPS = [
 
 SETUP_TO_PUBLISH_STEPS = [
     "Step 1/6: Run prep/list to review project scope: dataclaw prep && dataclaw list",
-    "Step 2/6: Explicitly choose source scope: dataclaw config --source <claude|codex|gemini|all>",
+    "Step 2/6: Explicitly choose source scope: dataclaw config --source <claude|codex|gemini|opencode|openclaw|kimi|custom|all>",
     "Step 3/6: Configure exclusions/redactions and confirm projects: dataclaw config ...",
     "Step 4/6: Export locally only: dataclaw export --no-push --output /tmp/dataclaw_export.jsonl",
     "Step 5/6: Review and confirm: dataclaw confirm ...",
@@ -227,14 +227,14 @@ def _build_status_next_steps(
         steps = []
         if not source_confirmed:
             steps.append(
-                "Ask the user to explicitly choose export source scope: Claude Code, Codex, Gemini, or all. "
-                "Then set it: dataclaw config --source <claude|codex|gemini|all>. "
+                "Ask the user to explicitly choose export source scope: Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, Custom, or all. "
+                "Then set it: dataclaw config --source <claude|codex|gemini|opencode|openclaw|kimi|custom|all>. "
                 "Do not run export until source scope is explicitly confirmed."
             )
         else:
             steps.append(
                 f"Source scope is currently set to '{configured_source}'. "
-                "If the user wants a different scope, run: dataclaw config --source <claude|codex|gemini|all>."
+                "If the user wants a different scope, run: dataclaw config --source <claude|codex|gemini|opencode|openclaw|kimi|custom|all>."
             )
         if not projects_confirmed:
             steps.append(
@@ -640,10 +640,15 @@ def _find_export_file(file_path: Path | None) -> Path:
     """Resolve the export file path, or exit with an error."""
     if file_path and file_path.exists():
         return file_path
-    if file_path is None:
-        for c in [Path("/tmp/dataclaw_export.jsonl"), Path("dataclaw_conversations.jsonl")]:
-            if c.exists():
-                return c
+    if file_path is not None and not file_path.exists():
+        print(json.dumps({
+            "error": f"File not found: {file_path}",
+            "hint": "Check the path and try again, or omit --file to use the default location.",
+        }, indent=2))
+        sys.exit(1)
+    for c in [Path("/tmp/dataclaw_export.jsonl"), Path("dataclaw_conversations.jsonl")]:
+        if c.exists():
+            return c
     print(json.dumps({
         "error": "No export file found.",
         "hint": "Run step 1 first to generate a local export file.",
@@ -765,9 +770,6 @@ def _scan_high_entropy_strings(content: str, max_results: int = 15) -> list[dict
 
 def _scan_pii(file_path: Path) -> dict:
     """Run PII regex scans on the export file. Returns dict of findings."""
-    import re
-
-    p = str(file_path.resolve())
     scans = {
         "emails": r'[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}',
         "jwt_tokens": r'eyJ[A-Za-z0-9_-]{20,}',
@@ -1033,11 +1035,11 @@ def confirm(
     # Run PII scans
     pii_findings = _scan_pii(file_path)
 
-    # Advance stage from review -> confirmed
-    config["stage"] = "confirmed"
+    # Keep pushing locked until the user resolves any scan findings and re-exports.
+    config["stage"] = "confirmed" if not pii_findings else "review"
     config["review_attestations"] = attestations
     config["review_verification"] = {
-        "full_name": normalized_full_name if not skip_full_name_scan else None,
+        "full_name_scanned": bool(normalized_full_name) and not skip_full_name_scan,
         "full_name_scan_skipped": skip_full_name_scan,
         "full_name_matches": full_name_scan.get("match_count", 0),
         "manual_scan_sessions": manual_scan_sessions,
@@ -1046,13 +1048,14 @@ def confirm(
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         "file": str(file_path.resolve()),
         "pii_findings": bool(pii_findings),
-        "full_name": normalized_full_name if not skip_full_name_scan else None,
+        "full_name_scanned": bool(normalized_full_name) and not skip_full_name_scan,
         "full_name_scan_skipped": skip_full_name_scan,
         "full_name_matches": full_name_scan.get("match_count", 0),
         "manual_scan_sessions": manual_scan_sessions,
     }
     save_config(config)
 
+    result_stage = config["stage"]
     next_steps = [
         "Show the user the project breakdown, full-name scan, and PII scan results above.",
     ]
@@ -1077,15 +1080,24 @@ def confirm(
             "context snippets. If any are real secrets, redact with: "
             "dataclaw config --redact \"the_secret\" then re-export with --no-push."
         )
-    next_steps.extend([
-        "If any project should be excluded, run: dataclaw config --exclude \"project_name\" and re-export with --no-push.",
-        f"This will publish {total} sessions ({_format_size(file_size)}) publicly to Hugging Face"
-        + (f" at {repo_id}" if repo_id else "") + ". Ask the user: 'Are you ready to proceed?'",
-        "Once confirmed, push: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
-    ])
+    next_steps.append(
+        "If any project should be excluded, run: dataclaw config --exclude \"project_name\" and re-export with --no-push."
+    )
+    next_command: str | None = None
+    if pii_findings:
+        next_steps.append(
+            "Pushing remains locked until the findings are reviewed, any needed redactions are added, and you re-export with --no-push."
+        )
+    else:
+        next_steps.extend([
+            f"This will publish {total} sessions ({_format_size(file_size)}) publicly to Hugging Face"
+            + (f" at {repo_id}" if repo_id else "") + ". Ask the user: 'Are you ready to proceed?'",
+            "Once confirmed, push: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+        ])
+        next_command = "dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\""
 
     result = {
-        "stage": "confirmed",
+        "stage": result_stage,
         "stage_number": 3,
         "total_stages": 4,
         "file": str(file_path.resolve()),
@@ -1102,7 +1114,7 @@ def confirm(
         "repo": repo_id,
         "last_export_timestamp": last_export.get("timestamp"),
         "next_steps": next_steps,
-        "next_command": "dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+        "next_command": next_command,
         "attestations": attestations,
     }
     print(json.dumps(result, indent=2))
@@ -1119,15 +1131,11 @@ def prep(source_filter: str = "auto") -> None:
     effective_source_filter = _normalize_source_filter(resolved_source_choice)
 
     if not _has_session_sources(effective_source_filter):
-        if effective_source_filter == "claude":
-            err = "~/.claude was not found."
-        elif effective_source_filter == "codex":
-            err = "~/.codex was not found."
-        elif effective_source_filter == "gemini":
-            from .parser import GEMINI_DIR
-            err = f"{GEMINI_DIR} was not found."
+        if effective_source_filter == "auto":
+            err = "No supported session directories were found (checked ~/.claude, ~/.codex, ~/.gemini/tmp, ~/.local/share/opencode, ~/.openclaw, ~/.kimi, ~/.dataclaw/custom)."
         else:
-            err = "None of ~/.claude, ~/.codex, or ~/.gemini/tmp were found."
+            label = _source_label(effective_source_filter)
+            err = f"{label} session directory was not found."
         print(json.dumps({"error": err}))
         sys.exit(1)
 
@@ -1216,7 +1224,7 @@ def main() -> None:
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
     cfg.add_argument("--source", choices=sorted(EXPLICIT_SOURCE_CHOICES),
-                     help="Set export source scope explicitly: claude, codex, gemini, or all")
+                     help="Set export source scope explicitly: claude, codex, gemini, opencode, openclaw, kimi, custom, or all")
     cfg.add_argument("--exclude", type=str, help="Comma-separated projects to exclude")
     cfg.add_argument("--redact", type=str,
                      help="Comma-separated strings to always redact (API keys, usernames, domains)")
@@ -1306,11 +1314,11 @@ def _parse_csv_arg(value: str | None) -> list[str] | None:
 def _handle_config(args) -> None:
     """Handle the config subcommand."""
     has_changes = (
-        args.repo
-        or args.source
-        or args.exclude
-        or args.redact
-        or args.redact_usernames
+        args.repo is not None
+        or args.source is not None
+        or args.exclude is not None
+        or args.redact is not None
+        or args.redact_usernames is not None
         or args.confirm_projects
     )
     if not has_changes:
@@ -1337,12 +1345,12 @@ def _run_export(args) -> None:
             "error": "Source scope is not confirmed yet.",
             "hint": (
                 "Explicitly choose one source scope before exporting: "
-                "`claude`, `codex`, `gemini`, or `all`."
+                "`claude`, `codex`, `gemini`, `opencode`, `openclaw`, `kimi`, `custom`, or `all`."
             ),
             "required_action": (
-                "Ask the user whether to export Claude Code, Codex, Gemini, or all. "
-                "Then run `dataclaw config --source <claude|codex|gemini|all>` "
-                "or pass `--source <claude|codex|gemini|all>` on the export command."
+                "Ask the user whether to export Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, Custom, or all. "
+                "Then run `dataclaw config --source <claude|codex|gemini|opencode|openclaw|kimi|custom|all>` "
+                "or pass `--source <claude|codex|gemini|opencode|openclaw|kimi|custom|all>` on the export command."
             ),
             "allowed_sources": sorted(EXPLICIT_SOURCE_CHOICES),
             "blocked_on_step": "Step 2/6",
@@ -1391,15 +1399,16 @@ def _run_export(args) -> None:
 
         review_attestations = config.get("review_attestations", {})
         review_verification = config.get("review_verification", {})
-        verified_full_name = _normalize_attestation_text(review_verification.get("full_name"))
+        full_name_was_scanned = bool(review_verification.get("full_name_scanned", False))
+        full_name_scan_skipped = bool(review_verification.get("full_name_scan_skipped", False))
         _, review_errors, _ = _collect_review_attestations(
             attest_asked_full_name=review_attestations.get("asked_full_name"),
             attest_asked_sensitive=review_attestations.get("asked_sensitive_entities"),
             attest_manual_scan=review_attestations.get("manual_scan_done"),
-            full_name=verified_full_name if verified_full_name else None,
-            skip_full_name_scan=bool(review_verification.get("full_name_scan_skipped", False)),
+            full_name=None,
+            skip_full_name_scan=full_name_scan_skipped,
         )
-        if not verified_full_name and not review_verification.get("full_name_scan_skipped", False):
+        if not full_name_was_scanned and not full_name_scan_skipped:
             review_errors["asked_full_name"] = (
                 "Missing verified full-name scan from confirm step; rerun confirm (or use --skip-full-name-scan if the user declined)."
             )
@@ -1427,15 +1436,11 @@ def _run_export(args) -> None:
     print("=" * 50)
 
     if not _has_session_sources(source_filter):
-        if source_filter == "claude":
-            print(f"Error: {CLAUDE_DIR} not found.", file=sys.stderr)
-        elif source_filter == "codex":
-            print(f"Error: {CODEX_DIR} not found.", file=sys.stderr)
-        elif source_filter == "gemini":
-            from .parser import GEMINI_DIR
-            print(f"Error: {GEMINI_DIR} not found.", file=sys.stderr)
+        if source_filter == "auto":
+            print("Error: no supported session directories were found.", file=sys.stderr)
         else:
-            print("Error: none of ~/.claude, ~/.codex, or ~/.gemini/tmp were found.", file=sys.stderr)
+            label = _source_label(source_filter)
+            print(f"Error: {label} session directory not found.", file=sys.stderr)
         sys.exit(1)
 
     projects = _filter_projects_by_source(discover_projects(), source_filter)

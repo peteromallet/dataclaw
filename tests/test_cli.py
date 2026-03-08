@@ -521,10 +521,8 @@ class TestWorkflowGateMessages:
         with pytest.raises(SystemExit):
             main()
         payload = self._extract_json(capsys.readouterr().out)
-        assert payload["error"] == "No export file found."
-        assert payload["blocked_on_step"] == "Step 1/3"
-        assert len(payload["process_steps"]) == 3
-        assert "export --no-push" in payload["process_steps"][0]
+        assert "File not found" in payload["error"]
+        assert str(missing) in payload["error"]
 
     def test_confirm_missing_full_name_explains_purpose_and_skip(self, tmp_path, monkeypatch, capsys):
         export_file = tmp_path / "export.jsonl"
@@ -577,6 +575,111 @@ class TestWorkflowGateMessages:
         payload = self._extract_json(capsys.readouterr().out)
         assert payload["stage"] == "confirmed"
         assert payload["full_name_scan"]["skipped"] is True
+
+    def test_confirm_with_pii_findings_stays_in_review(self, tmp_path, monkeypatch, capsys):
+        export_file = tmp_path / "export.jsonl"
+        export_file.write_text('{"project":"p","model":"m","messages":[]}\n')
+        saved = {}
+
+        monkeypatch.setattr("dataclaw.cli.load_config", lambda: {})
+        monkeypatch.setattr("dataclaw.cli.save_config", lambda config: saved.update(config))
+        monkeypatch.setattr("dataclaw.cli._scan_pii", lambda _path: {"emails": ["user@example.com"]})
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "dataclaw",
+                "confirm",
+                "--file",
+                str(export_file),
+                "--full-name",
+                "Jane Doe",
+                "--attest-full-name",
+                "I asked Jane Doe for their full name and scanned the export for Jane Doe.",
+                "--attest-sensitive",
+                "I asked about company/client/internal names and private URLs; none found.",
+                "--attest-manual-scan",
+                "I performed a manual scan and reviewed 20 sessions across beginning, middle, and end.",
+            ],
+        )
+
+        main()
+        payload = self._extract_json(capsys.readouterr().out)
+        assert payload["stage"] == "review"
+        assert payload["next_command"] is None
+        assert saved["stage"] == "review"
+
+    def test_export_push_accepts_confirmed_full_name_scan(self, tmp_path, monkeypatch, capsys):
+        output_file = tmp_path / "export.jsonl"
+        pushed = {}
+
+        monkeypatch.setattr(
+            "dataclaw.cli.load_config",
+            lambda: {
+                "stage": "confirmed",
+                "source": "all",
+                "projects_confirmed": True,
+                "repo": "alice/my-dataset",
+                "review_attestations": {
+                    "asked_full_name": "I asked Jane Doe for their full name and scanned the export for Jane Doe.",
+                    "asked_sensitive_entities": "I asked about company/client/internal names and private URLs; none found.",
+                    "manual_scan_done": "I performed a manual scan and reviewed 20 sessions across beginning, middle, and end.",
+                },
+                "review_verification": {
+                    "full_name_scanned": True,
+                    "full_name_scan_skipped": False,
+                    "manual_scan_sessions": 20,
+                },
+            },
+        )
+        monkeypatch.setattr("dataclaw.cli.save_config", lambda _config: None)
+        monkeypatch.setattr("dataclaw.cli._has_session_sources", lambda _src: True)
+        monkeypatch.setattr(
+            "dataclaw.cli.discover_projects",
+            lambda: [
+                {
+                    "dir_name": "proj1",
+                    "display_name": "proj1",
+                    "session_count": 1,
+                    "total_size_bytes": 10,
+                    "source": "claude",
+                }
+            ],
+        )
+
+        def fake_export_to_jsonl(_projects, output_path, _anonymizer, _include_thinking, custom_strings=None):
+            del custom_strings
+            output_path.write_text('{"project":"proj1","model":"m","messages":[]}\n')
+            return {
+                "sessions": 1,
+                "models": {"m": 1},
+                "exported_at": "2026-03-06T12:00:00+00:00",
+                "redactions": 0,
+                "skipped": 0,
+            }
+
+        monkeypatch.setattr("dataclaw.cli.export_to_jsonl", fake_export_to_jsonl)
+        monkeypatch.setattr("dataclaw.cli.push_to_huggingface", lambda path, repo, meta: pushed.update({
+            "path": path,
+            "repo": repo,
+            "meta": meta,
+        }))
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "dataclaw",
+                "export",
+                "--output",
+                str(output_file),
+                "--publish-attestation",
+                "User explicitly approved publishing to Hugging Face.",
+            ],
+        )
+
+        main()
+        payload = json.loads(capsys.readouterr().out.split("---DATACLAW_JSON---", 1)[1].strip())
+        assert payload["stage"] == "done"
+        assert pushed["repo"] == "alice/my-dataset"
+        assert pushed["path"] == output_file
 
     def test_push_before_confirm_shows_step_process(self, monkeypatch, capsys):
         monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"stage": "review", "source": "all"})
