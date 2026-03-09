@@ -13,6 +13,7 @@ from dataclaw.parser import (
     _extract_user_content,
     _find_subagent_only_sessions,
     _normalize_timestamp,
+    _parse_cline_session,
     _parse_session_file,
     _parse_subagent_session,
     _parse_tool_input,
@@ -438,6 +439,8 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.CLINE_TASKS_DIR", tmp_path / "no-cline-tasks")
+        monkeypatch.setattr("dataclaw.parser._CLINE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def _write_opencode_db(self, db_path):
@@ -990,6 +993,8 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.CLINE_TASKS_DIR", tmp_path / "no-cline-tasks")
+        monkeypatch.setattr("dataclaw.parser._CLINE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
@@ -1590,6 +1595,8 @@ class TestDiscoverOpenclawProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.CLINE_TASKS_DIR", tmp_path / "no-cline-tasks")
+        monkeypatch.setattr("dataclaw.parser._CLINE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def test_discover_openclaw_projects(self, tmp_path, monkeypatch, mock_anonymizer):
@@ -1677,6 +1684,8 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.CLINE_TASKS_DIR", tmp_path / "no-cline-tasks")
+        monkeypatch.setattr("dataclaw.parser._CLINE_PROJECT_INDEX", {})
 
     def _make_valid_session(self, session_id="s1", model="gpt-4", content="hello"):
         return json.dumps({
@@ -1778,3 +1787,198 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", custom_dir)
         sessions = parse_project_sessions("nope", mock_anonymizer, source="custom")
         assert sessions == []
+
+
+class TestClineParser:
+    """Tests for Cline source discovery and parsing."""
+
+    def _disable_others(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+
+    def _setup_cline_dirs(self, tmp_path, monkeypatch):
+        """Set up Cline directory structure pointing to tmp_path."""
+        cline_dir = tmp_path / "cline-data"
+        tasks_dir = cline_dir / "tasks"
+        state_dir = cline_dir / "state"
+        tasks_dir.mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+        monkeypatch.setattr("dataclaw.parser.CLINE_DIR", cline_dir)
+        monkeypatch.setattr("dataclaw.parser.CLINE_TASKS_DIR", tasks_dir)
+        monkeypatch.setattr("dataclaw.parser.CLINE_STATE_DIR", state_dir)
+        monkeypatch.setattr("dataclaw.parser._CLINE_LEGACY_DIRS", [])
+        monkeypatch.setattr("dataclaw.parser._CLINE_PROJECT_INDEX", {})
+        return cline_dir, tasks_dir, state_dir
+
+    def _write_task(self, tasks_dir, task_id, messages):
+        """Write a Cline task with api_conversation_history.json."""
+        task_dir = tasks_dir / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        (task_dir / "api_conversation_history.json").write_text(json.dumps(messages))
+        return task_dir
+
+    def _write_task_history(self, state_dir, items):
+        """Write taskHistory.json."""
+        (state_dir / "taskHistory.json").write_text(json.dumps(items))
+
+    def test_discover_cline_projects(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cline_dir, tasks_dir, state_dir = self._setup_cline_dirs(tmp_path, monkeypatch)
+
+        # Create two tasks in the same project
+        self._write_task(tasks_dir, "task-1", [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ])
+        self._write_task(tasks_dir, "task-2", [
+            {"role": "user", "content": "bye"},
+            {"role": "assistant", "content": "goodbye"},
+        ])
+        # One task in a different project
+        self._write_task(tasks_dir, "task-3", [
+            {"role": "user", "content": "other"},
+        ])
+
+        self._write_task_history(state_dir, [
+            {"id": "task-1", "cwdOnTaskInitialization": "/home/user/project-a"},
+            {"id": "task-2", "cwdOnTaskInitialization": "/home/user/project-a"},
+            {"id": "task-3", "cwdOnTaskInitialization": "/home/user/project-b"},
+        ])
+
+        projects = discover_projects()
+        cline_projects = [p for p in projects if p["source"] == "cline"]
+        assert len(cline_projects) == 2
+        names = {p["display_name"] for p in cline_projects}
+        assert names == {"cline:project-a", "cline:project-b"}
+        # project-a should have 2 sessions
+        proj_a = next(p for p in cline_projects if p["display_name"] == "cline:project-a")
+        assert proj_a["session_count"] == 2
+
+    def test_parse_cline_session_basic(self, tmp_path, monkeypatch, mock_anonymizer):
+        cline_dir, tasks_dir, state_dir = self._setup_cline_dirs(tmp_path, monkeypatch)
+        task_dir = self._write_task(tasks_dir, "task-basic", [
+            {"role": "user", "content": "Write a function", "ts": 1700000000000},
+            {
+                "role": "assistant",
+                "content": "Here is the function",
+                "ts": 1700000010000,
+                "modelInfo": {"modelId": "claude-sonnet-4-20250514", "providerId": "anthropic"},
+                "metrics": {"tokens": {"prompt": 100, "completion": 50}},
+            },
+        ])
+
+        result = _parse_cline_session(task_dir, mock_anonymizer)
+        assert result is not None
+        assert result["session_id"] == "task-basic"
+        assert result["model"] == "claude-sonnet-4-20250514"
+        assert len(result["messages"]) == 2
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][1]["role"] == "assistant"
+        assert result["stats"]["user_messages"] == 1
+        assert result["stats"]["assistant_messages"] == 1
+        assert result["stats"]["input_tokens"] == 100
+        assert result["stats"]["output_tokens"] == 50
+
+    def test_parse_cline_session_with_tools(self, tmp_path, monkeypatch, mock_anonymizer):
+        cline_dir, tasks_dir, state_dir = self._setup_cline_dirs(tmp_path, monkeypatch)
+        task_dir = self._write_task(tasks_dir, "task-tools", [
+            {"role": "user", "content": "Read the file"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me read that file."},
+                    {"type": "tool_use", "id": "tu-1", "name": "read_file", "input": {"path": "/tmp/test.py"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu-1", "content": "file contents here"},
+                ],
+            },
+            {"role": "assistant", "content": "The file contains test code."},
+        ])
+
+        result = _parse_cline_session(task_dir, mock_anonymizer)
+        assert result is not None
+        assert len(result["messages"]) == 3  # user, assistant w/ tool, assistant
+        tool_msg = result["messages"][1]
+        assert len(tool_msg["tool_uses"]) == 1
+        assert tool_msg["tool_uses"][0]["tool"] == "read_file"
+        assert tool_msg["tool_uses"][0]["status"] == "success"
+        assert result["stats"]["tool_uses"] == 1
+
+    def test_parse_cline_session_with_thinking(self, tmp_path, monkeypatch, mock_anonymizer):
+        cline_dir, tasks_dir, state_dir = self._setup_cline_dirs(tmp_path, monkeypatch)
+        task_dir = self._write_task(tasks_dir, "task-think", [
+            {"role": "user", "content": "Solve this problem"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "Let me think about this..."},
+                    {"type": "text", "text": "Here is the solution."},
+                ],
+            },
+        ])
+
+        result = _parse_cline_session(task_dir, mock_anonymizer, include_thinking=True)
+        assert result is not None
+        assert result["messages"][1].get("thinking") == "Let me think about this..."
+
+        result_no_think = _parse_cline_session(task_dir, mock_anonymizer, include_thinking=False)
+        assert result_no_think is not None
+        assert "thinking" not in result_no_think["messages"][1]
+
+    def test_parse_cline_session_no_file(self, tmp_path, mock_anonymizer):
+        task_dir = tmp_path / "nonexistent-task"
+        task_dir.mkdir()
+        result = _parse_cline_session(task_dir, mock_anonymizer)
+        assert result is None
+
+    def test_cline_project_index_grouping(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cline_dir, tasks_dir, state_dir = self._setup_cline_dirs(tmp_path, monkeypatch)
+
+        self._write_task(tasks_dir, "t1", [{"role": "user", "content": "a"}])
+        self._write_task(tasks_dir, "t2", [{"role": "user", "content": "b"}])
+        self._write_task(tasks_dir, "t3", [{"role": "user", "content": "c"}])
+
+        self._write_task_history(state_dir, [
+            {"id": "t1", "cwdOnTaskInitialization": "/proj/alpha"},
+            {"id": "t2", "cwdOnTaskInitialization": "/proj/alpha"},
+            {"id": "t3", "cwdOnTaskInitialization": "/proj/beta"},
+        ])
+
+        sessions_alpha = parse_project_sessions("/proj/alpha", mock_anonymizer, source="cline")
+        sessions_beta = parse_project_sessions("/proj/beta", mock_anonymizer, source="cline")
+        assert len(sessions_alpha) == 2
+        assert len(sessions_beta) == 1
+
+    def test_cline_unknown_cwd_fallback(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        cline_dir, tasks_dir, state_dir = self._setup_cline_dirs(tmp_path, monkeypatch)
+
+        # Tasks exist but no taskHistory.json
+        self._write_task(tasks_dir, "orphan-1", [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ])
+        self._write_task(tasks_dir, "orphan-2", [
+            {"role": "user", "content": "bye"},
+            {"role": "assistant", "content": "goodbye"},
+        ])
+
+        projects = discover_projects()
+        cline_projects = [p for p in projects if p["source"] == "cline"]
+        assert len(cline_projects) == 1
+        assert cline_projects[0]["display_name"] == "cline:unknown"
+        assert cline_projects[0]["session_count"] == 2

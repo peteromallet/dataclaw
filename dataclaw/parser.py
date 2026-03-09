@@ -1,4 +1,4 @@
-"""Parse Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw session data into conversations."""
+"""Parse Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, and Cline session data into conversations."""
 
 import dataclasses
 import hashlib
@@ -20,6 +20,7 @@ GEMINI_SOURCE = "gemini"
 OPENCODE_SOURCE = "opencode"
 OPENCLAW_SOURCE = "openclaw"
 KIMI_SOURCE = "kimi"
+CLINE_SOURCE = "cline"
 CUSTOM_SOURCE = "custom"
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -45,6 +46,19 @@ KIMI_SESSIONS_DIR = KIMI_DIR / "sessions"
 KIMI_CONFIG_PATH = KIMI_DIR / "kimi.json"
 UNKNOWN_KIMI_CWD = "<unknown-cwd>"
 
+CLINE_DIR = Path.home() / ".cline" / "data"
+CLINE_TASKS_DIR = CLINE_DIR / "tasks"
+CLINE_STATE_DIR = CLINE_DIR / "state"
+UNKNOWN_CLINE_CWD = "<unknown-cwd>"
+_CLINE_LEGACY_DIRS = [
+    Path.home() / "Library" / "Application Support" / "Code" / "User"
+    / "globalStorage" / "saoudrizwan.claude-dev",
+    Path.home() / ".config" / "Code" / "User"
+    / "globalStorage" / "saoudrizwan.claude-dev",
+    Path.home() / "AppData" / "Roaming" / "Code" / "User"
+    / "globalStorage" / "saoudrizwan.claude-dev",
+]
+
 CUSTOM_DIR = Path.home() / ".dataclaw" / "custom"
 
 _CODEX_PROJECT_INDEX: dict[str, list[Path]] = {}
@@ -52,6 +66,7 @@ _GEMINI_HASH_MAP: dict[str, str] = {}
 _OPENCODE_PROJECT_INDEX: dict[str, list[str]] = {}
 _OPENCLAW_PROJECT_INDEX: dict[str, list[Path]] = {}
 _KIMI_PROJECT_INDEX: dict[str, list[Path]] = {}
+_CLINE_PROJECT_INDEX: dict[str, list[Path]] = {}
 
 
 def _build_gemini_hash_map() -> dict[str, str]:
@@ -140,6 +155,7 @@ def discover_projects() -> list[dict]:
     projects.extend(_discover_opencode_projects())
     projects.extend(_discover_openclaw_projects())
     projects.extend(_discover_kimi_projects())
+    projects.extend(_discover_cline_projects())
     projects.extend(_discover_custom_projects())
     return sorted(projects, key=lambda p: (p["display_name"], p["source"]))
 
@@ -334,6 +350,311 @@ def _build_kimi_project_name(cwd: str) -> str:
     return f"kimi:{Path(cwd).name or cwd}"
 
 
+def _load_cline_task_history() -> list[dict]:
+    """Load Cline task history with fallback chain."""
+    # 1. Primary: ~/.cline/data/state/taskHistory.json
+    history_file = CLINE_STATE_DIR / "taskHistory.json"
+    if history_file.exists():
+        try:
+            data = json.loads(history_file.read_text())
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # 2. Fallback: ~/.cline/data/globalState.json key "taskHistory"
+    global_state = CLINE_DIR / "globalState.json"
+    if global_state.exists():
+        try:
+            data = json.loads(global_state.read_text())
+            history = data.get("taskHistory", [])
+            if isinstance(history, list):
+                return history
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # 3. Fallback: legacy VS Code globalStorage globalState.json
+    for legacy_dir in _CLINE_LEGACY_DIRS:
+        legacy_state = legacy_dir / "globalState.json"
+        if legacy_state.exists():
+            try:
+                data = json.loads(legacy_state.read_text())
+                history = data.get("taskHistory", [])
+                if isinstance(history, list):
+                    return history
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    return []
+
+
+def _get_cline_task_dirs() -> list[Path]:
+    """Collect all Cline task dirs from primary + legacy locations, deduplicate by task ID."""
+    seen_ids: set[str] = set()
+    task_dirs: list[Path] = []
+
+    # Primary location first (preferred)
+    if CLINE_TASKS_DIR.exists():
+        for task_dir in sorted(CLINE_TASKS_DIR.iterdir()):
+            if task_dir.is_dir() and (task_dir / "api_conversation_history.json").exists():
+                seen_ids.add(task_dir.name)
+                task_dirs.append(task_dir)
+
+    # Legacy locations (only tasks not already found)
+    for legacy_dir in _CLINE_LEGACY_DIRS:
+        legacy_tasks = legacy_dir / "tasks"
+        if not legacy_tasks.exists():
+            continue
+        for task_dir in sorted(legacy_tasks.iterdir()):
+            if task_dir.is_dir() and task_dir.name not in seen_ids:
+                if (task_dir / "api_conversation_history.json").exists():
+                    seen_ids.add(task_dir.name)
+                    task_dirs.append(task_dir)
+
+    return task_dirs
+
+
+def _discover_cline_projects() -> list[dict]:
+    """Discover Cline projects grouped by working directory."""
+    index = _get_cline_project_index(refresh=True)
+    if not index:
+        return []
+
+    projects = []
+    for cwd, dirs in sorted(index.items()):
+        total_size = 0
+        for d in dirs:
+            conv_file = d / "api_conversation_history.json"
+            try:
+                total_size += conv_file.stat().st_size
+            except OSError:
+                pass
+        projects.append(
+            {
+                "dir_name": cwd,
+                "display_name": _build_cline_project_name(cwd),
+                "session_count": len(dirs),
+                "total_size_bytes": total_size,
+                "source": CLINE_SOURCE,
+            }
+        )
+    return projects
+
+
+def _get_cline_project_index(refresh: bool = False) -> dict[str, list[Path]]:
+    global _CLINE_PROJECT_INDEX
+    if refresh or not _CLINE_PROJECT_INDEX:
+        _CLINE_PROJECT_INDEX = _build_cline_project_index()
+    return _CLINE_PROJECT_INDEX
+
+
+def _build_cline_project_index() -> dict[str, list[Path]]:
+    """Map CWD -> [task_dir_paths] for Cline tasks."""
+    task_dirs = _get_cline_task_dirs()
+    history = _load_cline_task_history()
+    id_to_cwd: dict[str, str] = {}
+    for item in history:
+        task_id = item.get("id")
+        cwd = item.get("cwdOnTaskInitialization")
+        if isinstance(task_id, str) and isinstance(cwd, str) and cwd.strip():
+            id_to_cwd[task_id] = cwd
+
+    index: dict[str, list[Path]] = {}
+    for task_dir in task_dirs:
+        cwd = id_to_cwd.get(task_dir.name, UNKNOWN_CLINE_CWD)
+        index.setdefault(cwd, []).append(task_dir)
+    return index
+
+
+def _build_cline_project_name(cwd: str) -> str:
+    if cwd == UNKNOWN_CLINE_CWD:
+        return "cline:unknown"
+    return f"cline:{Path(cwd).name or cwd}"
+
+
+def _build_cline_tool_result_map(messages: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+    """Build tool_use_id -> {output, status} map from user tool_result blocks in Cline format."""
+    result: dict[str, dict] = {}
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tid = block.get("tool_use_id")
+            if not tid:
+                continue
+            is_error = bool(block.get("is_error"))
+            raw_content = block.get("content", "")
+            if isinstance(raw_content, list):
+                text = "\n\n".join(
+                    part.get("text", "") for part in raw_content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ).strip()
+            else:
+                text = str(raw_content).strip() if raw_content else ""
+            result[tid] = {
+                "output": {"text": anonymizer.text(text)} if text else {},
+                "status": "error" if is_error else "success",
+            }
+    return result
+
+
+def _parse_cline_session(
+    task_dir: Path,
+    anonymizer: Anonymizer,
+    include_thinking: bool = True,
+) -> dict | None:
+    """Parse a Cline task directory into structured session data."""
+    conv_file = task_dir / "api_conversation_history.json"
+    if not conv_file.exists():
+        return None
+
+    try:
+        raw = json.loads(conv_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    if not isinstance(raw, list):
+        return None
+
+    metadata: dict[str, Any] = {
+        "session_id": task_dir.name,
+        "cwd": None,
+        "git_branch": None,
+        "model": None,
+        "start_time": None,
+        "end_time": None,
+    }
+    stats = _make_stats()
+    tool_result_map = _build_cline_tool_result_map(raw, anonymizer)
+
+    messages: list[dict[str, Any]] = []
+    for msg in raw:
+        role = msg.get("role")
+        ts = msg.get("ts")
+        timestamp = None
+        if isinstance(ts, (int, float)) and ts > 0:
+            try:
+                timestamp = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
+            except (ValueError, OSError, OverflowError):
+                pass
+
+        if role == "user":
+            content = msg.get("content")
+            text_parts = []
+
+            if isinstance(content, str):
+                text = content.strip()
+                if text:
+                    text_parts.append(anonymizer.text(text))
+            elif isinstance(content, list):
+                # Skip messages that are only tool_results (handled via tool_result_map)
+                has_non_tool_result = False
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text":
+                        text = block.get("text", "").strip()
+                        if text:
+                            text_parts.append(anonymizer.text(text))
+                            has_non_tool_result = True
+                    elif block_type != "tool_result":
+                        has_non_tool_result = True
+                if not has_non_tool_result and not text_parts:
+                    continue
+
+            if text_parts:
+                messages.append({
+                    "role": "user",
+                    "content": "\n\n".join(text_parts),
+                    "timestamp": timestamp,
+                })
+                stats["user_messages"] += 1
+                if not metadata["start_time"] and timestamp:
+                    metadata["start_time"] = timestamp
+
+        elif role == "assistant":
+            text_parts = []
+            thinking_parts = []
+            tool_uses = []
+
+            # Extract model info
+            model_info = msg.get("modelInfo")
+            if isinstance(model_info, dict) and not metadata["model"]:
+                model_id = model_info.get("modelId")
+                if isinstance(model_id, str) and model_id:
+                    metadata["model"] = model_id
+
+            # Extract token stats
+            metrics = msg.get("metrics")
+            if isinstance(metrics, dict):
+                tokens = metrics.get("tokens")
+                if isinstance(tokens, dict):
+                    prompt = tokens.get("prompt", 0)
+                    completion = tokens.get("completion", 0)
+                    if isinstance(prompt, (int, float)):
+                        stats["input_tokens"] += int(prompt)
+                    if isinstance(completion, (int, float)):
+                        stats["output_tokens"] += int(completion)
+
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content.strip()
+                if text:
+                    text_parts.append(anonymizer.text(text))
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text":
+                        text = block.get("text", "").strip()
+                        if text:
+                            text_parts.append(anonymizer.text(text))
+                    elif block_type == "thinking" and include_thinking:
+                        think = block.get("thinking", "").strip()
+                        if think:
+                            thinking_parts.append(anonymizer.text(think))
+                    elif block_type == "tool_use":
+                        tool_name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        tu: dict[str, Any] = {
+                            "tool": tool_name,
+                            "input": _parse_tool_input(tool_name, tool_input, anonymizer),
+                        }
+                        tid = block.get("id")
+                        if tid and tid in tool_result_map:
+                            tr = tool_result_map[tid]
+                            tu["output"] = tr.get("output", {})
+                            tu["status"] = tr.get("status", "success")
+                        tool_uses.append(tu)
+
+            if not text_parts and not thinking_parts and not tool_uses:
+                continue
+
+            out_msg: dict[str, Any] = {"role": "assistant"}
+            if text_parts:
+                out_msg["content"] = "\n\n".join(text_parts)
+            if thinking_parts:
+                out_msg["thinking"] = "\n\n".join(thinking_parts)
+            if tool_uses:
+                out_msg["tool_uses"] = tool_uses
+                stats["tool_uses"] += len(tool_uses)
+            if timestamp:
+                out_msg["timestamp"] = timestamp
+                metadata["end_time"] = timestamp
+
+            messages.append(out_msg)
+            stats["assistant_messages"] += 1
+
+    return _make_session_result(metadata, messages, stats)
+
+
 def _discover_custom_projects() -> list[dict]:
     if not CUSTOM_DIR.exists():
         return []
@@ -426,6 +747,20 @@ def parse_project_sessions(
     """Parse all sessions for a project into structured dicts."""
     if source == CUSTOM_SOURCE:
         return _parse_custom_sessions(project_dir_name, anonymizer)
+
+    if source == CLINE_SOURCE:
+        index = _get_cline_project_index()
+        task_dirs = index.get(project_dir_name, [])
+        sessions = []
+        for task_dir in task_dirs:
+            parsed = _parse_cline_session(task_dir, anonymizer, include_thinking)
+            if parsed and parsed["messages"]:
+                parsed["project"] = _build_cline_project_name(project_dir_name)
+                parsed["source"] = CLINE_SOURCE
+                if not parsed.get("model"):
+                    parsed["model"] = "unknown"
+                sessions.append(parsed)
+        return sessions
 
     if source == KIMI_SOURCE:
         project_hash = _get_kimi_project_hash(project_dir_name)
