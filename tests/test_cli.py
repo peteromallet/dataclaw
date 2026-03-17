@@ -580,7 +580,7 @@ class TestWorkflowGateMessages:
 
     def test_push_before_confirm_shows_step_process(self, monkeypatch, capsys):
         monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"stage": "review", "source": "all"})
-        monkeypatch.setattr("sys.argv", ["dataclaw", "export"])
+        monkeypatch.setattr("sys.argv", ["dataclaw", "export", "--push"])
         with pytest.raises(SystemExit):
             main()
         payload = self._extract_json(capsys.readouterr().out)

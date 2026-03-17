@@ -24,6 +24,7 @@ class DataClawConfig(TypedDict, total=False):
     review_verification: dict
     last_confirm: dict
     publish_attestation: str
+    daemon_port: int | None
 
 
 DEFAULT_CONFIG: DataClawConfig = {

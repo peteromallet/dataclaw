@@ -576,23 +576,49 @@ dataclaw
 """
 
 
+SKILL_TARGETS: dict[str, dict[str, str]] = {
+    "claude": {
+        "dest_template": ".claude/skills/dataclaw/SKILL.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+    "openclaw": {
+        "dest_template": "DATACLAW_AGENTS.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+    "codex": {
+        "dest_template": "DATACLAW_AGENTS.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+    "cline": {
+        "dest_template": ".cline/dataclaw/SKILL.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+}
+
+
 def update_skill(target: str) -> None:
     """Download and install the dataclaw skill for a coding agent."""
-    if target != "claude":
-        print(f"Error: unknown target '{target}'. Supported: claude", file=sys.stderr)
+    target_config = SKILL_TARGETS.get(target)
+    if not target_config:
+        print(f"Error: unknown target '{target}'. Supported: {', '.join(SKILL_TARGETS)}", file=sys.stderr)
         sys.exit(1)
 
-    dest = Path.cwd() / ".claude" / "skills" / "dataclaw" / "SKILL.md"
+    dest = Path.cwd() / target_config["dest_template"]
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Downloading skill from {SKILL_URL}...")
+    url = target_config["source_url"]
+    print(f"Downloading skill from {url}...")
     try:
-        with urllib.request.urlopen(SKILL_URL, timeout=15) as resp:
+        with urllib.request.urlopen(url, timeout=15) as resp:
             content = resp.read().decode()
     except (OSError, urllib.error.URLError) as e:
         print(f"Error downloading skill: {e}", file=sys.stderr)
         # Fall back to bundled copy
-        bundled = Path(__file__).resolve().parent.parent / "docs" / "SKILL.md"
+        bundled = Path(__file__).resolve().parent.parent / "docs" / target_config["source_file"]
         if bundled.exists():
             print(f"Using bundled copy from {bundled}")
             content = bundled.read_text()
@@ -604,8 +630,13 @@ def update_skill(target: str) -> None:
     print(f"Skill installed to {dest}")
     print(json.dumps({
         "installed": str(dest),
-        "next_steps": ["Run: dataclaw prep"],
-        "next_command": "dataclaw prep",
+        "target": target,
+        "next_steps": [
+            "Run: dataclaw scan",
+            "Then: dataclaw inbox --json",
+            "Or open the full UI: dataclaw serve",
+        ],
+        "next_command": "dataclaw scan",
     }, indent=2))
 
 
@@ -1184,6 +1215,156 @@ def prep(source_filter: str = "auto") -> None:
     print(json.dumps(result, indent=2))
 
 
+def _run_scan(source_filter: str | None = None) -> None:
+    """One-shot scan: index sessions into the workbench database."""
+    from .daemon import Scanner
+    from .index import get_stats, open_index
+
+    scanner = Scanner(source_filter=source_filter)
+    print("Scanning sessions...")
+    results = scanner.scan_once()
+
+    total_new = sum(results.values())
+    if total_new:
+        print(f"Indexed {total_new} new sessions:")
+        for source, count in sorted(results.items()):
+            if count > 0:
+                print(f"  {source}: {count}")
+    else:
+        print("No new sessions found.")
+
+    conn = open_index()
+    stats = get_stats(conn)
+    conn.close()
+
+    print(f"\nTotal indexed: {stats['total']}")
+    if stats["by_status"]:
+        for status, count in sorted(stats["by_status"].items()):
+            print(f"  {status}: {count}")
+    if stats["by_source"]:
+        print("By source:")
+        for source, count in sorted(stats["by_source"].items()):
+            print(f"  {source}: {count}")
+
+
+def _run_inbox(
+    status: str | None = None,
+    source: str | None = None,
+    limit: int = 20,
+    output_json: bool = False,
+) -> None:
+    """Show indexed sessions in the terminal."""
+    from .index import get_stats, open_index, query_sessions
+
+    conn = open_index()
+    sessions = query_sessions(conn, status=status, source=source, limit=limit)
+    stats = get_stats(conn)
+    conn.close()
+
+    if output_json:
+        # Parse JSON fields for clean output
+        items = []
+        for i, s in enumerate(sessions, 1):
+            value_badges = s.get("value_badges", [])
+            if isinstance(value_badges, str):
+                try:
+                    value_badges = json.loads(value_badges)
+                except (json.JSONDecodeError, ValueError):
+                    value_badges = []
+            risk_badges = s.get("risk_badges", [])
+            if isinstance(risk_badges, str):
+                try:
+                    risk_badges = json.loads(risk_badges)
+                except (json.JSONDecodeError, ValueError):
+                    risk_badges = []
+            items.append({
+                "index": i,
+                "session_id": s.get("session_id"),
+                "display_title": s.get("display_title", ""),
+                "source": s.get("source", ""),
+                "model": s.get("model"),
+                "messages": s.get("user_messages", 0) + s.get("assistant_messages", 0),
+                "tokens": s.get("input_tokens", 0) + s.get("output_tokens", 0),
+                "outcome_badge": s.get("outcome_badge"),
+                "value_badges": value_badges,
+                "risk_badges": risk_badges,
+                "review_status": s.get("review_status", "new"),
+                "project": s.get("project", ""),
+                "task_type": s.get("task_type"),
+                "start_time": s.get("start_time"),
+            })
+        print(json.dumps({
+            "sessions": items,
+            "total": stats["total"],
+            "showing": len(items),
+            "by_status": stats.get("by_status", {}),
+        }, indent=2))
+        return
+
+    if not sessions:
+        print("No sessions found. Run `dataclaw scan` first.")
+        return
+
+    # Print a compact table
+    print(f"{'Status':<12} {'Source':<10} {'Model':<25} {'Msgs':>5} {'Tokens':>8}  Title")
+    print("-" * 100)
+    for s in sessions:
+        title = (s.get("display_title") or "")[:45]
+        model = (s.get("model") or "")[:24]
+        msgs = s.get("user_messages", 0) + s.get("assistant_messages", 0)
+        tokens = s.get("input_tokens", 0) + s.get("output_tokens", 0)
+        status_str = s.get("review_status", "new")
+        source_str = s.get("source", "")
+        # Badges
+        badges = []
+        outcome = s.get("outcome_badge", "")
+        if outcome and outcome != "unknown":
+            badges.append(outcome)
+        try:
+            value_badges = json.loads(s.get("value_badges", "[]")) if isinstance(s.get("value_badges"), str) else (s.get("value_badges") or [])
+        except (json.JSONDecodeError, ValueError):
+            value_badges = []
+        try:
+            risk_badges = json.loads(s.get("risk_badges", "[]")) if isinstance(s.get("risk_badges"), str) else (s.get("risk_badges") or [])
+        except (json.JSONDecodeError, ValueError):
+            risk_badges = []
+        badges.extend(value_badges[:2])
+        badges.extend(risk_badges[:2])
+        badge_str = f" [{', '.join(badges)}]" if badges else ""
+
+        print(f"{status_str:<12} {source_str:<10} {model:<25} {msgs:>5} {tokens:>8}  {title}{badge_str}")
+
+    print(f"\n{len(sessions)} sessions shown. Use `dataclaw serve` for the full review UI.")
+
+
+def _run_review_action(
+    action: str,
+    session_ids: list[str],
+    reason: str | None = None,
+) -> None:
+    """Update session review status for one or more sessions."""
+    from .index import open_index, update_session
+
+    if not session_ids:
+        print(json.dumps({"error": "No session IDs provided."}))
+        sys.exit(1)
+
+    conn = open_index()
+    results = []
+    for sid in session_ids:
+        ok = update_session(conn, sid, status=action, reason=reason)
+        results.append({"session_id": sid, "ok": ok})
+    conn.close()
+
+    success = sum(1 for r in results if r["ok"])
+    print(json.dumps({
+        "action": action,
+        "updated": success,
+        "not_found": len(results) - success,
+        "results": results,
+    }, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="DataClaw — Claude/Codex -> Hugging Face")
     sub = parser.add_subparsers(dest="command")
@@ -1211,7 +1392,8 @@ def main() -> None:
     list_parser.add_argument("--source", choices=SOURCE_CHOICES, default="auto")
 
     us = sub.add_parser("update-skill", help="Install/update the dataclaw skill for a coding agent")
-    us.add_argument("target", choices=["claude"], help="Agent to install skill for")
+    us.add_argument("target", choices=["claude", "openclaw", "codex", "cline"],
+                    help="Agent to install skill for")
 
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
@@ -1225,15 +1407,42 @@ def main() -> None:
     cfg.add_argument("--confirm-projects", action="store_true",
                      help="Mark project selection as confirmed (include all)")
 
-    exp = sub.add_parser("export", help="Export and push (default)")
-    # Export flags on both the subcommand and root parser so `dataclaw --no-push` works
+    # Workbench commands
+    serve_parser = sub.add_parser("serve", help="Start the workbench daemon + web UI")
+    serve_parser.add_argument("--port", type=int, default=8384, help="Port (default: 8384)")
+    serve_parser.add_argument("--no-browser", action="store_true", help="Don't open browser")
+    serve_parser.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None,
+                              help="Only scan this source")
+
+    scan_parser = sub.add_parser("scan", help="One-shot index sessions into local workbench DB")
+    scan_parser.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None,
+                             help="Only scan this source")
+
+    inbox_parser = sub.add_parser("inbox", help="List indexed sessions in terminal")
+    inbox_parser.add_argument("--status", choices=["new", "shortlisted", "approved", "blocked"],
+                              default=None)
+    inbox_parser.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None)
+    inbox_parser.add_argument("--limit", type=int, default=20)
+    inbox_parser.add_argument("--json", action="store_true", help="Output JSON for agent parsing")
+
+    # Review action commands
+    for action_name in ("approve", "block", "shortlist"):
+        action_parser = sub.add_parser(action_name, help=f"{action_name.title()} sessions by ID")
+        action_parser.add_argument("session_ids", nargs="+", help="Session IDs to update")
+        action_parser.add_argument("--reason", type=str, default=None, help="Reason for the action")
+
+    exp = sub.add_parser("export", help="Export locally (default). Use --push to upload to HF.")
+    # Export flags on both the subcommand and root parser so `dataclaw --push` works
     for target in (exp, parser):
         target.add_argument("--output", "-o", type=Path, default=None)
         target.add_argument("--repo", "-r", type=str, default=None)
         target.add_argument("--source", choices=SOURCE_CHOICES, default="auto")
         target.add_argument("--all-projects", action="store_true")
         target.add_argument("--no-thinking", action="store_true")
-        target.add_argument("--no-push", action="store_true")
+        target.add_argument("--push", action="store_true",
+                            help="Upload to Hugging Face after export (requires dataclaw confirm first)")
+        target.add_argument("--no-push", action="store_true",
+                            help="(Default, kept for backwards compatibility) Export locally only")
         target.add_argument(
             "--publish-attestation",
             type=str,
@@ -1244,6 +1453,29 @@ def main() -> None:
 
     args = parser.parse_args()
     command = args.command or "export"
+
+    if command == "serve":
+        from .daemon import run_server
+        run_server(
+            port=args.port,
+            open_browser=not args.no_browser,
+            source_filter=args.source,
+        )
+        return
+
+    if command == "scan":
+        _run_scan(source_filter=args.source)
+        return
+
+    if command == "inbox":
+        _run_inbox(status=args.status, source=args.source, limit=args.limit,
+                   output_json=args.json)
+        return
+
+    if command in ("approve", "block", "shortlist"):
+        status_map = {"approve": "approved", "block": "blocked", "shortlist": "shortlisted"}
+        _run_review_action(status_map[command], args.session_ids, reason=args.reason)
+        return
 
     if command == "prep":
         prep(source_filter=args.source)
@@ -1352,7 +1584,9 @@ def _run_export(args) -> None:
         sys.exit(1)
 
     # Gate: require `dataclaw confirm` before pushing
-    if not args.no_push:
+    # Default is local-only. Push only when --push is explicitly passed.
+    wants_push = getattr(args, "push", False) and not args.no_push
+    if wants_push:
         if args.attest_user_approved_publish and not args.publish_attestation:
             print(json.dumps({
                 "error": "Deprecated publish attestation flag was provided.",
@@ -1480,7 +1714,7 @@ def _run_export(args) -> None:
 
     # Resolve repo — CLI flag > config > auto-detect from HF username
     repo_id = args.repo or config.get("repo")
-    if not repo_id and not args.no_push:
+    if not repo_id and wants_push:
         hf_user = get_hf_username()
         if hf_user:
             repo_id = default_repo_name(hf_user)
@@ -1545,11 +1779,11 @@ def _run_export(args) -> None:
         "models": meta["models"],
         "source": source_choice,
     }
-    if args.no_push:
+    if not wants_push:
         config["stage"] = "review"
     save_config(config)
 
-    if args.no_push:
+    if not wants_push:
         print(f"\nDone! JSONL file: {output_path}")
         abs_path = str(output_path.resolve())
         next_steps, next_command = _build_status_next_steps("review", config, None, None)

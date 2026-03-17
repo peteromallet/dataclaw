@@ -35,5 +35,11 @@ Issues = "https://github.com/banodoco/dataclaw/issues"
 [project.scripts]
 dataclaw = "dataclaw.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["dataclaw*"]
+
+[tool.setuptools.package-data]
+"dataclaw" = ["web/frontend/dist/**/*"]
+
 [project.optional-dependencies]
 dev = ["pytest"]
