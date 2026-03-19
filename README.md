@@ -9,7 +9,7 @@ Review, score, and curate your coding agent conversation traces locally. DataCla
 Index your local sessions, auto-score them for quality, and open a browser workbench — all in three commands:
 
 ```bash
-pip install dataclaw
+pip install git+https://github.com/kaiaiagent/dataclaw.git
 dataclaw scan                                   # Index all local sessions
 dataclaw score --batch --auto-triage             # AI-score sessions, auto-approve 4-5, auto-block 1-2
 dataclaw serve                                   # Open workbench at localhost:8384
@@ -26,8 +26,8 @@ Help me review and curate my coding agent traces using DataClaw.
 Install it, set up the skill, then walk me through the process.
 
 STEP 1 — INSTALL
-  pip install dataclaw
-  If that fails: git clone https://github.com/banodoco/dataclaw.git /tmp/dataclaw && pip install /tmp/dataclaw
+  pip install git+https://github.com/kaiaiagent/dataclaw.git
+  If that fails: git clone https://github.com/kaiaiagent/dataclaw.git /tmp/dataclaw && pip install /tmp/dataclaw
   If that also fails, ask the user where the source is.
 
 STEP 2 — INSTALL SKILL
@@ -50,7 +50,7 @@ Use the Inbox to triage traces, Search to find sessions, and Bundles to assemble
 ### Quick start
 
 ```bash
-pip install dataclaw
+pip install git+https://github.com/kaiaiagent/dataclaw.git
 
 # Scan and score
 dataclaw scan
@@ -125,7 +125,7 @@ DataClaw applies multiple layers of protection:
 Automated redaction cannot catch everything — especially service-specific
 identifiers, third-party PII, or secrets in unusual formats.
 
-To help improve redaction, report issues: https://github.com/banodoco/dataclaw/issues
+To help improve redaction, report issues: https://github.com/kaiaiagent/dataclaw/issues
 
 </details>
 

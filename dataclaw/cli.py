@@ -16,8 +16,8 @@ from .parser import CLAUDE_DIR, CODEX_DIR, CUSTOM_DIR, GEMINI_DIR, KIMI_DIR, OPE
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
-REPO_URL = "https://github.com/banodoco/dataclaw"
-SKILL_URL = "https://raw.githubusercontent.com/banodoco/dataclaw/main/docs/SKILL.md"
+REPO_URL = "https://github.com/kaiaiagent/dataclaw"
+SKILL_URL = "https://raw.githubusercontent.com/kaiaiagent/dataclaw/main/docs/SKILL.md"
 
 REQUIRED_REVIEW_ATTESTATIONS: dict[str, str] = {
     "asked_full_name": "I asked the user for their full name and scanned for it.",

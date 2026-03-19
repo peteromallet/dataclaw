@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 license = "MIT"
 readme = "README.md"
 authors = [
-    {name = "Banodoco"},
+    {name = "kaiaiagent"},
 ]
 keywords = ["claude-code", "codex", "gemini-cli", "opencode", "openclaw", "dataset", "conversations"]
 classifiers = [
@@ -26,9 +26,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/banodoco/dataclaw"
-Repository = "https://github.com/banodoco/dataclaw"
-Issues = "https://github.com/banodoco/dataclaw/issues"
+Homepage = "https://github.com/kaiaiagent/dataclaw"
+Repository = "https://github.com/kaiaiagent/dataclaw"
+Issues = "https://github.com/kaiaiagent/dataclaw/issues"
 
 [project.scripts]
 dataclaw = "dataclaw.cli:main"
