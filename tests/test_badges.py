@@ -154,6 +154,75 @@ class TestDisplayTitle:
         title = compute_display_title(session)
         assert title == "test-project"
 
+    def test_strips_xml_tags(self):
+        title = compute_display_title(_make_session("Fix the <b>login</b> bug"))
+        assert title == "Fix the login bug"
+
+    def test_skips_command_message(self):
+        """Should skip <command-message>init</command-message> and use the next real message."""
+        session = _make_session("")
+        session["messages"] = [
+            {"role": "user", "content": "<command-message>init</command-message>", "tool_uses": []},
+            {"role": "assistant", "content": "Initializing...", "tool_uses": []},
+            {"role": "user", "content": "Add a REST endpoint for user profiles", "tool_uses": []},
+            {"role": "assistant", "content": "Working on it.", "tool_uses": []},
+        ]
+        title = compute_display_title(session)
+        assert title == "Add a REST endpoint for user profiles"
+
+    def test_skips_local_command_caveat(self):
+        session = _make_session("")
+        session["messages"] = [
+            {"role": "user", "content": "<local-command-caveat>Caveat: The messages below were sent by a tool</local-command-caveat>", "tool_uses": []},
+            {"role": "assistant", "content": "OK", "tool_uses": []},
+            {"role": "user", "content": "Refactor the auth middleware", "tool_uses": []},
+            {"role": "assistant", "content": "Sure.", "tool_uses": []},
+        ]
+        title = compute_display_title(session)
+        assert title == "Refactor the auth middleware"
+
+    def test_skips_terse_single_word(self):
+        session = _make_session("")
+        session["messages"] = [
+            {"role": "user", "content": "install", "tool_uses": []},
+            {"role": "assistant", "content": "Installing...", "tool_uses": []},
+            {"role": "user", "content": "Set up the Python project with pytest", "tool_uses": []},
+            {"role": "assistant", "content": "OK.", "tool_uses": []},
+        ]
+        title = compute_display_title(session)
+        assert title == "Set up the Python project with pytest"
+
+    def test_skips_interrupted_message(self):
+        session = _make_session("")
+        session["messages"] = [
+            {"role": "user", "content": "[Request interrupted by user]", "tool_uses": []},
+            {"role": "assistant", "content": "OK", "tool_uses": []},
+            {"role": "user", "content": "Fix the database migration", "tool_uses": []},
+            {"role": "assistant", "content": "Sure.", "tool_uses": []},
+        ]
+        title = compute_display_title(session)
+        assert title == "Fix the database migration"
+
+    def test_all_skippable_falls_back(self):
+        session = _make_session("")
+        session["messages"] = [
+            {"role": "user", "content": "<command-message>init</command-message>", "tool_uses": []},
+            {"role": "assistant", "content": "Done.", "tool_uses": []},
+            {"role": "user", "content": "exit", "tool_uses": []},
+        ]
+        title = compute_display_title(session)
+        assert title == "test-project"
+
+    def test_xml_only_content_falls_back(self):
+        """A message that is purely XML tags should fall back."""
+        session = _make_session("")
+        session["messages"] = [
+            {"role": "user", "content": "Wrap in <b></b> tags", "tool_uses": []},
+            {"role": "assistant", "content": "OK.", "tool_uses": []},
+        ]
+        title = compute_display_title(session)
+        assert title == "Wrap in  tags"
+
 
 class TestComputeAll:
     def test_returns_all_fields(self):

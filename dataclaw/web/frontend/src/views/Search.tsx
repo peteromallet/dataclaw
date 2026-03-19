@@ -38,10 +38,16 @@ export function Search() {
   // no-op for selection in search view
   const handleSelect = () => {};
 
+  const handleStatusChange = () => {
+    // Re-run search to reflect status changes
+    if (query.trim()) doSearch(query);
+  };
+
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
       {/* Header */}
-      <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 20px 0', color: '#111827' }}>Search</h1>
+      <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 4px 0', color: '#111827' }}>Search</h1>
+      <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 16px 0' }}>Full-text search across all session content</p>
 
       {/* Search input */}
       <div style={{ marginBottom: 20 }}>
@@ -82,6 +88,7 @@ export function Search() {
               session={s}
               selected={false}
               onSelect={handleSelect}
+              onStatusChange={handleStatusChange}
             />
           ))}
         </div>

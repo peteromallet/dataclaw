@@ -21,6 +21,7 @@ from .index import (
     create_bundle,
     get_bundle,
     get_bundles,
+    get_dashboard_analytics,
     get_policies,
     get_session_detail,
     get_stats,
@@ -134,6 +135,17 @@ def _read_body(handler: BaseHTTPRequestHandler) -> dict:
     return json.loads(raw)
 
 
+def _parse_json_fields(rows: list[dict]) -> None:
+    """Parse JSON string fields in session rows into Python objects."""
+    for row in rows:
+        for field in ("value_badges", "risk_badges", "files_touched", "commands_run"):
+            if isinstance(row.get(field), str):
+                try:
+                    row[field] = json.loads(row[field])
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+
 class WorkbenchHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the workbench API + static files."""
 
@@ -162,6 +174,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             self._handle_search(params)
         elif path == "/api/stats":
             self._handle_stats()
+        elif path == "/api/dashboard":
+            self._handle_dashboard()
         elif path == "/api/projects":
             self._handle_projects()
         elif path == "/api/bundles":
@@ -219,14 +233,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 limit=int(params.get("limit", ["50"])[0]),
                 offset=int(params.get("offset", ["0"])[0]),
             )
-            # Parse JSON fields for the response
-            for row in result:
-                for field in ("value_badges", "risk_badges", "files_touched", "commands_run"):
-                    if isinstance(row.get(field), str):
-                        try:
-                            row[field] = json.loads(row[field])
-                        except (json.JSONDecodeError, ValueError):
-                            pass
+            _parse_json_fields(result)
             _json_response(self, result)
         finally:
             conn.close()
@@ -238,13 +245,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             if detail is None:
                 _json_response(self, {"error": "Session not found"}, 404)
                 return
-            # Parse JSON fields
-            for field in ("value_badges", "risk_badges"):
-                if isinstance(detail.get(field), str):
-                    try:
-                        detail[field] = json.loads(detail[field])
-                    except (json.JSONDecodeError, ValueError):
-                        pass
+            _parse_json_fields([detail])
             _json_response(self, detail)
         finally:
             conn.close()
@@ -258,6 +259,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 status=body.get("status"),
                 notes=body.get("notes"),
                 reason=body.get("reason"),
+                ai_quality_score=body.get("ai_quality_score"),
+                ai_score_reason=body.get("ai_score_reason"),
             )
             if ok:
                 _json_response(self, {"ok": True})
@@ -278,6 +281,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 limit=int(params.get("limit", ["50"])[0]),
                 offset=int(params.get("offset", ["0"])[0]),
             )
+            _parse_json_fields(results)
             _json_response(self, results)
         finally:
             conn.close()
@@ -287,6 +291,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         try:
             stats = get_stats(conn)
             _json_response(self, stats)
+        finally:
+            conn.close()
+
+    def _handle_dashboard(self) -> None:
+        conn = open_index()
+        try:
+            data = get_dashboard_analytics(conn)
+            _json_response(self, data)
         finally:
             conn.close()
 

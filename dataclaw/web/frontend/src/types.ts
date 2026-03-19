@@ -24,6 +24,8 @@ export interface Session {
   selection_reason: string | null;
   reviewer_notes: string | null;
   reviewed_at: string | null;
+  ai_quality_score: number | null;
+  ai_score_reason: string | null;
   blob_path: string | null;
   raw_source_path: string | null;
   indexed_at: string;
@@ -85,3 +87,19 @@ export interface ProjectSummary {
 }
 
 export type ReviewStatus = 'new' | 'shortlisted' | 'approved' | 'blocked';
+
+export interface DashboardData {
+  summary: {
+    total_sessions: number;
+    total_tokens: number;
+    unique_projects: number;
+    unique_sources: number;
+  };
+  activity: { day: string; count: number }[];
+  by_outcome_badge: { outcome_badge: string; count: number }[];
+  by_value_badge: { badge: string; count: number }[];
+  by_risk_badge: { badge: string; count: number }[];
+  by_task_type: { task_type: string; count: number }[];
+  by_model: { model: string; count: number }[];
+  tokens_by_source: { source: string; input_tokens: number; output_tokens: number }[];
+}

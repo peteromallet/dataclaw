@@ -15,6 +15,7 @@ interface Filters {
   status: string | null;
   source: string | null;
   project: string | null;
+  score: string | null;
   sort: string;
   order: string;
 }
@@ -36,6 +37,7 @@ export function Inbox() {
     status: null,
     source: null,
     project: null,
+    score: null,
     sort: 'start_time',
     order: 'desc',
   });
@@ -135,11 +137,60 @@ export function Inbox() {
     return stats.by_status[key] ?? 0;
   };
 
+  const [toast, setToast] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const showBanner = !bannerDismissed && stats.total > 0 && !stats.by_status['approved'];
+
+  const filteredSessions = filters.score
+    ? sessions.filter(s => {
+        if (filters.score === 'unscored') return s.ai_quality_score == null;
+        if (filters.score === 'low') return s.ai_quality_score != null && s.ai_quality_score <= 2;
+        return s.ai_quality_score === Number(filters.score);
+      })
+    : sessions;
+
+  const recommendedCount = sessions.filter(s => s.ai_quality_score != null && s.ai_quality_score >= 4 && s.review_status === 'new').length;
+  const lowCount = sessions.filter(s => s.ai_quality_score != null && s.ai_quality_score <= 2 && s.review_status === 'new').length;
+
+  const handleApproveRecommended = async () => {
+    setLoading(true);
+    try {
+      const recommended = sessions.filter(s => s.ai_quality_score != null && s.ai_quality_score >= 4 && s.review_status === 'new');
+      await Promise.all(recommended.map(s => api.sessions.update(s.session_id, { status: 'approved' })));
+      await Promise.all([loadSessions(0, false), loadStats()]);
+      setOffset(0);
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBlockLow = async () => {
+    setLoading(true);
+    try {
+      const low = sessions.filter(s => s.ai_quality_score != null && s.ai_quality_score <= 2 && s.review_status === 'new');
+      await Promise.all(low.map(s => api.sessions.update(s.session_id, { status: 'blocked' })));
+      await Promise.all([loadSessions(0, false), loadStats()]);
+      setOffset(0);
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: '#111827' }}>Inbox</h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: '#111827' }}>Sessions</h1>
         <button
           onClick={handleRefresh}
           disabled={scanning}
@@ -157,11 +208,46 @@ export function Inbox() {
           {scanning ? 'Scanning...' : 'Refresh'}
         </button>
       </div>
+      <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 16px 0' }}>Review and curate coding agent traces</p>
+
+      {/* Workflow banner */}
+      {showBanner && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '10px 14px',
+          marginBottom: 16,
+          background: '#fffbeb',
+          border: '1px solid #fde68a',
+          borderRadius: 8,
+          fontSize: 13,
+          color: '#92400e',
+        }}>
+          <span style={{ fontWeight: 600 }}>Workflow:</span>
+          <span>Review traces &rarr; Approve the ones you want &rarr; Go to Exports to bundle &amp; download</span>
+          <button
+            onClick={() => setBannerDismissed(true)}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: '#92400e', padding: '0 4px' }}
+          >
+            &times;
+          </button>
+        </div>
+      )}
 
       {/* Stats bar */}
       <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb' }}>
         {STATUS_TABS.map((tab) => {
           const isActive = filters.status === tab.key;
+          const count = getStatusCount(tab.key);
+          const isEmpty = count === 0 && tab.key !== null;
+          const dotColors: Record<string, string> = {
+            shortlisted: '#f59e0b',
+            approved: '#22c55e',
+            blocked: '#ef4444',
+            new: '#3b82f6',
+          };
+          const showDot = !isActive && tab.key !== null && count > 0;
           return (
             <button
               key={tab.label}
@@ -174,18 +260,78 @@ export function Inbox() {
                 background: isActive ? '#f0f9ff' : '#fafafa',
                 cursor: 'pointer',
                 textAlign: 'center',
+                opacity: isEmpty ? 0.45 : 1,
+                position: 'relative',
               }}
             >
               <div style={{ fontSize: 20, fontWeight: 700, color: isActive ? '#1d4ed8' : '#111827' }}>
-                {getStatusCount(tab.key)}
+                {count}
               </div>
-              <div style={{ fontSize: 12, color: isActive ? '#1d4ed8' : '#6b7280', marginTop: 2 }}>
+              <div style={{ fontSize: 12, color: isActive ? '#1d4ed8' : '#6b7280', marginTop: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
                 {tab.label}
+                {showDot && (
+                  <span style={{
+                    display: 'inline-block',
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: dotColors[tab.key!] ?? '#6b7280',
+                  }} />
+                )}
               </div>
             </button>
           );
         })}
       </div>
+
+      {/* Recommendation banner */}
+      {!loading && recommendedCount > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '12px 16px', marginBottom: 16,
+          background: '#f0f9ff', border: '1px solid #bfdbfe', borderRadius: 8,
+          fontSize: 13, color: '#1e40af',
+        }}>
+          <span style={{ fontSize: 14 }}>&#128274;</span>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 2 }}>Everything here is local. Only bundled exports leave your machine.</div>
+            <div>AI scored <strong>{recommendedCount}</strong> session{recommendedCount !== 1 ? 's' : ''} as high-quality (4-5). <strong>{lowCount}</strong> rated low (1-2).</div>
+          </div>
+          <button
+            onClick={handleApproveRecommended}
+            style={{
+              marginLeft: 'auto',
+              padding: '6px 14px',
+              background: '#16a34a',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Approve Recommended
+          </button>
+          <button
+            onClick={handleBlockLow}
+            style={{
+              padding: '6px 14px',
+              background: '#dc2626',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Block Low Quality
+          </button>
+        </div>
+      )}
 
       {/* Filter bar */}
       <div style={{ marginBottom: 16 }}>
@@ -229,21 +375,22 @@ export function Inbox() {
 
       {/* Sessions list */}
       <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', background: '#fff' }}>
-        {sessions.length === 0 && !loading && (
+        {filteredSessions.length === 0 && !loading && (
           <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af', fontSize: 14 }}>
             No sessions found. Try adjusting your filters or click Refresh to scan for new sessions.
           </div>
         )}
-        {sessions.map((s) => (
+        {filteredSessions.map((s) => (
           <TraceCard
             key={s.session_id}
             session={s}
             selected={selected.has(s.session_id)}
             onSelect={handleSelect}
-            onStatusChange={() => {
+            onStatusChange={(newStatus: string) => {
               loadSessions(0, false);
               loadStats();
               setOffset(0);
+              showToast(newStatus === 'note saved' ? 'Note saved' : `Session marked as ${newStatus}`);
             }}
           />
         ))}
@@ -275,6 +422,25 @@ export function Inbox() {
       {loading && sessions.length === 0 && (
         <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af', fontSize: 14 }}>
           Loading...
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          bottom: 24,
+          right: 24,
+          padding: '10px 20px',
+          background: '#1f2937',
+          color: '#fff',
+          borderRadius: 8,
+          fontSize: 13,
+          fontWeight: 500,
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          zIndex: 1000,
+        }}>
+          {toast}
         </div>
       )}
     </div>

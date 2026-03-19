@@ -30,7 +30,7 @@ const COLORS: Record<BadgeKind, Record<string, { bg: string; fg: string }>> = {
   },
 };
 
-const LABELS: Record<string, string> = {
+export const LABELS: Record<string, string> = {
   tests_passed: 'Tests Passed',
   tests_failed: 'Tests Failed',
   build_failed: 'Build Failed',
@@ -50,6 +50,34 @@ const LABELS: Record<string, string> = {
   approved: 'Approved',
   blocked: 'Blocked',
   uploaded: 'Uploaded',
+  feature: 'Feature',
+  refactor: 'Refactor',
+  analysis: 'Analysis',
+  testing: 'Testing',
+  documentation: 'Docs',
+  exploration: 'Exploration',
+};
+
+const DESCRIPTIONS: Record<string, string> = {
+  tests_passed: 'Session ended with passing tests',
+  tests_failed: 'Session ended with failing tests',
+  build_failed: 'Session ended with a build failure',
+  analysis_only: 'Analysis without code changes',
+  novel_domain: 'Uncommon language or framework',
+  long_horizon: 'Extended session (20+ messages or 50k+ tokens)',
+  tool_rich: 'Heavy tool usage (10+ tool calls)',
+  scientific_workflow: 'Data science or research workflow',
+  debugging: 'Debugging or troubleshooting session',
+  secrets_detected: 'Potential secrets found in content',
+  names_detected: 'Personal names detected in content',
+  private_url: 'Private or internal URLs detected',
+  manual_review: 'Flagged for manual review',
+  feature: 'New feature implementation',
+  refactor: 'Code refactoring session',
+  analysis: 'Code analysis or investigation',
+  testing: 'Writing or fixing tests',
+  documentation: 'Documentation work',
+  exploration: 'Codebase exploration',
 };
 
 export function BadgeChip({ kind, value }: { kind: BadgeKind; value: string }) {
@@ -58,6 +86,7 @@ export function BadgeChip({ kind, value }: { kind: BadgeKind; value: string }) {
 
   return (
     <span
+      title={DESCRIPTIONS[value]}
       style={{
         display: 'inline-block',
         padding: '1px 8px',

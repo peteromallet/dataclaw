@@ -16,6 +16,13 @@ const TYPE_LABELS: Record<string, string> = {
   block_domain: 'Block Domain',
 };
 
+const PRESET_RULES: { label: string; type: string; value: string; reason: string }[] = [
+  { label: 'Your Company Domain', type: 'redact_string', value: '@yourcompany.com', reason: 'Redact company email domain' },
+  { label: 'Internal Domains', type: 'block_domain', value: '*.internal', reason: 'Block internal domain references' },
+  { label: 'Company Name', type: 'redact_string', value: 'YourCompanyName', reason: 'Redact company name from traces' },
+  { label: 'Slack Workspace URL', type: 'redact_string', value: 'yourteam.slack.com', reason: 'Redact Slack workspace URL' },
+];
+
 export function Policies() {
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [newType, setNewType] = useState('redact_string');
@@ -64,7 +71,8 @@ export function Policies() {
 
   return (
     <div style={{ padding: '24px', maxWidth: '960px', margin: '0 auto' }}>
-      <h2 style={{ margin: '0 0 24px', fontSize: '20px', fontWeight: 600, color: '#111' }}>Policies</h2>
+      <h2 style={{ margin: '0 0 4px', fontSize: '20px', fontWeight: 600, color: '#111' }}>Rules</h2>
+      <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 20px 0' }}>Configure redaction and exclusion filters</p>
 
       {error && (
         <div
@@ -166,11 +174,130 @@ export function Policies() {
         </div>
       </div>
 
+      {/* Built-in redaction note */}
+      <div
+        style={{
+          background: '#f0fdf4',
+          border: '1px solid #bbf7d0',
+          borderRadius: '8px',
+          padding: '14px 20px',
+          marginBottom: '24px',
+          fontSize: '13px',
+          lineHeight: 1.6,
+          color: '#166534',
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>Built-in redaction (always active)</div>
+        <div style={{ color: '#15803d' }}>
+          DataClaw automatically redacts API keys (OpenAI, Anthropic, AWS, GitHub, HuggingFace, npm, PyPI, Slack),
+          JWTs, database URLs, bearer tokens, private keys, emails, IP addresses, and high-entropy secrets.
+          Use the rules below to add <strong>your own</strong> patterns — company names, internal URLs, team-specific strings.
+        </div>
+      </div>
+
+      {/* Suggested Rules */}
+      {(() => {
+        const existingValues = new Set(policies.map(p => p.value));
+        const availablePresets = PRESET_RULES.filter(p => !existingValues.has(p.value));
+        if (loading || availablePresets.length === 0) return null;
+        return (
+        <div
+          style={{
+            background: '#fffbeb',
+            border: '1px solid #fde68a',
+            borderRadius: '8px',
+            padding: '16px 20px',
+            marginBottom: '24px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600, color: '#92400e' }}>
+              Suggested Rules
+            </h3>
+            <button
+              onClick={async () => {
+                try {
+                  for (const preset of availablePresets) {
+                    await api.policies.add(preset.type, preset.value, preset.reason);
+                  }
+                  await loadPolicies();
+                } catch (e: unknown) {
+                  setError(e instanceof Error ? e.message : 'Failed to add presets');
+                }
+              }}
+              style={{
+                padding: '5px 14px',
+                background: '#92400e',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 5,
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Add All
+            </button>
+          </div>
+          <p style={{ fontSize: 12, color: '#92400e', margin: '0 0 12px' }}>
+            Common redaction patterns you can add:
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {availablePresets.map((preset) => (
+              <div
+                key={preset.label}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: '8px 12px',
+                  background: '#fff',
+                  borderRadius: 6,
+                  border: '1px solid #fde68a',
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>{preset.label}</div>
+                  <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace', marginTop: 2 }}>
+                    {TYPE_LABELS[preset.type]} &middot; {preset.value}
+                  </div>
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.policies.add(preset.type, preset.value, preset.reason);
+                      await loadPolicies();
+                    } catch (e: unknown) {
+                      setError(e instanceof Error ? e.message : 'Failed to add preset');
+                    }
+                  }}
+                  style={{
+                    padding: '5px 14px',
+                    background: '#2563eb',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 5,
+                    fontSize: 12,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Add
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+        );
+      })()}
+
       {/* Policies Table */}
       {loading ? (
         <p style={{ color: '#6b7280', fontSize: '14px' }}>Loading...</p>
       ) : policies.length === 0 ? (
-        <p style={{ color: '#6b7280', fontSize: '14px' }}>No policies configured.</p>
+        null
       ) : (
         <div
           style={{

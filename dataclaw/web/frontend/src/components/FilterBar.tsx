@@ -6,6 +6,7 @@ interface Filters {
   status: string | null;
   source: string | null;
   project: string | null;
+  score: string | null;
   sort: string;
   order: string;
 }
@@ -77,6 +78,20 @@ export function FilterBar({ filters, onChange }: FilterBarProps) {
         <option value="sensitivity_score:desc">Highest risk</option>
         <option value="input_tokens:desc">Most tokens</option>
         <option value="tool_uses:desc">Most tool use</option>
+        <option value="ai_quality_score:desc">Highest quality</option>
+      </select>
+
+      <select
+        value={filters.score ?? ''}
+        onChange={(e) => set('score', e.target.value)}
+        style={selectStyle}
+      >
+        <option value="">All scores</option>
+        <option value="5">Excellent (5)</option>
+        <option value="4">Good (4)</option>
+        <option value="3">Average (3)</option>
+        <option value="low">Low (1-2)</option>
+        <option value="unscored">Unscored</option>
       </select>
     </div>
   );

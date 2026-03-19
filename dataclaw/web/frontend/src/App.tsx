@@ -4,12 +4,14 @@ import { Search } from './views/Search.tsx';
 import SessionDetail from './views/SessionDetail.tsx';
 import { Bundles } from './views/Bundles.tsx';
 import { Policies } from './views/Policies.tsx';
+import { Dashboard } from './views/Dashboard.tsx';
 
 const NAV_ITEMS = [
-  { to: '/', label: 'Inbox' },
+  { to: '/dashboard', label: 'Dashboard' },
+  { to: '/', label: 'Sessions' },
   { to: '/search', label: 'Search' },
-  { to: '/bundles', label: 'Bundles' },
-  { to: '/policies', label: 'Policies' },
+  { to: '/bundles', label: 'Exports' },
+  { to: '/policies', label: 'Rules' },
 ];
 
 function Sidebar() {
@@ -71,6 +73,7 @@ export default function App() {
         <Sidebar />
         <main style={{ flex: 1, overflow: 'auto', background: '#fff' }}>
           <Routes>
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/" element={<Inbox />} />
             <Route path="/search" element={<Search />} />
             <Route path="/session/:id" element={<SessionDetail />} />

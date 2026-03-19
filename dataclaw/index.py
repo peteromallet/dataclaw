@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     raw_source_path    TEXT,
     indexed_at         TEXT NOT NULL,
     updated_at         TEXT,
-    bundle_id          TEXT REFERENCES bundles(bundle_id)
+    bundle_id          TEXT REFERENCES bundles(bundle_id),
+    ai_quality_score   INTEGER,
+    ai_score_reason    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bundles (
@@ -74,24 +76,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time);
 
 FTS_SCHEMA_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+    session_id,
     display_title,
     transcript_text,
     files_touched,
-    commands_run,
-    content=''
+    commands_run
 );
 """
 
-# We use contentless FTS5 (content='') because the transcript_text column
-# has no counterpart in the sessions table -- full transcripts live in blob
-# files.  Contentless mode means FTS only stores the inverted index and
-# cannot return the original text, which is fine since we always join back
-# to the sessions table for display data.
-#
-# With contentless FTS, INSERT requires an explicit rowid.  We use the
-# sessions table rowid so we can JOIN on it.  Deletes require the
-# 'delete' command with the original indexed content to remove terms
-# from the inverted index.
+# We use a regular FTS5 table (not contentless) so it stores its own content.
+# This avoids rowid synchronization issues with INSERT OR REPLACE on the
+# sessions table.  We join on session_id instead of rowid.
+# The transcript_text column holds flattened message content for search.
 
 
 def _now_iso() -> str:
@@ -109,9 +105,10 @@ def open_index() -> sqlite3.Connection:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     BLOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(INDEX_DB))
+    conn = sqlite3.connect(str(INDEX_DB), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
 
     conn.executescript(SCHEMA_SQL)
@@ -125,6 +122,19 @@ def open_index() -> sqlite3.Connection:
     except sqlite3.OperationalError:
         # FTS5 extension not available -- full-text search will be disabled
         pass
+
+    # Migrations: add columns that may be missing in older databases.
+    for col, col_type in [
+        ("ai_quality_score", "INTEGER"),
+        ("ai_score_reason", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e):
+                raise
+            # Column already exists — ignore.
 
     return conn
 
@@ -317,7 +327,7 @@ def upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) ->
 
         # Check if session already exists and capture fields we need to preserve
         existing = conn.execute(
-            "SELECT session_id, review_status, indexed_at, rowid FROM sessions WHERE session_id = ?",
+            "SELECT session_id, review_status, indexed_at, ai_quality_score, ai_score_reason, rowid FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         is_new = existing is None
@@ -325,49 +335,20 @@ def upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) ->
         # Write blob
         blob_path = _write_blob(session_id, session)
 
-        # Delete old FTS entry before replacing (external content FTS5 requirement).
-        # The 'delete' command needs the OLD content that was indexed, so we must
-        # read the old values from the sessions table before the row is replaced.
+        # Delete old FTS entry before replacing.
         if has_fts and not is_new:
-            old_row = conn.execute(
-                "SELECT rowid, display_title, files_touched, commands_run "
-                "FROM sessions WHERE session_id = ?",
+            conn.execute(
+                "DELETE FROM sessions_fts WHERE session_id = ?",
                 (session_id,),
-            ).fetchone()
-            if old_row:
-                # Load old transcript from old blob for accurate FTS deletion
-                old_blob = conn.execute(
-                    "SELECT blob_path FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-                old_transcript = ""
-                if old_blob and old_blob["blob_path"]:
-                    old_blob_path = Path(old_blob["blob_path"])
-                    if old_blob_path.exists():
-                        try:
-                            with open(old_blob_path) as bf:
-                                old_session_data = json.load(bf)
-                            old_transcript = _flatten_transcript(old_session_data)
-                        except (json.JSONDecodeError, OSError):
-                            pass
-                conn.execute(
-                    "INSERT INTO sessions_fts(sessions_fts, rowid, "
-                    "display_title, transcript_text, files_touched, commands_run) "
-                    "VALUES('delete', ?, ?, ?, ?, ?)",
-                    (
-                        old_row["rowid"],
-                        old_row["display_title"] or "",
-                        old_transcript,
-                        old_row["files_touched"] or "",
-                        old_row["commands_run"] or "",
-                    ),
-                )
+            )
 
         # Preserve review_status and indexed_at from old row before REPLACE
         # deletes it. INSERT OR REPLACE deletes the conflicting row first,
         # so subqueries referencing the old row in VALUES would find nothing.
         preserved_status = existing["review_status"] if not is_new else "new"
         preserved_indexed_at = existing["indexed_at"] if not is_new else now
+        preserved_ai_score = existing["ai_quality_score"] if not is_new else None
+        preserved_ai_reason = existing["ai_score_reason"] if not is_new else None
 
         conn.execute(
             """INSERT OR REPLACE INTO sessions (
@@ -382,7 +363,8 @@ def upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) ->
                 files_touched, commands_run,
                 blob_path,
                 indexed_at, updated_at,
-                review_status
+                review_status,
+                ai_quality_score, ai_score_reason
             ) VALUES (
                 ?, ?, ?, ?,
                 ?, ?, ?,
@@ -395,7 +377,8 @@ def upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) ->
                 ?, ?,
                 ?,
                 ?, ?,
-                ?
+                ?,
+                ?, ?
             )""",
             (
                 session_id, project, source, session.get("model"),
@@ -418,29 +401,26 @@ def upsert_sessions(conn: sqlite3.Connection, sessions: list[dict[str, Any]]) ->
                 preserved_indexed_at,
                 now,
                 preserved_status,
+                preserved_ai_score,
+                preserved_ai_reason,
             ),
         )
 
-        # Insert FTS entry for the new/replaced row
+        # Insert FTS entry
         if has_fts:
-            new_rowid = conn.execute(
-                "SELECT rowid FROM sessions WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-            if new_rowid:
-                transcript = _flatten_transcript(session)
-                conn.execute(
-                    "INSERT INTO sessions_fts(rowid, "
-                    "display_title, transcript_text, files_touched, commands_run) "
-                    "VALUES(?, ?, ?, ?, ?)",
-                    (
-                        new_rowid["rowid"],
-                        display_title,
-                        transcript,
-                        " ".join(files),
-                        " ".join(commands),
-                    ),
-                )
+            transcript = _flatten_transcript(session)
+            conn.execute(
+                "INSERT INTO sessions_fts("
+                "session_id, display_title, transcript_text, files_touched, commands_run) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    display_title,
+                    transcript,
+                    " ".join(files),
+                    " ".join(commands),
+                ),
+            )
 
         if is_new:
             new_count += 1
@@ -480,7 +460,7 @@ def query_sessions(
         "project", "source", "model", "review_status",
         "user_messages", "assistant_messages", "tool_uses",
         "input_tokens", "output_tokens", "duration_seconds",
-        "sensitivity_score",
+        "sensitivity_score", "ai_quality_score",
     }
     if sort not in allowed_sort_columns:
         sort = "start_time"
@@ -494,7 +474,7 @@ def query_sessions(
         # FTS join query
         base = (
             "SELECT s.* FROM sessions s "
-            "JOIN sessions_fts f ON s.rowid = f.rowid "
+            "JOIN sessions_fts f ON s.session_id = f.session_id "
             "WHERE sessions_fts MATCH ?"
         )
         params.append(search_text)
@@ -570,12 +550,19 @@ def update_session(
     status: str | None = None,
     notes: str | None = None,
     reason: str | None = None,
+    ai_quality_score: int | None = None,
+    ai_score_reason: str | None = None,
 ) -> bool:
     """Update review fields on a session.
 
     Sets reviewed_at when status changes. Returns True if the session was
     found and updated, False otherwise.
     """
+    if ai_quality_score is not None:
+        ai_quality_score = int(ai_quality_score)
+        if not (1 <= ai_quality_score <= 5):
+            return False
+
     row = conn.execute(
         "SELECT session_id, review_status FROM sessions WHERE session_id = ?",
         (session_id,),
@@ -602,6 +589,14 @@ def update_session(
         updates.append("selection_reason = ?")
         params.append(reason)
 
+    if ai_quality_score is not None:
+        updates.append("ai_quality_score = ?")
+        params.append(ai_quality_score)
+
+    if ai_score_reason is not None:
+        updates.append("ai_score_reason = ?")
+        params.append(ai_score_reason)
+
     if not updates:
         return True
 
@@ -615,6 +610,32 @@ def update_session(
     )
     conn.commit()
     return True
+
+
+def query_unscored_sessions(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return sessions where ai_quality_score IS NULL.
+
+    Returns a list of dicts with session_id, display_title, task_type,
+    outcome_badge, project, and source.
+    """
+    params: list[Any] = []
+    sql = (
+        "SELECT session_id, display_title, task_type, outcome_badge, project, source "
+        "FROM sessions WHERE ai_quality_score IS NULL"
+    )
+    if source is not None:
+        sql += " AND source = ?"
+        params.append(source)
+    sql += " ORDER BY start_time DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
 
 
 def search_fts(
@@ -633,10 +654,10 @@ def search_fts(
         return []
 
     rows = conn.execute(
-        "SELECT s.*, rank FROM sessions s "
-        "JOIN sessions_fts f ON s.rowid = f.rowid "
+        "SELECT s.* FROM sessions s "
+        "JOIN sessions_fts f ON s.session_id = f.session_id "
         "WHERE sessions_fts MATCH ? "
-        "ORDER BY f.rank "
+        "ORDER BY rank "
         "LIMIT ? OFFSET ?",
         (query, limit, offset),
     ).fetchall()
@@ -668,6 +689,81 @@ def get_stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT project, COUNT(*) AS cnt FROM sessions GROUP BY project"
     ).fetchall():
         result["by_project"][row["project"]] = row["cnt"]
+
+    return result
+
+
+def get_dashboard_analytics(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return dashboard analytics for the workbench UI."""
+    result: dict[str, Any] = {}
+
+    # Summary
+    row = conn.execute(
+        "SELECT COUNT(*) as total_sessions, "
+        "SUM(input_tokens + output_tokens) as total_tokens, "
+        "COUNT(DISTINCT project) as unique_projects, "
+        "COUNT(DISTINCT source) as unique_sources "
+        "FROM sessions"
+    ).fetchone()
+    result["summary"] = {
+        "total_sessions": row["total_sessions"] or 0,
+        "total_tokens": row["total_tokens"] or 0,
+        "unique_projects": row["unique_projects"] or 0,
+        "unique_sources": row["unique_sources"] or 0,
+    }
+
+    # Activity per day (last 30 days)
+    rows = conn.execute(
+        "SELECT DATE(start_time) as day, COUNT(*) as count FROM sessions "
+        "WHERE start_time IS NOT NULL GROUP BY DATE(start_time) "
+        "ORDER BY day DESC LIMIT 30"
+    ).fetchall()
+    result["activity"] = [dict(r) for r in rows]
+
+    # Outcome badge distribution
+    rows = conn.execute(
+        "SELECT outcome_badge, COUNT(*) as count FROM sessions "
+        "WHERE outcome_badge IS NOT NULL GROUP BY outcome_badge"
+    ).fetchall()
+    result["by_outcome_badge"] = [dict(r) for r in rows]
+
+    # Value badge distribution
+    rows = conn.execute(
+        "SELECT j.value as badge, COUNT(*) as count "
+        "FROM sessions, json_each(sessions.value_badges) j "
+        "GROUP BY j.value"
+    ).fetchall()
+    result["by_value_badge"] = [dict(r) for r in rows]
+
+    # Risk badge distribution
+    rows = conn.execute(
+        "SELECT j.value as badge, COUNT(*) as count "
+        "FROM sessions, json_each(sessions.risk_badges) j "
+        "GROUP BY j.value"
+    ).fetchall()
+    result["by_risk_badge"] = [dict(r) for r in rows]
+
+    # Task type
+    rows = conn.execute(
+        "SELECT task_type, COUNT(*) as count FROM sessions "
+        "WHERE task_type IS NOT NULL GROUP BY task_type ORDER BY count DESC"
+    ).fetchall()
+    result["by_task_type"] = [dict(r) for r in rows]
+
+    # Model
+    rows = conn.execute(
+        "SELECT model, COUNT(*) as count FROM sessions "
+        "WHERE model IS NOT NULL GROUP BY model ORDER BY count DESC"
+    ).fetchall()
+    result["by_model"] = [dict(r) for r in rows]
+
+    # Tokens by source
+    rows = conn.execute(
+        "SELECT source, SUM(input_tokens) as input_tokens, "
+        "SUM(output_tokens) as output_tokens "
+        "FROM sessions GROUP BY source"
+    ).fetchall()
+    result["tokens_by_source"] = [dict(r) for r in rows]
 
     return result
 

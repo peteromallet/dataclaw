@@ -36,14 +36,9 @@ function truncate(text: string, max: number): string {
   return text.slice(0, max) + '...';
 }
 
-function sensitivityColor(score: number): string {
-  if (score >= 0.7) return '#ef4444';
-  if (score >= 0.4) return '#f59e0b';
-  return '#22c55e';
-}
-
 /** Render text with [REDACTED] spans highlighted. */
-function RedactedText({ text }: { text: string }) {
+function RedactedText({ text }: { text: string | null | undefined }) {
+  if (!text) return null;
   const parts = text.split(/(\[REDACTED\])/g);
   return (
     <>
@@ -270,38 +265,6 @@ function MessageCard({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Timeline entry builder                                            */
-/* ------------------------------------------------------------------ */
-
-interface TimelineEntry {
-  index: number;
-  label: string;
-  kind: 'user' | 'assistant' | 'tool';
-}
-
-function buildTimeline(messages: Message[]): TimelineEntry[] {
-  const entries: TimelineEntry[] = [];
-  messages.forEach((msg, i) => {
-    const preview = truncate(msg.content.replace(/\n/g, ' ').trim(), 30);
-    entries.push({
-      index: i,
-      label: `${msg.role === 'user' ? 'User' : 'Asst'}: ${preview || '(empty)'}`,
-      kind: msg.role,
-    });
-    if (msg.tool_uses) {
-      msg.tool_uses.forEach((tu) => {
-        entries.push({
-          index: i,
-          label: `Tool: ${tu.tool}`,
-          kind: 'tool',
-        });
-      });
-    }
-  });
-  return entries;
-}
-
-/* ------------------------------------------------------------------ */
 /*  Review statuses                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -325,6 +288,7 @@ export default function SessionDetail() {
   const [reviewReason, setReviewReason] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [userRating, setUserRating] = useState<number | null>(null);
 
   // Refs for scroll targets
   const msgRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -350,6 +314,7 @@ export default function SessionDetail() {
         setReviewStatus(data.review_status);
         setReviewNotes(data.reviewer_notes ?? '');
         setReviewReason(data.selection_reason ?? '');
+        setUserRating(data.ai_quality_score);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -408,7 +373,15 @@ export default function SessionDetail() {
     );
   }
 
-  const timeline = buildTimeline(session.messages);
+  const totalToolUses = session.messages.reduce(
+    (sum, m) => sum + (m.tool_uses?.length ?? 0),
+    0,
+  );
+  const userMsgCount = session.messages.filter((m) => m.role === 'user').length;
+  const firstUserMsg = session.messages.find((m) => m.role === 'user');
+  const firstUserPreview = firstUserMsg
+    ? truncate((firstUserMsg.content ?? '').trim(), 200)
+    : null;
 
   /* ---------------------------------------------------------------- */
   /*  Render                                                          */
@@ -416,11 +389,11 @@ export default function SessionDetail() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui, sans-serif' }}>
-      {/* ---- Left pane: Timeline ---- */}
+      {/* ---- Left pane: Summary + Metadata ---- */}
       <div
         style={{
-          width: 200,
-          minWidth: 200,
+          width: 300,
+          minWidth: 300,
           borderRight: '1px solid #e5e7eb',
           overflowY: 'auto',
           background: '#fafafa',
@@ -433,33 +406,115 @@ export default function SessionDetail() {
             &larr; Back
           </button>
         </div>
+
         <div style={{ padding: '8px 10px 4px', fontWeight: 700, fontSize: 11, color: '#9ca3af' }}>
-          TIMELINE ({session.messages.length})
+          SUMMARY
         </div>
-        {timeline.map((entry, i) => {
-          const kindColor =
-            entry.kind === 'user' ? '#2563eb' : entry.kind === 'tool' ? '#7c3aed' : '#374151';
-          return (
-            <div
-              key={i}
-              onClick={() => scrollToMessage(entry.index)}
-              style={{
-                padding: '4px 10px',
-                cursor: 'pointer',
-                borderLeft: `2px solid transparent`,
-                lineHeight: 1.4,
-              }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLDivElement).style.background = '#e5e7eb';
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLDivElement).style.background = 'transparent';
-              }}
-            >
-              <span style={{ color: kindColor, fontWeight: 500 }}>{entry.label}</span>
+        <div style={{ padding: '4px 10px' }}>
+          <SummaryRow label="Messages" value={String(session.messages.length)} />
+          <SummaryRow label="User msgs" value={String(userMsgCount)} />
+          <SummaryRow label="Tool uses" value={String(totalToolUses)} />
+          <SummaryRow label="Tokens" value={formatTokens(session.input_tokens + session.output_tokens)} />
+          <SummaryRow label="Duration" value={formatDuration(session.duration_seconds)} />
+        </div>
+
+        {/* Session Info */}
+        <div style={{ padding: '0 10px' }}>
+          <div style={{ padding: '12px 0 4px', fontWeight: 700, fontSize: 11, color: '#9ca3af' }}>
+            SESSION INFO
+          </div>
+          <MetaRow label="ID" value={session.session_id} mono />
+          <MetaRow label="Source" value={session.source} />
+          <MetaRow label="Model" value={session.model ?? '--'} />
+          <MetaRow label="Branch" value={session.git_branch ?? '--'} />
+          <MetaRow label="Task type" value={session.task_type ?? '--'} />
+          <MetaRow label="Started" value={formatTime(session.start_time)} />
+          <MetaRow
+            label="Tokens"
+            value={`${formatTokens(session.input_tokens)} in / ${formatTokens(session.output_tokens)} out`}
+          />
+          <MetaRow
+            label="Messages"
+            value={`${session.user_messages} user / ${session.assistant_messages} asst`}
+          />
+          <MetaRow label="Tool uses" value={String(session.tool_uses)} />
+          {session.bundle_id && <MetaRow label="Bundle" value={session.bundle_id} mono />}
+
+          {/* Badges */}
+          <div style={{ padding: '12px 0 4px', fontWeight: 700, fontSize: 11, color: '#9ca3af' }}>
+            BADGES
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '2px 0 4px' }}>
+            <BadgeChip kind="status" value={session.review_status} />
+            {session.outcome_badge && (
+              <BadgeChip kind="outcome" value={session.outcome_badge} />
+            )}
+            {session.value_badges.map((b) => (
+              <BadgeChip key={b} kind="value" value={b} />
+            ))}
+            {session.risk_badges.map((b) => (
+              <BadgeChip key={b} kind="risk" value={b} />
+            ))}
+          </div>
+
+          {/* Files touched */}
+          {session.files_touched.length > 0 && (
+            <>
+              <div style={{ padding: '12px 0 4px', fontWeight: 700, fontSize: 11, color: '#9ca3af' }}>
+                FILES TOUCHED ({session.files_touched.length})
+              </div>
+              <ul style={{ margin: 0, padding: '0 0 0 14px', lineHeight: 1.8 }}>
+                {session.files_touched.map((f, i) => (
+                  <li key={i} style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>
+                    {f}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {/* Commands run */}
+          {session.commands_run.length > 0 && (
+            <>
+              <div style={{ padding: '12px 0 4px', fontWeight: 700, fontSize: 11, color: '#9ca3af' }}>
+                COMMANDS RUN ({session.commands_run.length})
+              </div>
+              <ul style={{ margin: 0, padding: '0 0 0 14px', lineHeight: 1.8 }}>
+                {session.commands_run.map((c, i) => (
+                  <li key={i} style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>
+                    {c}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+
+        {firstUserPreview && (
+          <>
+            <div style={{ padding: '12px 10px 4px', fontWeight: 700, fontSize: 11, color: '#9ca3af' }}>
+              PROMPT
             </div>
-          );
-        })}
+            <div style={{ padding: '4px 10px', fontSize: 12, color: '#374151', lineHeight: 1.5 }}>
+              {firstUserPreview}
+            </div>
+          </>
+        )}
+
+        <div style={{ padding: '12px 10px 4px', display: 'flex', gap: 6 }}>
+          <button
+            onClick={() => scrollToMessage(0)}
+            style={{ ...linkBtnStyle, fontSize: 11 }}
+          >
+            Jump to top
+          </button>
+          <button
+            onClick={() => scrollToMessage(session.messages.length - 1)}
+            style={{ ...linkBtnStyle, fontSize: 11 }}
+          >
+            Jump to bottom
+          </button>
+        </div>
       </div>
 
       {/* ---- Center pane: Transcript ---- */}
@@ -486,11 +541,11 @@ export default function SessionDetail() {
         ))}
       </div>
 
-      {/* ---- Right pane: Metadata ---- */}
+      {/* ---- Right pane: Review + Score ---- */}
       <div
         style={{
-          width: 280,
-          minWidth: 280,
+          width: 260,
+          minWidth: 260,
           borderLeft: '1px solid #e5e7eb',
           overflowY: 'auto',
           padding: 14,
@@ -498,119 +553,65 @@ export default function SessionDetail() {
           background: '#fff',
         }}
       >
-        {/* Metadata section */}
-        <Section title="Session Info">
-          <MetaRow label="ID" value={session.session_id} mono />
-          <MetaRow label="Source" value={session.source} />
-          <MetaRow label="Model" value={session.model ?? '--'} />
-          <MetaRow label="Branch" value={session.git_branch ?? '--'} />
-          <MetaRow label="Task type" value={session.task_type ?? '--'} />
-          <MetaRow label="Started" value={formatTime(session.start_time)} />
-          <MetaRow label="Duration" value={formatDuration(session.duration_seconds)} />
-          <MetaRow
-            label="Tokens"
-            value={`${formatTokens(session.input_tokens)} in / ${formatTokens(session.output_tokens)} out`}
-          />
-          <MetaRow
-            label="Messages"
-            value={`${session.user_messages} user / ${session.assistant_messages} asst`}
-          />
-          <MetaRow label="Tool uses" value={String(session.tool_uses)} />
-          {session.bundle_id && <MetaRow label="Bundle" value={session.bundle_id} mono />}
-        </Section>
-
-        {/* Badges */}
-        <Section title="Badges">
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            <BadgeChip kind="status" value={session.review_status} />
-            {session.outcome_badge && (
-              <BadgeChip kind="outcome" value={session.outcome_badge} />
-            )}
-            {session.value_badges.map((b) => (
-              <BadgeChip key={b} kind="value" value={b} />
-            ))}
-            {session.risk_badges.map((b) => (
-              <BadgeChip key={b} kind="risk" value={b} />
-            ))}
-          </div>
-        </Section>
-
-        {/* Sensitivity */}
-        <Section title="Sensitivity">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div
-              style={{
-                flex: 1,
-                height: 6,
-                background: '#e5e7eb',
-                borderRadius: 3,
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                style={{
-                  width: `${Math.round(session.sensitivity_score * 100)}%`,
-                  height: '100%',
-                  background: sensitivityColor(session.sensitivity_score),
-                  borderRadius: 3,
-                  transition: 'width 0.3s',
-                }}
-              />
-            </div>
-            <span style={{ fontWeight: 600, color: sensitivityColor(session.sensitivity_score) }}>
-              {(session.sensitivity_score * 100).toFixed(0)}%
-            </span>
-          </div>
-        </Section>
-
-        {/* Files touched */}
-        {session.files_touched.length > 0 && (
-          <Section title={`Files Touched (${session.files_touched.length})`}>
-            <ul style={{ margin: 0, padding: '0 0 0 14px', lineHeight: 1.8 }}>
-              {session.files_touched.map((f, i) => (
-                <li key={i} style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>
-                  {f}
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
-
-        {/* Commands run */}
-        {session.commands_run.length > 0 && (
-          <Section title={`Commands Run (${session.commands_run.length})`}>
-            <ul style={{ margin: 0, padding: '0 0 0 14px', lineHeight: 1.8 }}>
-              {session.commands_run.map((c, i) => (
-                <li key={i} style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>
-                  {c}
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
-
-        {/* Review form */}
-        <Section title="Review">
-          <label style={labelStyle}>Status</label>
-          <select
-            value={reviewStatus}
-            onChange={(e) => setReviewStatus(e.target.value)}
-            style={inputStyle}
+        {/* Your Review — prominent, first */}
+        <div
+          style={{
+            border: '2px solid #3b82f6',
+            borderRadius: 8,
+            padding: 12,
+            marginBottom: 16,
+            background: '#eff6ff',
+          }}
+        >
+          <div
+            style={{
+              fontWeight: 700,
+              fontSize: 13,
+              color: '#1d4ed8',
+              marginBottom: 8,
+            }}
           >
-            {REVIEW_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s.charAt(0).toUpperCase() + s.slice(1)}
-              </option>
-            ))}
-          </select>
+            Your Review
+          </div>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+            {REVIEW_STATUSES.map((s) => {
+              const isActive = reviewStatus === s;
+              const colors: Record<string, { bg: string; activeBg: string; border: string; text: string }> = {
+                new: { bg: '#fff', activeBg: '#dbeafe', border: '#3b82f6', text: '#1d4ed8' },
+                shortlisted: { bg: '#fff', activeBg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
+                approved: { bg: '#fff', activeBg: '#dcfce7', border: '#22c55e', text: '#166534' },
+                blocked: { bg: '#fff', activeBg: '#fee2e2', border: '#ef4444', text: '#991b1b' },
+              };
+              const c = colors[s] ?? colors.new;
+              return (
+                <button
+                  key={s}
+                  onClick={() => setReviewStatus(s)}
+                  style={{
+                    flex: 1,
+                    padding: '7px 4px',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    borderRadius: 4,
+                    border: isActive ? `2px solid ${c.border}` : '1px solid #d1d5db',
+                    background: isActive ? c.activeBg : c.bg,
+                    color: c.text,
+                  }}
+                >
+                  {s.charAt(0).toUpperCase() + s.slice(1)}
+                </button>
+              );
+            })}
+          </div>
 
-          <label style={labelStyle}>Selection Reason</label>
+          <label style={{ ...labelStyle, marginTop: 0 }}>Selection Reason</label>
           <input
             type="text"
             value={reviewReason}
             onChange={(e) => setReviewReason(e.target.value)}
             placeholder="Why this session was selected..."
-            style={inputStyle}
+            style={{ ...inputStyle, background: '#fff' }}
           />
 
           <label style={labelStyle}>Reviewer Notes</label>
@@ -618,8 +619,8 @@ export default function SessionDetail() {
             value={reviewNotes}
             onChange={(e) => setReviewNotes(e.target.value)}
             placeholder="Notes for the review team..."
-            rows={4}
-            style={{ ...inputStyle, resize: 'vertical' }}
+            rows={3}
+            style={{ ...inputStyle, resize: 'vertical', background: '#fff' }}
           />
 
           <button onClick={handleSave} disabled={saving} style={saveBtnStyle}>
@@ -636,7 +637,77 @@ export default function SessionDetail() {
               {saveMsg}
             </div>
           )}
+        </div>
+
+        <Section title="AI Quality Score">
+          {(userRating ?? session.ai_quality_score) != null ? (() => {
+            const displayScore = userRating ?? session.ai_quality_score!;
+            return (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+                <span style={{
+                  fontSize: 28,
+                  fontWeight: 700,
+                  color: displayScore >= 4 ? '#166534'
+                    : displayScore === 3 ? '#92400e'
+                    : '#991b1b',
+                }}>
+                  {displayScore}
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>
+                  {displayScore === 5 ? 'Excellent'
+                    : displayScore === 4 ? 'Good'
+                    : displayScore === 3 ? 'Average'
+                    : displayScore === 2 ? 'Low'
+                    : 'Poor'}
+                </span>
+              </div>
+              {session.ai_score_reason && (
+                <div style={{ fontSize: 12, color: '#6b7280', fontStyle: 'italic', lineHeight: 1.5, marginBottom: 8 }}>
+                  {session.ai_score_reason}
+                </div>
+              )}
+            </div>
+            );
+          })() : (
+            <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 8 }}>Not scored yet</div>
+          )}
+
+          <div style={{ fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>Override rating</div>
+          <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+            {[1, 2, 3, 4, 5].map((n) => {
+              const isActive = userRating === n;
+              return (
+                <button
+                  key={n}
+                  onClick={async () => {
+                    setUserRating(n);
+                    if (id) {
+                      await api.sessions.update(id, { ai_quality_score: n });
+                    }
+                  }}
+                  style={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: 4,
+                    border: isActive ? '2px solid #2563eb' : '1px solid #d1d5db',
+                    background: isActive ? '#dbeafe' : '#fff',
+                    color: isActive ? '#1d4ed8' : '#374151',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {n}
+                </button>
+              );
+            })}
+          </div>
         </Section>
+
+        <div style={{ padding: '8px 0', borderTop: '1px solid #e5e7eb', fontSize: 11, color: '#9ca3af' }}>
+          This review is stored locally. Only approved sessions can be bundled and shared.
+        </div>
       </div>
     </div>
   );
@@ -687,6 +758,15 @@ function MetaRow({ label, value, mono }: { label: string; value: string; mono?: 
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
+      <span style={{ color: '#6b7280' }}>{label}</span>
+      <span style={{ fontWeight: 600, color: '#374151' }}>{value}</span>
     </div>
   );
 }

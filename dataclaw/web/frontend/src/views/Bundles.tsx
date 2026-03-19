@@ -7,12 +7,32 @@ export function Bundles() {
   const [bundles, setBundles] = useState<Bundle[]>([]);
   const [creating, setCreating] = useState(false);
   const [approvedSessions, setApprovedSessions] = useState<Session[]>([]);
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
   const [note, setNote] = useState('');
   const [attestation, setAttestation] = useState('');
   const [exportResults, setExportResults] = useState<Record<string, string>>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const includedSessions = approvedSessions.filter(s => !excludedIds.has(s.session_id));
+
+  function toggleSession(id: string) {
+    setExcludedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    if (excludedIds.size === 0) {
+      setExcludedIds(new Set(approvedSessions.map(s => s.session_id)));
+    } else {
+      setExcludedIds(new Set());
+    }
+  }
 
   async function loadBundles() {
     try {
@@ -57,15 +77,16 @@ export function Bundles() {
   }
 
   async function handleCreate() {
-    if (approvedSessions.length === 0) return;
+    if (includedSessions.length === 0) return;
     setError(null);
     try {
-      const ids = approvedSessions.map((s) => s.session_id);
+      const ids = includedSessions.map((s) => s.session_id);
       await api.bundles.create(ids, note || undefined, attestation || undefined);
       setCreating(false);
       setNote('');
       setAttestation('');
       setApprovedSessions([]);
+      setExcludedIds(new Set());
       setLoading(true);
       await loadBundles();
     } catch (e: unknown) {
@@ -103,10 +124,16 @@ export function Bundles() {
     return id.length > 12 ? id.slice(0, 12) + '...' : id;
   }
 
+  const [approvedCount, setApprovedCount] = useState(0);
+
+  useEffect(() => {
+    api.stats().then((s) => setApprovedCount(s.by_status['approved'] ?? 0)).catch(() => {});
+  }, []);
+
   return (
     <div style={{ padding: '24px', maxWidth: '960px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 600, color: '#111' }}>Bundles</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+        <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 600, color: '#111' }}>Exports</h2>
         {!creating && (
           <button
             onClick={startCreating}
@@ -125,6 +152,41 @@ export function Bundles() {
           </button>
         )}
       </div>
+      <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 16px 0' }}>Package approved sessions for upload</p>
+
+      {/* Approved session CTA */}
+      {!creating && approvedCount > 0 && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          padding: '12px 16px',
+          marginBottom: 16,
+          background: '#f0fdf4',
+          border: '1px solid #bbf7d0',
+          borderRadius: 8,
+          fontSize: 13,
+          color: '#166534',
+        }}>
+          <span>You have <strong>{approvedCount}</strong> approved session{approvedCount !== 1 ? 's' : ''} ready to bundle.</span>
+          <button
+            onClick={startCreating}
+            style={{
+              marginLeft: 'auto',
+              padding: '6px 14px',
+              background: '#16a34a',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Create Export
+          </button>
+        </div>
+      )}
 
       {error && (
         <div
@@ -168,19 +230,123 @@ export function Bundles() {
                 }}
               >
                 <div>
-                  <strong>Sessions:</strong> {approvedSessions.length}
+                  <strong>Sessions:</strong> {includedSessions.length} of {approvedSessions.length} selected
                 </div>
                 <div>
                   <strong>Sources:</strong>{' '}
-                  {Object.entries(sourceDist(approvedSessions))
+                  {Object.entries(sourceDist(includedSessions))
                     .map(([k, v]) => `${k} (${v})`)
-                    .join(', ')}
+                    .join(', ') || '--'}
                 </div>
                 <div>
                   <strong>Projects:</strong>{' '}
-                  {Object.entries(projectDist(approvedSessions))
+                  {Object.entries(projectDist(includedSessions))
                     .map(([k, v]) => `${k} (${v})`)
-                    .join(', ')}
+                    .join(', ') || '--'}
+                </div>
+              </div>
+
+              {/* Session selection table */}
+              <div
+                style={{
+                  maxHeight: 260,
+                  overflowY: 'auto',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '6px',
+                  marginBottom: '16px',
+                }}
+              >
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                  <thead>
+                    <tr style={{ textAlign: 'left', color: '#6b7280', borderBottom: '1px solid #e5e7eb', background: '#f9fafb', position: 'sticky', top: 0 }}>
+                      <th style={{ padding: '6px 8px', fontWeight: 500, width: 32 }}>
+                        <input
+                          type="checkbox"
+                          checked={excludedIds.size === 0}
+                          onChange={toggleAll}
+                          style={{ cursor: 'pointer' }}
+                        />
+                      </th>
+                      <th style={{ padding: '6px 8px', fontWeight: 500 }}>Session</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 500 }}>Project</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 500 }}>Score</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 500 }}>Source</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 500 }}>Msgs</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tokens</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {approvedSessions.map((s) => {
+                      const included = !excludedIds.has(s.session_id);
+                      return (
+                        <tr
+                          key={s.session_id}
+                          onClick={() => toggleSession(s.session_id)}
+                          style={{
+                            borderBottom: '1px solid #f3f4f6',
+                            cursor: 'pointer',
+                            opacity: included ? 1 : 0.45,
+                          }}
+                        >
+                          <td style={{ padding: '6px 8px' }}>
+                            <input
+                              type="checkbox"
+                              checked={included}
+                              onChange={() => toggleSession(s.session_id)}
+                              onClick={(e) => e.stopPropagation()}
+                              style={{ cursor: 'pointer' }}
+                            />
+                          </td>
+                          <td
+                            style={{ padding: '6px 8px', fontFamily: 'monospace', color: '#2563eb' }}
+                            title={s.session_id}
+                          >
+                            {s.display_title || truncateId(s.session_id)}
+                          </td>
+                          <td style={{ padding: '6px 8px', color: '#374151' }}>{s.project}</td>
+                          <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                            {s.ai_quality_score != null ? (
+                              <span style={{
+                                display: 'inline-block',
+                                width: 22, height: 22, lineHeight: '22px',
+                                borderRadius: 4,
+                                fontSize: 11, fontWeight: 700,
+                                textAlign: 'center',
+                                background: s.ai_quality_score >= 4 ? '#dcfce7'
+                                  : s.ai_quality_score === 3 ? '#fef3c7' : '#fee2e2',
+                                color: s.ai_quality_score >= 4 ? '#166534'
+                                  : s.ai_quality_score === 3 ? '#92400e' : '#991b1b',
+                              }}>
+                                {s.ai_quality_score}
+                              </span>
+                            ) : (
+                              <span style={{ color: '#d1d5db' }}>--</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '6px 8px', color: '#6b7280' }}>{s.source}</td>
+                          <td style={{ padding: '6px 8px', color: '#374151' }}>
+                            {s.user_messages + s.assistant_messages}
+                          </td>
+                          <td style={{ padding: '6px 8px', color: '#374151' }}>
+                            {(s.input_tokens + s.output_tokens).toLocaleString()}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{
+                background: '#f0f9ff', border: '1px solid #bfdbfe', borderRadius: 6,
+                padding: 14, marginBottom: 16, fontSize: 12, lineHeight: 1.7, color: '#1e40af',
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>What's in this bundle:</div>
+                <div>Anonymized conversation transcripts, session metadata (tokens, duration, model), redacted content (secrets and PII removed)</div>
+                <div style={{ marginTop: 6, fontWeight: 600, marginBottom: 4 }}>What's NOT included:</div>
+                <div>Your file contents or source code, your reviewer notes or comments, sessions you didn't approve</div>
+                <div style={{ marginTop: 8, fontSize: 11, color: '#6b7280' }}>
+                  Exporting to disk keeps everything local. Only pushing to Hugging Face shares data publicly.
                 </div>
               </div>
 
@@ -229,24 +395,25 @@ export function Bundles() {
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               onClick={handleCreate}
-              disabled={approvedSessions.length === 0}
+              disabled={includedSessions.length === 0}
               style={{
                 padding: '8px 16px',
-                background: approvedSessions.length === 0 ? '#9ca3af' : '#16a34a',
+                background: includedSessions.length === 0 ? '#9ca3af' : '#16a34a',
                 color: '#fff',
                 border: 'none',
                 borderRadius: '6px',
                 fontSize: '13px',
                 fontWeight: 500,
-                cursor: approvedSessions.length === 0 ? 'default' : 'pointer',
+                cursor: includedSessions.length === 0 ? 'default' : 'pointer',
               }}
             >
-              Create Bundle
+              Create Bundle ({includedSessions.length})
             </button>
             <button
               onClick={() => {
                 setCreating(false);
                 setApprovedSessions([]);
+                setExcludedIds(new Set());
                 setNote('');
                 setAttestation('');
               }}
@@ -365,6 +532,7 @@ export function Bundles() {
                         <tr style={{ textAlign: 'left', color: '#6b7280', borderBottom: '1px solid #e5e7eb' }}>
                           <th style={{ padding: '6px 8px', fontWeight: 500 }}>Session</th>
                           <th style={{ padding: '6px 8px', fontWeight: 500 }}>Project</th>
+                          <th style={{ padding: '6px 8px', fontWeight: 500 }}>Score</th>
                           <th style={{ padding: '6px 8px', fontWeight: 500 }}>Source</th>
                           <th style={{ padding: '6px 8px', fontWeight: 500 }}>Messages</th>
                           <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tokens</th>
@@ -380,6 +548,25 @@ export function Bundles() {
                               {truncateId(s.session_id)}
                             </td>
                             <td style={{ padding: '6px 8px', color: '#374151' }}>{s.project}</td>
+                            <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                              {s.ai_quality_score != null ? (
+                                <span style={{
+                                  display: 'inline-block',
+                                  width: 22, height: 22, lineHeight: '22px',
+                                  borderRadius: 4,
+                                  fontSize: 11, fontWeight: 700,
+                                  textAlign: 'center',
+                                  background: s.ai_quality_score >= 4 ? '#dcfce7'
+                                    : s.ai_quality_score === 3 ? '#fef3c7' : '#fee2e2',
+                                  color: s.ai_quality_score >= 4 ? '#166534'
+                                    : s.ai_quality_score === 3 ? '#92400e' : '#991b1b',
+                                }}>
+                                  {s.ai_quality_score}
+                                </span>
+                              ) : (
+                                <span style={{ color: '#d1d5db' }}>--</span>
+                              )}
+                            </td>
                             <td style={{ padding: '6px 8px', color: '#6b7280' }}>{s.source}</td>
                             <td style={{ padding: '6px 8px', color: '#374151' }}>
                               {s.user_messages + s.assistant_messages}

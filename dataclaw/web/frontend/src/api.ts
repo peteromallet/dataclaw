@@ -1,4 +1,4 @@
-import type { Session, SessionDetail, Bundle, Policy, Stats, ProjectSummary } from './types.ts';
+import type { Session, SessionDetail, Bundle, Policy, Stats, ProjectSummary, DashboardData } from './types.ts';
 
 const BASE = '/api';
 
@@ -39,7 +39,7 @@ export const api = {
       return request(`/sessions/${encodeURIComponent(id)}`);
     },
 
-    update(id: string, body: { status?: string; notes?: string; reason?: string }): Promise<{ ok: boolean }> {
+    update(id: string, body: { status?: string; notes?: string; reason?: string; ai_quality_score?: number; ai_score_reason?: string }): Promise<{ ok: boolean }> {
       return request(`/sessions/${encodeURIComponent(id)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -54,6 +54,10 @@ export const api = {
 
   stats(): Promise<Stats> {
     return request('/stats');
+  },
+
+  dashboard(): Promise<DashboardData> {
+    return request('/dashboard');
   },
 
   projects(): Promise<ProjectSummary[]> {

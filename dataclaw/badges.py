@@ -388,16 +388,56 @@ def compute_task_type(session: dict) -> str:
     return best_type
 
 
-def compute_display_title(session: dict) -> str:
-    """Extract a short display title from the first user message.
+_INTERNAL_TAG_RE = re.compile(
+    r"^\s*<(command-message|local-command-caveat|command-name|local-command-stdout)\b[^>]*>"
+    r".*?</\1>\s*$",
+    re.DOTALL,
+)
+_SKIP_PATTERNS = [
+    _INTERNAL_TAG_RE,
+    re.compile(r"^\s*\[Request interrupted by user\]\s*$"),
+    # Single-word terse commands (init, install, exit, help, etc.)
+    re.compile(r"^\s*[a-z]{2,12}\s*$"),
+]
+_XML_TAG_RE = re.compile(r"<[^>]+>")
 
-    Truncate to ~80 chars. Strip common prefixes.
+
+def _is_skippable_message(text: str) -> bool:
+    """Return True if *text* is an internal command or too terse to be a title."""
+    return any(p.match(text) for p in _SKIP_PATTERNS)
+
+
+def compute_display_title(session: dict) -> str:
+    """Extract a short display title from the first real user message.
+
+    Skips internal Claude Code command messages (XML-wrapped slash commands,
+    local-command wrappers, etc.) and strips XML/HTML tags from the result.
+    Truncates to ~80 chars.
     """
+    fallback = session.get("project", "Untitled session")
+    source = session.get("source", "")
+    if source and fallback == "Untitled session":
+        fallback = f"{source}:{session.get('project', 'unknown')}"
+
     user_msgs = _get_user_messages(session)
     if not user_msgs:
-        return session.get("project", "Untitled session")
+        return fallback
 
-    text = user_msgs[0].strip()
+    # Find the first real user message (skip internal commands)
+    text = ""
+    for msg in user_msgs:
+        if not _is_skippable_message(msg):
+            text = msg.strip()
+            break
+
+    if not text:
+        return fallback
+
+    # Strip any remaining XML/HTML tags
+    text = _XML_TAG_RE.sub("", text).strip()
+
+    if not text:
+        return fallback
 
     # Strip common conversational prefixes
     prefixes = [
@@ -424,7 +464,7 @@ def compute_display_title(session: dict) -> str:
             truncated = truncated[:last_space]
         first_line = truncated + "..."
 
-    return first_line if first_line else session.get("project", "Untitled session")
+    return first_line if first_line else fallback
 
 
 def compute_all_badges(session: dict) -> dict:
