@@ -1,19 +1,28 @@
 # DataClaw
 
-> **This is a performance art project.** Anthropic built their models on the world's freely shared information, then introduced increasingly [dystopian data policies](https://www.anthropic.com/news/detecting-and-preventing-distillation-attacks) to stop anyone else from doing the same with their data — pulling up the ladder behind them. DataClaw lets you throw the ladder back down. The dataset it produces is yours to share.
-
-Turn your Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw conversation history into structured data and publish it to Hugging Face with a single command. DataClaw parses session logs, redacts secrets and PII, and uploads the result as a ready-to-use dataset.
+Review, score, and curate your coding agent conversation traces locally. DataClaw indexes session logs from Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, and Cline, redacts secrets and PII, and gives you a browser workbench to triage and export the results.
 
 ![DataClaw](dataclaw.jpeg)
 
-Every export is tagged **`dataclaw`** on Hugging Face. Together, they may someday form a growing [distributed dataset](https://huggingface.co/datasets?other=dataclaw) of real-world human-AI coding collaboration.
+## Review & score your traces
+
+Index your local sessions, auto-score them for quality, and open a browser workbench — all in three commands:
+
+```bash
+pip install dataclaw
+dataclaw scan                                   # Index all local sessions
+dataclaw score --batch --auto-triage             # AI-score sessions, auto-approve 4-5, auto-block 1-2
+dataclaw serve                                   # Open workbench at localhost:8384
+```
+
+`score --batch` sends each session to Claude for evaluation (1-5 quality rating) and `--auto-triage` automatically approves high-quality sessions and blocks low-quality ones, leaving score-3 sessions for your manual review. The workbench gives you a full browser UI to read transcripts, adjust scores, search across sessions, and bundle approved traces for export.
 
 ## Give this to your agent
 
 Paste this into Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, or any coding agent:
 
 ```
-Help me export my Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw conversation history to Hugging Face using DataClaw.
+Help me review and curate my coding agent traces using DataClaw.
 Install it, set up the skill, then walk me through the process.
 
 STEP 1 — INSTALL
@@ -24,38 +33,15 @@ STEP 1 — INSTALL
 STEP 2 — INSTALL SKILL
   dataclaw update-skill claude
 
-STEP 3 — START
-  dataclaw prep
-  Every dataclaw command outputs next_steps in its JSON — follow them through the entire flow.
+STEP 3 — SCAN & SCORE
+  dataclaw scan                              # Index sessions into local DB
+  dataclaw score --batch --auto-triage       # AI-score + auto-approve/block
 
-STEP 3A — CHOOSE SOURCE SCOPE (REQUIRED BEFORE EXPORT)
-  Ask the user explicitly: Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, or all?
-  dataclaw config --source "claude|codex|gemini|opencode|openclaw|all"
-  Do not export until source scope is explicitly confirmed.
+STEP 4 — REVIEW
+  dataclaw serve                             # Open workbench at localhost:8384
 
-STEP 3B — PRESENT ALL FOLDERS (REQUIRED BEFORE EXPORT)
-  dataclaw list --source "claude|codex|gemini|opencode|openclaw|all"
-  Send the FULL project/folder list to the user in a message (name, source, sessions, size, excluded).
-  Ask which projects to exclude.
-  dataclaw config --exclude "project1,project2" OR dataclaw config --confirm-projects
-  Do not export until folder selection is explicitly confirmed.
-
-STEP 4 — REVIEW + CONFIRM (REQUIRED BEFORE PUSH)
-  dataclaw export --no-push --output /tmp/dataclaw_export.jsonl
-  Review PII findings and apply excludes/redactions as needed.
-  Full name is requested for an exact-name privacy scan against the export.
-  If the user declines sharing full name, use --skip-full-name-scan and attest the skip reason.
-  dataclaw confirm --full-name "THEIR FULL NAME" --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."
-
-STEP 5 — PUBLISH (ONLY AFTER EXPLICIT USER APPROVAL)
-  dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."
-  Never publish unless the user explicitly says yes.
-
-IF ANY COMMAND FAILS DUE TO A SKIPPED STEP:
-  Restate the 6-step checklist above and resume from the blocked step (do not skip ahead).
-
-IMPORTANT: Never run bare `huggingface-cli login` — always use --token.
-IMPORTANT: Always export with --no-push first and review for PII before publishing.
+Tell the user: "Your workbench is open at localhost:8384. Everything is 100% local.
+Use the Inbox to triage traces, Search to find sessions, and Bundles to assemble exports."
 ```
 
 <details>
@@ -65,74 +51,48 @@ IMPORTANT: Always export with --no-push first and review for PII before publishi
 
 ```bash
 pip install dataclaw
-huggingface-cli login --token YOUR_TOKEN
 
-# See your projects
-dataclaw prep
-dataclaw config --source all  # REQUIRED: choose claude, codex, gemini, opencode, openclaw, or all
-dataclaw list --source all  # Present full list and confirm folder scope before export
+# Scan and score
+dataclaw scan
+dataclaw score --batch --auto-triage
 
-# Configure
-dataclaw config --repo username/my-personal-codex-data
+# Open the workbench
+dataclaw serve
+
+# Or triage from the terminal
+dataclaw inbox --json --limit 20
+dataclaw approve <session-id> --reason "good trace"
+dataclaw block <session-id> --reason "low quality"
+
+# Configure redactions and exclusions
 dataclaw config --exclude "personal-stuff,scratch"
 dataclaw config --redact-usernames "my_github_handle,my_discord_name"
 dataclaw config --redact "my-domain.com,my-secret-project"
 
-# Export locally first
-dataclaw export --no-push
-
-# Review and confirm
-dataclaw confirm \
-  --full-name "YOUR FULL NAME" \
-  --attest-full-name "Asked for full name and scanned export for YOUR FULL NAME." \
-  --attest-sensitive "Asked about company/client/internal names and private URLs; none found or redactions updated." \
-  --attest-manual-scan "Manually scanned 20 sessions across beginning/middle/end and reviewed findings."
-
-# Optional if user declines sharing full name
-dataclaw confirm \
-  --skip-full-name-scan \
-  --attest-full-name "User declined to share full name; skipped exact-name scan." \
-  --attest-sensitive "Asked about company/client/internal names and private URLs; none found or redactions updated." \
-  --attest-manual-scan "Manually scanned 20 sessions across beginning/middle/end and reviewed findings."
-
-# Push
-dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."
+# Export locally
+dataclaw export --no-push --output /tmp/dataclaw_export.jsonl
 ```
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `dataclaw status` | Show current stage and next steps (JSON) |
-| `dataclaw prep` | Discover projects, check HF auth, output JSON |
-| `dataclaw prep --source all` | Prep with all sources explicitly selected |
-| `dataclaw prep --source claude` | Prep using only Claude Code sessions |
-| `dataclaw prep --source codex` | Prep using only Codex sessions |
-| `dataclaw prep --source gemini` | Prep using only Gemini CLI sessions |
-| `dataclaw prep --source opencode` | Prep using only OpenCode sessions |
-| `dataclaw prep --source openclaw` | Prep using only OpenClaw sessions |
-| `dataclaw list` | List all projects with exclusion status |
-| `dataclaw list --source all` | List all sources |
-| `dataclaw list --source codex` | List only Codex projects |
-| `dataclaw config` | Show current config |
-| `dataclaw config --repo user/my-personal-codex-data` | Set HF repo |
-| `dataclaw config --source all` | REQUIRED source scope selection (`claude`, `codex`, `gemini`, `opencode`, `openclaw`, or `all`) |
+| `dataclaw scan` | Index local sessions into workbench DB |
+| `dataclaw score --batch --auto-triage` | AI-score all unscored sessions, auto-approve 4-5 and block 1-2 |
+| `dataclaw score --batch --limit 20` | AI-score up to 20 sessions without triage |
+| `dataclaw serve` | Open workbench UI at localhost:8384 |
+| `dataclaw inbox --json --limit 20` | List sessions as JSON (for agent parsing) |
+| `dataclaw approve <id> [id ...]` | Approve sessions by ID |
+| `dataclaw block <id> [id ...]` | Block sessions by ID |
+| `dataclaw shortlist <id> [id ...]` | Shortlist sessions for review |
+| `dataclaw config --source all` | Select source scope (`claude`, `codex`, `gemini`, `opencode`, `openclaw`, `kimi`, or `all`) |
 | `dataclaw config --exclude "a,b"` | Add excluded projects (appends) |
 | `dataclaw config --redact "str1,str2"` | Add strings to always redact (appends) |
 | `dataclaw config --redact-usernames "u1,u2"` | Add usernames to anonymize (appends) |
-| `dataclaw config --confirm-projects` | Mark project selection as confirmed |
-| `dataclaw export --no-push` | Export locally only (always do this first) |
-| `dataclaw export --source all --no-push` | Export all sources locally |
-| `dataclaw export --source claude --no-push` | Export only Claude Code sessions locally |
-| `dataclaw export --source codex --no-push` | Export only Codex sessions locally |
-| `dataclaw export --source gemini --no-push` | Export only Gemini CLI sessions locally |
-| `dataclaw export --source opencode --no-push` | Export only OpenCode sessions locally |
-| `dataclaw export --source openclaw --no-push` | Export only OpenClaw sessions locally |
-| `dataclaw confirm --full-name "NAME" --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Scan for PII, run exact-name privacy check, verify review attestations, unlock pushing |
-| `dataclaw confirm --skip-full-name-scan --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Skip exact-name scan when user declines sharing full name (requires skip attestation) |
-| `dataclaw export --publish-attestation "..."` | Export and push (requires `dataclaw confirm` first) |
-| `dataclaw export --all-projects` | Include everything (ignore exclusions) |
+| `dataclaw export --no-push` | Export to local JSONL |
 | `dataclaw export --no-thinking` | Exclude extended thinking blocks |
+| `dataclaw list` | List all projects with exclusion status |
+| `dataclaw status` | Show current stage and next steps (JSON) |
 | `dataclaw update-skill claude` | Install/update the dataclaw skill for Claude Code |
 
 </details>
@@ -161,7 +121,7 @@ DataClaw applies multiple layers of protection:
 6. **Custom redaction** — You can configure additional strings and usernames to redact
 7. **Tool call redaction** — Secrets in tool inputs and outputs are redacted
 
-**This is NOT foolproof.** Always review your exported data before publishing.
+**This is NOT foolproof.** Always review your exported data before sharing.
 Automated redaction cannot catch everything — especially service-specific
 identifiers, third-party PII, or secrets in unusual formats.
 
@@ -205,34 +165,6 @@ Each line in `conversations.jsonl` is one session:
   }
 }
 ```
-
-Each HF repo also includes a `metadata.json` with aggregate stats.
-
-</details>
-
-<details>
-<summary><b>Finding datasets on Hugging Face</b></summary>
-
-All repos are named `{username}/my-personal-codex-data` and tagged `dataclaw`.
-
-- **Browse all:** [huggingface.co/datasets?other=dataclaw](https://huggingface.co/datasets?other=dataclaw)
-- **Load one:**
-  ```python
-  from datasets import load_dataset
-  ds = load_dataset("alice/my-personal-codex-data", split="train")
-  ```
-- **Combine several:**
-  ```python
-  from datasets import load_dataset, concatenate_datasets
-  repos = ["alice/my-personal-codex-data", "bob/my-personal-codex-data"]
-  ds = concatenate_datasets([load_dataset(r, split="train") for r in repos])
-  ```
-
-The auto-generated HF README includes:
-- Model distribution (which models, how many sessions each)
-- Total token counts
-- Project count
-- Last updated timestamp
 
 </details>
 

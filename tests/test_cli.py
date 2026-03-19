@@ -580,14 +580,12 @@ class TestWorkflowGateMessages:
 
     def test_push_before_confirm_shows_step_process(self, monkeypatch, capsys):
         monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"stage": "review", "source": "all"})
-        monkeypatch.setattr("sys.argv", ["dataclaw", "export"])
+        monkeypatch.setattr("sys.argv", ["dataclaw", "export", "--push"])
         with pytest.raises(SystemExit):
             main()
         payload = self._extract_json(capsys.readouterr().out)
-        assert payload["error"] == "You must run `dataclaw confirm` before pushing."
-        assert payload["blocked_on_step"] == "Step 2/3"
-        assert len(payload["process_steps"]) == 3
-        assert "confirm" in payload["process_steps"][1]
+        assert payload["error"] == "Uploading to Hugging Face is temporarily disabled."
+        assert "hint" in payload
 
     def test_export_requires_project_confirmation_with_full_flow(self, monkeypatch, capsys):
         monkeypatch.setattr("dataclaw.cli._has_session_sources", lambda _src: True)

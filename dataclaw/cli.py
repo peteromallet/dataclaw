@@ -576,23 +576,49 @@ dataclaw
 """
 
 
+SKILL_TARGETS: dict[str, dict[str, str]] = {
+    "claude": {
+        "dest_template": ".claude/skills/dataclaw/SKILL.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+    "openclaw": {
+        "dest_template": "DATACLAW_AGENTS.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+    "codex": {
+        "dest_template": "DATACLAW_AGENTS.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+    "cline": {
+        "dest_template": ".cline/dataclaw/SKILL.md",
+        "source_file": "SKILL.md",
+        "source_url": SKILL_URL,
+    },
+}
+
+
 def update_skill(target: str) -> None:
     """Download and install the dataclaw skill for a coding agent."""
-    if target != "claude":
-        print(f"Error: unknown target '{target}'. Supported: claude", file=sys.stderr)
+    target_config = SKILL_TARGETS.get(target)
+    if not target_config:
+        print(f"Error: unknown target '{target}'. Supported: {', '.join(SKILL_TARGETS)}", file=sys.stderr)
         sys.exit(1)
 
-    dest = Path.cwd() / ".claude" / "skills" / "dataclaw" / "SKILL.md"
+    dest = Path.cwd() / target_config["dest_template"]
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Downloading skill from {SKILL_URL}...")
+    url = target_config["source_url"]
+    print(f"Downloading skill from {url}...")
     try:
-        with urllib.request.urlopen(SKILL_URL, timeout=15) as resp:
+        with urllib.request.urlopen(url, timeout=15) as resp:
             content = resp.read().decode()
     except (OSError, urllib.error.URLError) as e:
         print(f"Error downloading skill: {e}", file=sys.stderr)
         # Fall back to bundled copy
-        bundled = Path(__file__).resolve().parent.parent / "docs" / "SKILL.md"
+        bundled = Path(__file__).resolve().parent.parent / "docs" / target_config["source_file"]
         if bundled.exists():
             print(f"Using bundled copy from {bundled}")
             content = bundled.read_text()
@@ -604,8 +630,13 @@ def update_skill(target: str) -> None:
     print(f"Skill installed to {dest}")
     print(json.dumps({
         "installed": str(dest),
-        "next_steps": ["Run: dataclaw prep"],
-        "next_command": "dataclaw prep",
+        "target": target,
+        "next_steps": [
+            "Run: dataclaw scan",
+            "Then: dataclaw inbox --json",
+            "Or open the full UI: dataclaw serve",
+        ],
+        "next_command": "dataclaw scan",
     }, indent=2))
 
 
@@ -1184,6 +1215,821 @@ def prep(source_filter: str = "auto") -> None:
     print(json.dumps(result, indent=2))
 
 
+def _run_scan(source_filter: str | None = None) -> None:
+    """One-shot scan: index sessions into the workbench database."""
+    from .daemon import Scanner
+    from .index import get_stats, open_index
+
+    scanner = Scanner(source_filter=source_filter)
+    print("Scanning sessions...")
+    results = scanner.scan_once()
+
+    total_new = sum(results.values())
+    if total_new:
+        print(f"Indexed {total_new} new sessions:")
+        for source, count in sorted(results.items()):
+            if count > 0:
+                print(f"  {source}: {count}")
+    else:
+        print("No new sessions found.")
+
+    conn = open_index()
+    stats = get_stats(conn)
+    conn.close()
+
+    print(f"\nTotal indexed: {stats['total']}")
+    if stats["by_status"]:
+        for status, count in sorted(stats["by_status"].items()):
+            print(f"  {status}: {count}")
+    if stats["by_source"]:
+        print("By source:")
+        for source, count in sorted(stats["by_source"].items()):
+            print(f"  {source}: {count}")
+
+
+def _run_inbox(
+    status: str | None = None,
+    source: str | None = None,
+    limit: int = 20,
+    output_json: bool = False,
+) -> None:
+    """Show indexed sessions in the terminal."""
+    from .index import get_stats, open_index, query_sessions
+
+    conn = open_index()
+    sessions = query_sessions(conn, status=status, source=source, limit=limit)
+    stats = get_stats(conn)
+    conn.close()
+
+    if output_json:
+        # Parse JSON fields for clean output
+        items = []
+        for i, s in enumerate(sessions, 1):
+            value_badges = s.get("value_badges", [])
+            if isinstance(value_badges, str):
+                try:
+                    value_badges = json.loads(value_badges)
+                except (json.JSONDecodeError, ValueError):
+                    value_badges = []
+            risk_badges = s.get("risk_badges", [])
+            if isinstance(risk_badges, str):
+                try:
+                    risk_badges = json.loads(risk_badges)
+                except (json.JSONDecodeError, ValueError):
+                    risk_badges = []
+            items.append({
+                "index": i,
+                "session_id": s.get("session_id"),
+                "display_title": s.get("display_title", ""),
+                "source": s.get("source", ""),
+                "model": s.get("model"),
+                "messages": s.get("user_messages", 0) + s.get("assistant_messages", 0),
+                "tokens": s.get("input_tokens", 0) + s.get("output_tokens", 0),
+                "outcome_badge": s.get("outcome_badge"),
+                "value_badges": value_badges,
+                "risk_badges": risk_badges,
+                "review_status": s.get("review_status", "new"),
+                "project": s.get("project", ""),
+                "task_type": s.get("task_type"),
+                "start_time": s.get("start_time"),
+            })
+        print(json.dumps({
+            "sessions": items,
+            "total": stats["total"],
+            "showing": len(items),
+            "by_status": stats.get("by_status", {}),
+        }, indent=2))
+        return
+
+    if not sessions:
+        print("No sessions found. Run `dataclaw scan` first.")
+        return
+
+    # Print a compact table
+    print(f"{'Status':<12} {'Source':<10} {'Model':<25} {'Msgs':>5} {'Tokens':>8}  Title")
+    print("-" * 100)
+    for s in sessions:
+        title = (s.get("display_title") or "")[:45]
+        model = (s.get("model") or "")[:24]
+        msgs = s.get("user_messages", 0) + s.get("assistant_messages", 0)
+        tokens = s.get("input_tokens", 0) + s.get("output_tokens", 0)
+        status_str = s.get("review_status", "new")
+        source_str = s.get("source", "")
+        # Badges
+        badges = []
+        outcome = s.get("outcome_badge", "")
+        if outcome and outcome != "unknown":
+            badges.append(outcome)
+        try:
+            value_badges = json.loads(s.get("value_badges", "[]")) if isinstance(s.get("value_badges"), str) else (s.get("value_badges") or [])
+        except (json.JSONDecodeError, ValueError):
+            value_badges = []
+        try:
+            risk_badges = json.loads(s.get("risk_badges", "[]")) if isinstance(s.get("risk_badges"), str) else (s.get("risk_badges") or [])
+        except (json.JSONDecodeError, ValueError):
+            risk_badges = []
+        badges.extend(value_badges[:2])
+        badges.extend(risk_badges[:2])
+        badge_str = f" [{', '.join(badges)}]" if badges else ""
+
+        print(f"{status_str:<12} {source_str:<10} {model:<25} {msgs:>5} {tokens:>8}  {title}{badge_str}")
+
+    print(f"\n{len(sessions)} sessions shown. Use `dataclaw serve` for the full review UI.")
+
+
+def _run_review_action(
+    action: str,
+    session_ids: list[str],
+    reason: str | None = None,
+) -> None:
+    """Update session review status for one or more sessions."""
+    from .index import open_index, update_session
+
+    if not session_ids:
+        print(json.dumps({"error": "No session IDs provided."}))
+        sys.exit(1)
+
+    conn = open_index()
+    results = []
+    for sid in session_ids:
+        ok = update_session(conn, sid, status=action, reason=reason)
+        results.append({"session_id": sid, "ok": ok})
+    conn.close()
+
+    success = sum(1 for r in results if r["ok"])
+    print(json.dumps({
+        "action": action,
+        "updated": success,
+        "not_found": len(results) - success,
+        "results": results,
+    }, indent=2))
+
+
+def _truncate(text: str, max_len: int = 80) -> str:
+    """Truncate text to max_len, appending '...' if shortened."""
+    if not text:
+        return ""
+    text = text.replace("\n", " ").strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len - 3] + "..."
+
+
+def _format_duration(seconds: int | None) -> str:
+    """Format duration in seconds to a human-readable string like '12m' or '1h 5m'."""
+    if seconds is None:
+        return "?"
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    remaining = minutes % 60
+    if remaining:
+        return f"{hours}h {remaining}m"
+    return f"{hours}h"
+
+
+def _format_tokens(count: int) -> str:
+    """Format token count to compact form like '15.2k'."""
+    if count < 1000:
+        return str(count)
+    if count < 10000:
+        return f"{count / 1000:.1f}k"
+    return f"{count // 1000}k"
+
+
+def _get_message_text(msg: dict) -> str:
+    """Extract text content from a message dict."""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                return block
+            if isinstance(block, dict) and block.get("text"):
+                return block["text"]
+    return ""
+
+
+def _extract_tool_uses(msg: dict) -> list[dict]:
+    """Extract tool uses from a message, handling both parsed and raw formats."""
+    tool_uses = msg.get("tool_uses", [])
+    if tool_uses:
+        return tool_uses
+    # Check content blocks for tool use
+    content = msg.get("content")
+    if isinstance(content, list):
+        uses = []
+        for block in content:
+            if isinstance(block, dict) and block.get("tool"):
+                inp = block.get("input", {})
+                first_arg = ""
+                if isinstance(inp, dict):
+                    for v in inp.values():
+                        if isinstance(v, str) and v.strip():
+                            first_arg = v.strip()
+                            break
+                uses.append({
+                    "tool": block["tool"],
+                    "input": inp,
+                    "output": block.get("output", ""),
+                    "status": block.get("status", ""),
+                    "first_arg": first_arg,
+                })
+        return uses
+    return []
+
+
+def _run_score_view(args) -> None:
+    """Show condensed session view for AI scoring."""
+    from .index import get_session_detail, open_index, query_sessions
+
+    conn = open_index()
+
+    if args.batch:
+        # Batch mode: load multiple sessions in compact format
+        sessions = query_sessions(
+            conn,
+            source=args.source,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        if not sessions:
+            print("No sessions found.")
+            conn.close()
+            return
+
+        total = len(sessions)
+        for idx, s in enumerate(sessions, 1):
+            sid = s["session_id"]
+            detail = get_session_detail(conn, sid)
+            if not detail:
+                continue
+
+            source = detail.get("source", "?")
+            model = detail.get("model", "?")
+            project = detail.get("project", "?")
+            duration = _format_duration(detail.get("duration_seconds"))
+            total_tokens = _format_tokens(
+                (detail.get("input_tokens") or 0) + (detail.get("output_tokens") or 0)
+            )
+            task_type = detail.get("task_type", "unknown")
+            outcome = detail.get("outcome_badge", "unknown")
+            user_msgs = detail.get("user_messages", 0)
+            asst_msgs = detail.get("assistant_messages", 0)
+
+            # First user message
+            first_msg = ""
+            messages = detail.get("messages", [])
+            for msg in messages:
+                if msg.get("role") == "user":
+                    first_msg = _get_message_text(msg)
+                    break
+
+            # Condensed flow
+            flow_parts = []
+            for msg in messages:
+                role = msg.get("role", "")
+                text = _get_message_text(msg)
+                summary = _truncate(text, 30) if text else ""
+                tool_uses = _extract_tool_uses(msg)
+                tool_names = [t.get("tool", "") for t in tool_uses if t.get("tool")]
+                if role == "user":
+                    label = f"User→{summary}" if summary else "User"
+                elif role == "assistant":
+                    if tool_names:
+                        tool_str = "+".join(tool_names[:3])
+                        # Get output snippet from last tool
+                        out_snippet = ""
+                        if tool_uses:
+                            last_out = tool_uses[-1].get("output", "")
+                            if isinstance(last_out, str) and last_out.strip():
+                                out_snippet = f"→{_truncate(last_out.strip(), 20)}"
+                        label = f"Asst→{tool_str}({_truncate(summary, 15)}){out_snippet}"
+                    else:
+                        label = f"Asst→{summary}" if summary else "Asst"
+                else:
+                    continue
+                flow_parts.append(label)
+
+            flow_str = ", ".join(flow_parts) if flow_parts else "(empty)"
+
+            # Files
+            files = detail.get("files_touched", [])
+            if isinstance(files, str):
+                try:
+                    files = json.loads(files)
+                except (json.JSONDecodeError, ValueError):
+                    files = []
+            files_str = ", ".join(files) if files else "(none)"
+
+            print(f"=== SESSION {idx}/{total}: {sid} ===")
+            print(f"Source: {source} | Model: {model} | Project: {project} | {duration} | {total_tokens} tokens")
+            print(f"Task: {task_type} | Outcome: {outcome} | {user_msgs} user + {asst_msgs} asst msgs")
+            print(f"First msg: \"{_truncate(first_msg, 120)}\"")
+            print(f"Flow: {flow_str}")
+            print(f"Files: {files_str}")
+            print()
+
+        conn.close()
+        return
+
+    # Single session mode
+    session_ids = args.session_ids or []
+    if not session_ids:
+        print(json.dumps({"error": "Provide a session_id or use --batch."}))
+        conn.close()
+        sys.exit(1)
+
+    for sid in session_ids:
+        detail = get_session_detail(conn, sid)
+        if not detail:
+            print(f"Session not found: {sid}")
+            continue
+
+        source = detail.get("source", "?")
+        model = detail.get("model", "?")
+        project = detail.get("project", "?")
+        duration = _format_duration(detail.get("duration_seconds"))
+        input_tok = _format_tokens(detail.get("input_tokens") or 0)
+        output_tok = _format_tokens(detail.get("output_tokens") or 0)
+        user_msgs = detail.get("user_messages", 0)
+        asst_msgs = detail.get("assistant_messages", 0)
+        task_type = detail.get("task_type", "unknown")
+        outcome = detail.get("outcome_badge", "unknown")
+        sensitivity = detail.get("sensitivity_score", 0.0)
+
+        # Value/risk badges
+        value_badges = detail.get("value_badges", [])
+        if isinstance(value_badges, str):
+            try:
+                value_badges = json.loads(value_badges)
+            except (json.JSONDecodeError, ValueError):
+                value_badges = []
+        risk_badges = detail.get("risk_badges", [])
+        if isinstance(risk_badges, str):
+            try:
+                risk_badges = json.loads(risk_badges)
+            except (json.JSONDecodeError, ValueError):
+                risk_badges = []
+
+        value_str = ", ".join(value_badges) if value_badges else "(none)"
+        risk_str = ", ".join(risk_badges) if risk_badges else "(none)"
+
+        print(f"Session: {sid}")
+        print(f"Source: {source} | Model: {model} | Project: {project}")
+        print(f"Duration: {duration} | Tokens: {input_tok} in / {output_tok} out | Messages: {user_msgs} user / {asst_msgs} asst")
+        print(f"Task type: {task_type} | Outcome: {outcome}")
+        print(f"Value: {value_str} | Risk: {risk_str} | Sensitivity: {sensitivity}")
+        print()
+
+        messages = detail.get("messages", [])
+
+        # First user message
+        first_user_text = ""
+        for msg in messages:
+            if msg.get("role") == "user":
+                first_user_text = _get_message_text(msg)
+                break
+
+        print("--- FIRST USER MESSAGE ---")
+        print(_truncate(first_user_text, 500))
+        print()
+
+        # Conversation flow
+        print("--- CONVERSATION FLOW ---")
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role == "user":
+                role_label = "User"
+            elif role == "assistant":
+                role_label = "Asst"
+            else:
+                continue
+
+            text = _get_message_text(msg)
+            print(f"#{i} [{role_label}] {_truncate(text, 80)}")
+
+            tool_uses = _extract_tool_uses(msg)
+            for tu in tool_uses:
+                tool_name = tu.get("tool", "?")
+                inp = tu.get("input", {})
+                first_arg = tu.get("first_arg", "")
+                if not first_arg and isinstance(inp, dict):
+                    for v in inp.values():
+                        if isinstance(v, str) and v.strip():
+                            first_arg = v.strip()
+                            break
+                first_arg_str = f"({_truncate(first_arg, 30)})" if first_arg else "()"
+                status_str = tu.get("status", "")
+                output = tu.get("output", "")
+                output_str = ""
+                if isinstance(output, str) and output.strip():
+                    output_str = f" — \"{_truncate(output.strip(), 40)}\""
+                status_display = f" {status_str}" if status_str else ""
+                print(f"   → {tool_name}{first_arg_str}{status_display}{output_str}")
+        print()
+
+        # Files touched
+        files = detail.get("files_touched", [])
+        if isinstance(files, str):
+            try:
+                files = json.loads(files)
+            except (json.JSONDecodeError, ValueError):
+                files = []
+        print("--- FILES TOUCHED ---")
+        print(", ".join(files) if files else "(none)")
+        print()
+
+        # Commands run
+        commands = detail.get("commands_run", [])
+        if isinstance(commands, str):
+            try:
+                commands = json.loads(commands)
+            except (json.JSONDecodeError, ValueError):
+                commands = []
+        print("--- COMMANDS RUN ---")
+        if commands:
+            for cmd in commands:
+                print(cmd)
+        else:
+            print("(none)")
+        print()
+
+    conn.close()
+
+
+def _run_set_score(args) -> None:
+    """Record AI quality score for one or more sessions."""
+    from .index import open_index, update_session
+
+    session_ids = args.session_ids
+    quality = args.quality
+    reason = args.reason
+
+    if not session_ids:
+        print(json.dumps({"error": "No session IDs provided."}))
+        sys.exit(1)
+
+    conn = open_index()
+    results = []
+    for sid in session_ids:
+        ok = update_session(
+            conn, sid,
+            ai_quality_score=quality,
+            ai_score_reason=reason,
+        )
+        results.append({"session_id": sid, "ai_quality_score": quality, "ok": ok})
+    conn.close()
+
+    success = sum(1 for r in results if r["ok"])
+    print(json.dumps({
+        "action": "set-score",
+        "updated": success,
+        "quality": quality,
+        "results": results,
+    }, indent=2))
+
+
+def _run_score_batch(args) -> None:
+    """List unscored sessions as JSON."""
+    from .index import open_index, query_unscored_sessions
+
+    conn = open_index()
+    sessions = query_unscored_sessions(conn, limit=args.limit, source=args.source)
+    conn.close()
+
+    print(json.dumps(sessions, indent=2))
+
+
+def _generate_score_view_text(conn, session_id: str) -> str | None:
+    """Generate score-view text for a session as a string (for piping to claude -p)."""
+    from .index import get_session_detail
+
+    detail = get_session_detail(conn, session_id)
+    if not detail:
+        return None
+
+    lines: list[str] = []
+
+    source = detail.get("source", "?")
+    model = detail.get("model", "?")
+    project = detail.get("project", "?")
+    duration = _format_duration(detail.get("duration_seconds"))
+    input_tok = _format_tokens(detail.get("input_tokens") or 0)
+    output_tok = _format_tokens(detail.get("output_tokens") or 0)
+    user_msgs = detail.get("user_messages", 0)
+    asst_msgs = detail.get("assistant_messages", 0)
+    task_type = detail.get("task_type", "unknown")
+    outcome = detail.get("outcome_badge", "unknown")
+    sensitivity = detail.get("sensitivity_score", 0.0)
+
+    value_badges = detail.get("value_badges", [])
+    if isinstance(value_badges, str):
+        try:
+            value_badges = json.loads(value_badges)
+        except (json.JSONDecodeError, ValueError):
+            value_badges = []
+    risk_badges = detail.get("risk_badges", [])
+    if isinstance(risk_badges, str):
+        try:
+            risk_badges = json.loads(risk_badges)
+        except (json.JSONDecodeError, ValueError):
+            risk_badges = []
+
+    value_str = ", ".join(value_badges) if value_badges else "(none)"
+    risk_str = ", ".join(risk_badges) if risk_badges else "(none)"
+
+    lines.append(f"Session: {session_id}")
+    lines.append(f"Source: {source} | Model: {model} | Project: {project}")
+    lines.append(f"Duration: {duration} | Tokens: {input_tok} in / {output_tok} out | Messages: {user_msgs} user / {asst_msgs} asst")
+    lines.append(f"Task type: {task_type} | Outcome: {outcome}")
+    lines.append(f"Value: {value_str} | Risk: {risk_str} | Sensitivity: {sensitivity}")
+    lines.append("")
+
+    messages = detail.get("messages", [])
+
+    # First user message
+    first_user_text = ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            first_user_text = _get_message_text(msg)
+            break
+
+    lines.append("--- FIRST USER MESSAGE ---")
+    lines.append(_truncate(first_user_text, 500))
+    lines.append("")
+
+    # Conversation flow
+    lines.append("--- CONVERSATION FLOW ---")
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "")
+        if role == "user":
+            role_label = "User"
+        elif role == "assistant":
+            role_label = "Asst"
+        else:
+            continue
+
+        text = _get_message_text(msg)
+        lines.append(f"#{i} [{role_label}] {_truncate(text, 80)}")
+
+        tool_uses = _extract_tool_uses(msg)
+        for tu in tool_uses:
+            tool_name = tu.get("tool", "?")
+            inp = tu.get("input", {})
+            first_arg = tu.get("first_arg", "")
+            if not first_arg and isinstance(inp, dict):
+                for v in inp.values():
+                    if isinstance(v, str) and v.strip():
+                        first_arg = v.strip()
+                        break
+            first_arg_str = f"({_truncate(first_arg, 30)})" if first_arg else "()"
+            status_str = tu.get("status", "")
+            output = tu.get("output", "")
+            output_str = ""
+            if isinstance(output, str) and output.strip():
+                output_str = f' — "{_truncate(output.strip(), 40)}"'
+            status_display = f" {status_str}" if status_str else ""
+            lines.append(f"   → {tool_name}{first_arg_str}{status_display}{output_str}")
+    lines.append("")
+
+    # Files touched
+    files = detail.get("files_touched", [])
+    if isinstance(files, str):
+        try:
+            files = json.loads(files)
+        except (json.JSONDecodeError, ValueError):
+            files = []
+    lines.append("--- FILES TOUCHED ---")
+    lines.append(", ".join(files) if files else "(none)")
+    lines.append("")
+
+    # Commands run
+    commands = detail.get("commands_run", [])
+    if isinstance(commands, str):
+        try:
+            commands = json.loads(commands)
+        except (json.JSONDecodeError, ValueError):
+            commands = []
+    lines.append("--- COMMANDS RUN ---")
+    if commands:
+        for cmd in commands:
+            lines.append(cmd)
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+_SCORE_RUBRIC = """\
+Score this coding agent session for quality (1-5).
+
+Rubric:
+5 = Excellent: Clear non-trivial coding task. Verified outcome (tests pass, code compiles). Rich tool usage, multi-step problem-solving.
+4 = Good: Clear task, useful outcome. Some tool usage and verification.
+3 = Average: Routine task. Partial/unverified outcome. Basic interaction.
+2 = Low: Vague/trivial task. Failed or unclear outcome. Minimal interaction.
+1 = Poor: No discernible coding task. Trivially short or broken.
+
+Evaluate: intent clarity, outcome success, conversation substance, agent quality.
+For Claude Code: value IDE workflows (read→edit→test), bash usage, multi-file changes, debugging with resolution.
+For Codex: value clear specs, multi-step implementations."""
+
+_SCORE_JSON_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "quality": {"type": "integer", "minimum": 1, "maximum": 5},
+        "reason": {"type": "string"},
+    },
+    "required": ["quality", "reason"],
+})
+
+
+def _score_single_session(
+    conn,
+    session_id: str,
+    *,
+    model: str = "sonnet",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Score a single session using claude -p. Returns result dict."""
+    import subprocess
+
+    score_view_text = _generate_score_view_text(conn, session_id)
+    if score_view_text is None:
+        return {"session_id": session_id, "error": "Session not found"}
+
+    if dry_run:
+        print(score_view_text, file=sys.stderr)
+        return {"session_id": session_id, "dry_run": True}
+
+    cmd = [
+        "claude", "-p",
+        "--append-system-prompt", _SCORE_RUBRIC,
+        "--json-schema", _SCORE_JSON_SCHEMA,
+        "--output-format", "json",
+        "--tools", "",
+        "--no-session-persistence",
+        "--model", model,
+        "Score this coding agent session for quality (1-5). Evaluate intent clarity, outcome success, conversation substance, and agent quality.",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=score_view_text,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        return {"session_id": session_id, "error": "claude CLI not found. Install Claude Code first."}
+    except subprocess.TimeoutExpired:
+        return {"session_id": session_id, "error": "Timed out waiting for claude"}
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() if proc.stderr else ""
+        return {"session_id": session_id, "error": f"claude exited {proc.returncode}: {stderr}"}
+
+    # Parse response — claude --output-format json returns a JSON object
+    # with a "result" field containing the text, and when --json-schema is used
+    # it returns structured_output
+    try:
+        response = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"session_id": session_id, "error": f"Failed to parse claude response: {proc.stdout[:200]}"}
+
+    # Extract the structured output
+    structured = response.get("structured_output")
+    if structured is None:
+        # Try parsing result text as JSON
+        result_text = response.get("result", "")
+        try:
+            structured = json.loads(result_text)
+        except (json.JSONDecodeError, TypeError):
+            return {"session_id": session_id, "error": f"No structured output in response"}
+
+    quality = structured.get("quality")
+    reason = structured.get("reason", "")
+
+    if not isinstance(quality, int) or not (1 <= quality <= 5):
+        return {"session_id": session_id, "error": f"Invalid quality score: {quality}"}
+
+    # Store the score
+    from .index import update_session
+    ok = update_session(conn, session_id, ai_quality_score=quality, ai_score_reason=reason)
+
+    return {
+        "session_id": session_id,
+        "ai_quality_score": quality,
+        "reason": reason,
+        "ok": ok,
+    }
+
+
+def _run_score(args) -> None:
+    """Score sessions using claude -p for automated AI evaluation."""
+    from .index import open_index, query_unscored_sessions, update_session
+
+    conn = open_index()
+
+    model = args.model
+    dry_run = args.dry_run
+    batch = args.batch
+    auto_triage = getattr(args, "auto_triage", False)
+
+    if batch:
+        # Batch mode: score unscored sessions
+        sessions = query_unscored_sessions(conn, limit=args.limit, source=args.source)
+        if not sessions:
+            print(json.dumps({"message": "No unscored sessions found.", "scored": 0}))
+            conn.close()
+            return
+
+        results = []
+        for i, s in enumerate(sessions, 1):
+            sid = s["session_id"]
+            title = s.get("display_title", sid)
+            print(f"[{i}/{len(sessions)}] Scoring: {_truncate(title, 60)} ({sid[:12]}...)", file=sys.stderr)
+            result = _score_single_session(conn, sid, model=model, dry_run=dry_run)
+            results.append(result)
+            if result.get("ai_quality_score"):
+                print(f"  -> {result['ai_quality_score']}/5: {result.get('reason', '')}", file=sys.stderr)
+            elif result.get("error"):
+                print(f"  -> Error: {result['error']}", file=sys.stderr)
+            elif result.get("dry_run"):
+                print(f"  -> (dry run)", file=sys.stderr)
+
+        scored = [r for r in results if r.get("ok")]
+        errors = [r for r in results if r.get("error")]
+        summary = {
+            "scored": len(scored),
+            "errors": len(errors),
+            "results": results,
+        }
+        if scored:
+            scores = [r["ai_quality_score"] for r in scored]
+            summary["score_distribution"] = {
+                "excellent_5": sum(1 for q in scores if q == 5),
+                "good_4": sum(1 for q in scores if q == 4),
+                "average_3": sum(1 for q in scores if q == 3),
+                "low_2": sum(1 for q in scores if q == 2),
+                "poor_1": sum(1 for q in scores if q == 1),
+            }
+
+        # Auto-triage: approve 4-5, block 1-2, leave 3 for manual review
+        if auto_triage and scored and not dry_run:
+            approve_ids = [r["session_id"] for r in scored if r["ai_quality_score"] >= 4]
+            block_ids = [r["session_id"] for r in scored if r["ai_quality_score"] <= 2]
+            triage = {"approved": 0, "blocked": 0, "manual_review": 0}
+            if approve_ids:
+                for sid in approve_ids:
+                    reason = next(
+                        (r.get("reason", "Auto-triage: high quality") for r in scored if r["session_id"] == sid),
+                        "Auto-triage: high quality",
+                    )
+                    update_session(conn, sid, status="approved", reason=reason)
+                triage["approved"] = len(approve_ids)
+                print(f"  Auto-approved {len(approve_ids)} sessions (score 4-5)", file=sys.stderr)
+            if block_ids:
+                for sid in block_ids:
+                    reason = next(
+                        (r.get("reason", "Auto-triage: low quality") for r in scored if r["session_id"] == sid),
+                        "Auto-triage: low quality",
+                    )
+                    update_session(conn, sid, status="blocked", reason=reason)
+                triage["blocked"] = len(block_ids)
+                print(f"  Auto-blocked {len(block_ids)} sessions (score 1-2)", file=sys.stderr)
+            triage["manual_review"] = sum(1 for r in scored if r["ai_quality_score"] == 3)
+            summary["auto_triage"] = triage
+
+        print(json.dumps(summary, indent=2))
+    else:
+        # Single session mode
+        session_ids = args.session_ids or []
+        if not session_ids:
+            print(json.dumps({"error": "Provide session ID(s) or use --batch"}))
+            conn.close()
+            sys.exit(1)
+
+        results = []
+        for sid in session_ids:
+            result = _score_single_session(conn, sid, model=model, dry_run=dry_run)
+            results.append(result)
+
+        if len(results) == 1:
+            print(json.dumps(results[0], indent=2))
+        else:
+            print(json.dumps({"results": results}, indent=2))
+
+    conn.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="DataClaw — Claude/Codex -> Hugging Face")
     sub = parser.add_subparsers(dest="command")
@@ -1211,7 +2057,8 @@ def main() -> None:
     list_parser.add_argument("--source", choices=SOURCE_CHOICES, default="auto")
 
     us = sub.add_parser("update-skill", help="Install/update the dataclaw skill for a coding agent")
-    us.add_argument("target", choices=["claude"], help="Agent to install skill for")
+    us.add_argument("target", choices=["claude", "openclaw", "codex", "cline"],
+                    help="Agent to install skill for")
 
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
@@ -1225,15 +2072,69 @@ def main() -> None:
     cfg.add_argument("--confirm-projects", action="store_true",
                      help="Mark project selection as confirmed (include all)")
 
-    exp = sub.add_parser("export", help="Export and push (default)")
-    # Export flags on both the subcommand and root parser so `dataclaw --no-push` works
+    # Workbench commands
+    serve_parser = sub.add_parser("serve", help="Start the workbench daemon + web UI")
+    serve_parser.add_argument("--port", type=int, default=8384, help="Port (default: 8384)")
+    serve_parser.add_argument("--no-browser", action="store_true", help="Don't open browser")
+    serve_parser.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None,
+                              help="Only scan this source")
+
+    scan_parser = sub.add_parser("scan", help="One-shot index sessions into local workbench DB")
+    scan_parser.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None,
+                             help="Only scan this source")
+
+    inbox_parser = sub.add_parser("inbox", help="List indexed sessions in terminal")
+    inbox_parser.add_argument("--status", choices=["new", "shortlisted", "approved", "blocked"],
+                              default=None)
+    inbox_parser.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None)
+    inbox_parser.add_argument("--limit", type=int, default=20)
+    inbox_parser.add_argument("--json", action="store_true", help="Output JSON for agent parsing")
+
+    # Review action commands
+    for action_name in ("approve", "block", "shortlist"):
+        action_parser = sub.add_parser(action_name, help=f"{action_name.title()} sessions by ID")
+        action_parser.add_argument("session_ids", nargs="+", help="Session IDs to update")
+        action_parser.add_argument("--reason", type=str, default=None, help="Reason for the action")
+
+    # Scoring commands
+    sv = sub.add_parser("score-view", help="Show condensed session view for AI scoring")
+    sv.add_argument("session_ids", nargs="*", help="Session IDs to view")
+    sv.add_argument("--batch", action="store_true", help="Compact batch format")
+    sv.add_argument("--limit", type=int, default=5, help="Sessions per batch")
+    sv.add_argument("--offset", type=int, default=0, help="Offset for batch")
+    sv.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None)
+
+    ss = sub.add_parser("set-score", help="Record AI quality score for sessions")
+    ss.add_argument("session_ids", nargs="+", help="Session IDs")
+    ss.add_argument("--quality", type=int, required=True, choices=range(1, 6), help="Quality 1-5")
+    ss.add_argument("--reason", type=str, default=None, help="Reason for the score")
+
+    sb = sub.add_parser("score-batch", help="List unscored sessions for AI scoring")
+    sb.add_argument("--limit", type=int, default=50)
+    sb.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None)
+
+    sc = sub.add_parser("score", help="Auto-score sessions via claude -p")
+    sc.add_argument("session_ids", nargs="*", help="Session IDs to score")
+    sc.add_argument("--batch", action="store_true", help="Score all unscored sessions")
+    sc.add_argument("--limit", type=int, default=100, help="Max sessions for batch mode")
+    sc.add_argument("--source", choices=["claude", "codex", "openclaw"], default=None)
+    sc.add_argument("--model", type=str, default="sonnet", help="Model for scoring (default: sonnet)")
+    sc.add_argument("--dry-run", action="store_true", help="Show score-view without calling claude")
+    sc.add_argument("--auto-triage", action="store_true",
+                    help="After scoring, auto-approve 4-5 and auto-block 1-2 (score 3 left for review)")
+
+    exp = sub.add_parser("export", help="Export locally (default). Use --push to upload to HF.")
+    # Export flags on both the subcommand and root parser so `dataclaw --push` works
     for target in (exp, parser):
         target.add_argument("--output", "-o", type=Path, default=None)
         target.add_argument("--repo", "-r", type=str, default=None)
         target.add_argument("--source", choices=SOURCE_CHOICES, default="auto")
         target.add_argument("--all-projects", action="store_true")
         target.add_argument("--no-thinking", action="store_true")
-        target.add_argument("--no-push", action="store_true")
+        target.add_argument("--push", action="store_true",
+                            help="Upload to Hugging Face after export (requires dataclaw confirm first)")
+        target.add_argument("--no-push", action="store_true",
+                            help="(Default, kept for backwards compatibility) Export locally only")
         target.add_argument(
             "--publish-attestation",
             type=str,
@@ -1244,6 +2145,45 @@ def main() -> None:
 
     args = parser.parse_args()
     command = args.command or "export"
+
+    if command == "serve":
+        from .daemon import run_server
+        run_server(
+            port=args.port,
+            open_browser=not args.no_browser,
+            source_filter=args.source,
+        )
+        return
+
+    if command == "scan":
+        _run_scan(source_filter=args.source)
+        return
+
+    if command == "inbox":
+        _run_inbox(status=args.status, source=args.source, limit=args.limit,
+                   output_json=args.json)
+        return
+
+    if command in ("approve", "block", "shortlist"):
+        status_map = {"approve": "approved", "block": "blocked", "shortlist": "shortlisted"}
+        _run_review_action(status_map[command], args.session_ids, reason=args.reason)
+        return
+
+    if command == "score-view":
+        _run_score_view(args)
+        return
+
+    if command == "set-score":
+        _run_set_score(args)
+        return
+
+    if command == "score-batch":
+        _run_score_batch(args)
+        return
+
+    if command == "score":
+        _run_score(args)
+        return
 
     if command == "prep":
         prep(source_filter=args.source)
@@ -1352,7 +2292,15 @@ def _run_export(args) -> None:
         sys.exit(1)
 
     # Gate: require `dataclaw confirm` before pushing
-    if not args.no_push:
+    # Default is local-only. Push only when --push is explicitly passed.
+    wants_push = getattr(args, "push", False) and not args.no_push
+    if wants_push:
+        print(json.dumps({
+            "error": "Uploading to Hugging Face is temporarily disabled.",
+            "hint": "Use 'dataclaw export' to export locally.",
+        }, indent=2))
+        sys.exit(1)
+    if False:  # HF upload disabled — preserved for future re-enable
         if args.attest_user_approved_publish and not args.publish_attestation:
             print(json.dumps({
                 "error": "Deprecated publish attestation flag was provided.",
@@ -1480,7 +2428,7 @@ def _run_export(args) -> None:
 
     # Resolve repo — CLI flag > config > auto-detect from HF username
     repo_id = args.repo or config.get("repo")
-    if not repo_id and not args.no_push:
+    if not repo_id and wants_push:
         hf_user = get_hf_username()
         if hf_user:
             repo_id = default_repo_name(hf_user)
@@ -1545,11 +2493,11 @@ def _run_export(args) -> None:
         "models": meta["models"],
         "source": source_choice,
     }
-    if args.no_push:
+    if not wants_push:
         config["stage"] = "review"
     save_config(config)
 
-    if args.no_push:
+    if not wants_push:
         print(f"\nDone! JSONL file: {output_path}")
         abs_path = str(output_path.resolve())
         next_steps, next_command = _build_status_next_steps("review", config, None, None)
