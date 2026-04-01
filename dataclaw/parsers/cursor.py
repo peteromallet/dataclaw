@@ -6,8 +6,21 @@ from typing import Any
 from .. import _json as json
 from ..anonymizer import Anonymizer
 from ..secrets import redact_text
+from .common import (
+    build_prefixed_project_name,
+    build_projects_from_index,
+    collect_project_sessions,
+    get_cached_index,
+    make_session_result,
+    make_stats,
+    normalize_timestamp,
+    parse_tool_input,
+    safe_int,
+    update_time_bounds,
+)
 
 CURSOR_SOURCE = "cursor"
+SOURCE = CURSOR_SOURCE
 _SYS = platform.system()
 if _SYS == "Darwin":
     CURSOR_DB = Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
@@ -53,8 +66,7 @@ def _strip_mcp_prefix(name: str) -> str:
 
 def get_project_index(refresh: bool = False) -> dict[str, list[str]]:
     global _PROJECT_INDEX
-    if refresh or not _PROJECT_INDEX:
-        _PROJECT_INDEX = _build_project_index()
+    _PROJECT_INDEX = get_cached_index(_PROJECT_INDEX, refresh, _build_project_index)
     return _PROJECT_INDEX
 
 
@@ -122,9 +134,7 @@ def _build_project_index() -> dict[str, list[str]]:
 
 
 def build_project_name(cwd: str) -> str:
-    if cwd == UNKNOWN_CURSOR_CWD:
-        return "cursor:unknown"
-    return f"cursor:{Path(cwd).name or cwd}"
+    return build_prefixed_project_name(SOURCE, cwd, UNKNOWN_CURSOR_CWD)
 
 
 def discover_projects() -> list[dict]:
@@ -133,19 +143,37 @@ def discover_projects() -> list[dict]:
         return []
     db_size = CURSOR_DB.stat().st_size if CURSOR_DB.exists() else 0
     total_sessions = sum(len(cids) for cids in index.values())
-    projects = []
-    for cwd, cids in sorted(index.items()):
-        if not cids:
-            continue
-        estimated_size = int(db_size * (len(cids) / total_sessions)) if total_sessions else 0
-        projects.append({
-            "dir_name": cwd,
-            "display_name": build_project_name(cwd),
-            "session_count": len(cids),
-            "total_size_bytes": estimated_size,
-            "source": CURSOR_SOURCE,
-        })
-    return projects
+    return build_projects_from_index(
+        index,
+        CURSOR_SOURCE,
+        build_project_name,
+        lambda cids: int(db_size * (len(cids) / total_sessions)) if total_sessions else 0,
+    )
+
+
+def parse_project_sessions(
+    project_dir_name: str,
+    anonymizer: Anonymizer,
+    include_thinking: bool = True,
+) -> list[dict]:
+    composer_ids = get_project_index().get(project_dir_name, [])
+    if not composer_ids:
+        return []
+    try:
+        with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
+            return collect_project_sessions(
+                composer_ids,
+                lambda cid: parse_session(
+                    cid,
+                    conn,
+                    anonymizer,
+                    include_thinking,
+                ),
+                build_project_name(project_dir_name),
+                CURSOR_SOURCE,
+            )
+    except sqlite3.Error:
+        return []
 
 
 def parse_session(
@@ -153,12 +181,6 @@ def parse_session(
     conn: sqlite3.Connection,
     anonymizer: Anonymizer,
     include_thinking: bool,
-    _make_stats,
-    _make_session_result,
-    _parse_tool_input,
-    _update_time_bounds,
-    _normalize_timestamp,
-    _safe_int,
 ) -> dict | None:
     row = conn.execute(
         "SELECT value FROM cursorDiskKV WHERE key = ?",
@@ -201,7 +223,7 @@ def parse_session(
         "end_time": None,
     }
     messages: list[dict[str, Any]] = []
-    stats = _make_stats()
+    stats = make_stats()
 
     for h in headers:
         bubble = bubble_map.get(h.get("bubbleId", ""))
@@ -210,7 +232,7 @@ def parse_session(
 
         timestamp = bubble.get("createdAt")
         if isinstance(timestamp, (int, float)):
-            timestamp = _normalize_timestamp(timestamp)
+            timestamp = normalize_timestamp(timestamp)
 
         if metadata["cwd"] is None:
             wuris = bubble.get("workspaceUris", [])
@@ -239,7 +261,7 @@ def parse_session(
                 "timestamp": timestamp,
             })
             stats["user_messages"] += 1
-            _update_time_bounds(metadata, timestamp)
+            update_time_bounds(metadata, timestamp)
 
         elif bubble_type == 2:
             tfd = bubble.get("toolFormerData")
@@ -255,7 +277,11 @@ def parse_session(
                         if isinstance(inner, dict):
                             params_raw = inner
 
-                tool_input = _parse_tool_input(tool_name, params_raw if isinstance(params_raw, dict) else {}, anonymizer)
+                tool_input = parse_tool_input(
+                    tool_name,
+                    params_raw if isinstance(params_raw, dict) else {},
+                    anonymizer,
+                )
 
                 result_raw = _try_parse_json(tfd.get("result"))
                 tool_output: dict[str, Any] = {}
@@ -300,7 +326,7 @@ def parse_session(
                 messages.append(msg)
                 stats["assistant_messages"] += 1
                 stats["tool_uses"] += 1
-                _update_time_bounds(metadata, timestamp)
+                update_time_bounds(metadata, timestamp)
             else:
                 text = (bubble.get("text") or "").strip()
                 thinking = bubble.get("thinking")
@@ -320,14 +346,14 @@ def parse_session(
 
                 messages.append(msg)
                 stats["assistant_messages"] += 1
-                _update_time_bounds(metadata, timestamp)
+                update_time_bounds(metadata, timestamp)
 
         tc = bubble.get("tokenCount")
         if isinstance(tc, dict):
-            stats["input_tokens"] += _safe_int(tc.get("inputTokens"))
-            stats["output_tokens"] += _safe_int(tc.get("outputTokens"))
+            stats["input_tokens"] += safe_int(tc.get("inputTokens"))
+            stats["output_tokens"] += safe_int(tc.get("outputTokens"))
 
     if metadata["model"] is None:
         metadata["model"] = "cursor-unknown"
 
-    return _make_session_result(metadata, messages, stats)
+    return make_session_result(metadata, messages, stats)

@@ -1,0 +1,284 @@
+import logging
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from ..anonymizer import Anonymizer
+from .common import (
+    build_prefixed_project_name,
+    build_projects_from_index,
+    collect_project_sessions,
+    get_cached_index,
+    load_json_field,
+    make_session_result,
+    make_stats,
+    normalize_timestamp,
+    parse_tool_input,
+    safe_int,
+    update_time_bounds,
+)
+
+logger = logging.getLogger(__name__)
+
+SOURCE = "opencode"
+OPENCODE_DIR = Path.home() / ".local" / "share" / "opencode"
+OPENCODE_DB_PATH = OPENCODE_DIR / "opencode.db"
+UNKNOWN_OPENCODE_CWD = "<unknown-cwd>"
+
+_PROJECT_INDEX: dict[str, list[str]] = {}
+
+
+def get_project_index(refresh: bool = False) -> dict[str, list[str]]:
+    global _PROJECT_INDEX
+    _PROJECT_INDEX = get_cached_index(
+        _PROJECT_INDEX,
+        refresh,
+        lambda: build_project_index(OPENCODE_DB_PATH),
+    )
+    return _PROJECT_INDEX
+
+
+def discover_projects(
+    index: dict[str, list[str]] | None = None,
+    db_path: Path | None = None,
+) -> list[dict]:
+    if index is None:
+        index = get_project_index(refresh=True)
+    if db_path is None:
+        db_path = OPENCODE_DB_PATH
+    total_sessions = sum(len(session_ids) for session_ids in index.values())
+    db_size = db_path.stat().st_size if db_path.exists() else 0
+    return build_projects_from_index(
+        index,
+        SOURCE,
+        build_project_name,
+        lambda session_ids: int(db_size * (len(session_ids) / total_sessions)) if total_sessions else 0,
+    )
+
+
+def build_project_name(cwd: str) -> str:
+    return build_prefixed_project_name(SOURCE, cwd, UNKNOWN_OPENCODE_CWD)
+
+
+def parse_project_sessions(
+    project_dir_name: str,
+    anonymizer: Anonymizer,
+    include_thinking: bool = True,
+) -> list[dict]:
+    session_ids = get_project_index().get(project_dir_name, [])
+    return collect_project_sessions(
+        session_ids,
+        lambda session_id: parse_session(
+            session_id,
+            db_path=OPENCODE_DB_PATH,
+            anonymizer=anonymizer,
+            include_thinking=include_thinking,
+            target_cwd=project_dir_name,
+        ),
+        build_project_name(project_dir_name),
+        SOURCE,
+    )
+
+
+def build_project_index(db_path: Path) -> dict[str, list[str]]:
+    if not db_path.exists():
+        return {}
+
+    index: dict[str, list[str]] = {}
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, directory FROM session ORDER BY time_updated DESC, id DESC"
+            ).fetchall()
+    except sqlite3.Error as e:
+        logger.warning("Failed to query OpenCode database %s: %s", db_path, e)
+        return {}
+
+    for session_id, cwd in rows:
+        normalized_cwd = cwd if isinstance(cwd, str) and cwd.strip() else UNKNOWN_OPENCODE_CWD
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        index.setdefault(normalized_cwd, []).append(session_id)
+    return index
+
+
+def parse_session(
+    session_id: str,
+    db_path: Path,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+    target_cwd: str,
+) -> dict | None:
+    if not db_path.exists():
+        return None
+
+    messages: list[dict[str, Any]] = []
+    metadata: dict[str, Any] = {
+        "session_id": session_id,
+        "cwd": None,
+        "git_branch": None,
+        "model": None,
+        "start_time": None,
+        "end_time": None,
+    }
+    stats = make_stats()
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            session_row = conn.execute(
+                "SELECT id, directory, time_created, time_updated FROM session WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if session_row is None:
+                return None
+
+            raw_cwd = session_row["directory"]
+            if isinstance(raw_cwd, str) and raw_cwd.strip():
+                if raw_cwd != target_cwd:
+                    return None
+                metadata["cwd"] = anonymizer.path(raw_cwd)
+            elif target_cwd != UNKNOWN_OPENCODE_CWD:
+                return None
+
+            metadata["start_time"] = normalize_timestamp(session_row["time_created"])
+            metadata["end_time"] = normalize_timestamp(session_row["time_updated"])
+
+            message_rows = conn.execute(
+                "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+                (session_id,),
+            ).fetchall()
+
+            for message_row in message_rows:
+                message_data = load_json_field(message_row["data"])
+                role = message_data.get("role")
+                timestamp = normalize_timestamp(message_row["time_created"])
+
+                model = extract_model(message_data)
+                if metadata["model"] is None and model:
+                    metadata["model"] = model
+
+                part_rows = conn.execute(
+                    "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC",
+                    (message_row["id"],),
+                ).fetchall()
+                parts = [load_json_field(part_row["data"]) for part_row in part_rows]
+
+                if role == "user":
+                    content = extract_user_content(parts, anonymizer)
+                    if content is not None:
+                        messages.append({"role": "user", "content": content, "timestamp": timestamp})
+                        stats["user_messages"] += 1
+                        update_time_bounds(metadata, timestamp)
+                elif role == "assistant":
+                    msg = extract_assistant_content(parts, anonymizer, include_thinking)
+                    if msg:
+                        msg["timestamp"] = timestamp
+                        messages.append(msg)
+                        stats["assistant_messages"] += 1
+                        stats["tool_uses"] += len(msg.get("tool_uses", []))
+                        update_time_bounds(metadata, timestamp)
+
+                    tokens = message_data.get("tokens", {})
+                    if isinstance(tokens, dict):
+                        cache = tokens.get("cache", {})
+                        cache_read = safe_int(cache.get("read")) if isinstance(cache, dict) else 0
+                        cache_write = safe_int(cache.get("write")) if isinstance(cache, dict) else 0
+                        stats["input_tokens"] += safe_int(tokens.get("input")) + cache_read + cache_write
+                        stats["output_tokens"] += safe_int(tokens.get("output"))
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("Failed to parse OpenCode session %s: %s", session_id, e)
+        return None
+
+    if metadata["model"] is None:
+        metadata["model"] = "opencode-unknown"
+
+    return make_session_result(metadata, messages, stats)
+
+
+def extract_model(message_data: dict[str, Any]) -> str | None:
+    model = message_data.get("model")
+    if not isinstance(model, dict):
+        return None
+    provider_id = model.get("providerID")
+    model_id = model.get("modelID")
+    if (
+        isinstance(provider_id, str)
+        and provider_id.strip()
+        and isinstance(model_id, str)
+        and model_id.strip()
+    ):
+        return f"{provider_id}/{model_id}"
+    if isinstance(model_id, str) and model_id.strip():
+        return model_id
+    return None
+
+
+def extract_user_content(parts: list[dict[str, Any]], anonymizer: Anonymizer) -> str | None:
+    text_parts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") != "text":
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            text_parts.append(anonymizer.text(text.strip()))
+
+    if not text_parts:
+        return None
+    return "\n\n".join(text_parts)
+
+
+def extract_assistant_content(
+    parts: list[dict[str, Any]],
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict[str, Any] | None:
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    tool_uses: list[dict[str, Any]] = []
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+
+        if part_type == "text":
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(anonymizer.text(text.strip()))
+        elif part_type == "reasoning" and include_thinking:
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                thinking_parts.append(anonymizer.text(text.strip()))
+        elif part_type == "tool":
+            tool_name = part.get("tool")
+            state = part.get("state", {})
+            tool_input = state.get("input", {}) if isinstance(state, dict) else {}
+            tool_use: dict[str, Any] = {
+                "tool": tool_name,
+                "input": parse_tool_input(tool_name, tool_input, anonymizer),
+            }
+            if isinstance(state, dict):
+                status = state.get("status")
+                if isinstance(status, str):
+                    tool_use["status"] = "success" if status == "completed" else status
+                output = state.get("output")
+                if isinstance(output, str) and output:
+                    tool_use["output"] = {"text": anonymizer.text(output)}
+                elif output is not None:
+                    tool_use["output"] = {}
+            tool_uses.append(tool_use)
+
+    if not text_parts and not thinking_parts and not tool_uses:
+        return None
+
+    msg: dict[str, Any] = {"role": "assistant"}
+    if text_parts:
+        msg["content"] = "\n\n".join(text_parts)
+    if thinking_parts:
+        msg["thinking"] = "\n\n".join(thinking_parts)
+    if tool_uses:
+        msg["tool_uses"] = tool_uses
+    return msg

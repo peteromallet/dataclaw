@@ -17,6 +17,7 @@ from dataclaw.cli import (
     _scan_for_text_occurrences,
     _scan_high_entropy_strings,
     _scan_pii,
+    _source_label,
     _validate_publish_attestation,
     configure,
     default_repo_name,
@@ -241,6 +242,22 @@ class TestBuildDatasetCard:
         assert "claude-sonnet" in card
         assert "10" in card
 
+    def test_includes_stable_provider_tags(self):
+        meta = {
+            "models": {},
+            "sessions": 0,
+            "projects": [],
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "exported_at": "",
+        }
+        card = _build_dataset_card("user/repo", meta)
+        assert "  - claude-code" in card
+        assert "  - codex-cli" in card
+        assert "  - gemini-cli" in card
+        assert "  - opencode" in card
+        assert "  - openclaw" in card
+
     def test_yaml_frontmatter(self):
         meta = {
             "models": {}, "sessions": 0, "projects": [],
@@ -400,7 +417,7 @@ class TestListProjects:
         monkeypatch.setattr("dataclaw.cli.discover_projects", lambda: [])
         list_projects()
         captured = capsys.readouterr()
-        assert "No Claude Code, Codex, Cursor, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, or Custom sessions" in captured.out
+        assert captured.out.strip() == f"No {_source_label('auto')} sessions found."
 
     def test_source_filter_codex(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -425,7 +442,7 @@ class TestListProjects:
         )
         list_projects(source_filter="codex")
         captured = capsys.readouterr()
-        assert "No Codex sessions found." in captured.out
+        assert "No codex sessions found." in captured.out
 
     def test_main_list_uses_configured_source_when_auto(self, monkeypatch, capsys):
         monkeypatch.setattr(
