@@ -136,6 +136,8 @@ Step 2 (INSTALL SKILL) is omitted in manual usage.
 | `dataclaw export --publish-attestation "..."` | Export and push (requires `dataclaw confirm` first) |
 | `dataclaw export --all-projects` | Include everything (ignore exclusions) |
 | `dataclaw export --no-thinking` | Exclude extended thinking blocks |
+| `dataclaw jsonl-to-yaml [input.jsonl]` | Convert an export JSONL file to human-readable YAML |
+| `dataclaw diff-jsonl --old old.jsonl --new new.jsonl` | Structurally diff two export JSONL files and write YAML |
 | `dataclaw update-skill claude` | Install/update the dataclaw skill for Claude Code |
 
 ## What gets exported
@@ -162,8 +164,9 @@ DataClaw applies multiple layers of protection:
 Automated redaction cannot catch everything - especially service-specific
 identifiers, third-party PII, or secrets in unusual formats.
 
-We recommend to convert the exported jsonl into human-readable yaml using the script in https://github.com/peteromallet/dataclaw/issues/1 ,
+We recommend converting the exported jsonl into human-readable yaml using `dataclaw jsonl-to-yaml`,
 then use tools such as [trufflehog](https://github.com/trufflesecurity/trufflehog) and [gitleaks](https://github.com/gitleaks/gitleaks) to scan it.
+You can also compare the exported jsonl with a previous baseline using `dataclaw diff-jsonl`.
 
 To help improve redaction, report issues: https://github.com/banodoco/dataclaw/issues
 

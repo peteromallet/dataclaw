@@ -588,6 +588,30 @@ def run_export(
     )
 
 
+def run_jsonl_to_yaml(args, *, jsonl_to_yaml_fn) -> None:
+    input_path = args.input or Path("dataclaw_conversations.jsonl")
+    try:
+        output_path = jsonl_to_yaml_fn(input_path, args.output)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Written to {output_path}")
+
+
+def run_diff_jsonl(args, *, diff_jsonl_fn) -> None:
+    try:
+        result = diff_jsonl_fn(
+            args.old,
+            args.new,
+            args.output,
+            include_records_for_modified=args.include_records_for_modified,
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Wrote {result['event_count']} change documents to {result['output_path']}")
+
+
 def main_impl(
     *,
     prep_fn,
@@ -598,6 +622,8 @@ def main_impl(
     load_config_fn,
     handle_config_fn,
     run_export_fn,
+    run_jsonl_to_yaml_fn,
+    run_diff_jsonl_fn,
 ) -> None:
     parser = argparse.ArgumentParser(description="DataClaw: Coding Agent Logs -> Hugging Face")
     sub = parser.add_subparsers(dest="command")
@@ -680,6 +706,15 @@ def main_impl(
     cf.add_argument("--attest-asked-sensitive", action="store_true", help=argparse.SUPPRESS)
     cf.add_argument("--attest-asked-manual-scan", action="store_true", help=argparse.SUPPRESS)
 
+    jsonl_yaml = sub.add_parser("jsonl-to-yaml", help="Convert a JSONL export to human-readable YAML")
+    jsonl_yaml.add_argument("input", nargs="?", type=Path, default=Path("dataclaw_conversations.jsonl"))
+    jsonl_yaml.add_argument("--output", "-o", type=Path, default=None)
+
+    diff_jsonl = sub.add_parser("diff-jsonl", help="Structurally diff two JSONL exports and render YAML")
+    diff_jsonl.add_argument("--old", type=Path, default=Path("dataclaw_conversations_old.jsonl"))
+    diff_jsonl.add_argument("--new", type=Path, default=Path("dataclaw_conversations.jsonl"))
+    diff_jsonl.add_argument("--output", "-o", type=Path, default=None)
+    diff_jsonl.add_argument("--include-records-for-modified", action="store_true")
     args = parser.parse_args()
     command = args.command
 
@@ -732,5 +767,11 @@ def main_impl(
         return
     if command == "config":
         handle_config_fn(args)
+        return
+    if command == "jsonl-to-yaml":
+        run_jsonl_to_yaml_fn(args)
+        return
+    if command == "diff-jsonl":
+        run_diff_jsonl_fn(args)
         return
     run_export_fn(args)

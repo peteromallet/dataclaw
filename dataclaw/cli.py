@@ -10,6 +10,7 @@ from ._cli.common import DEFAULT_SOURCE, _has_session_sources
 from ._cli.exporting import push_to_huggingface, summarize_export_jsonl, update_skill
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, load_config, save_config
+from .jsonl_tools import diff_jsonl_files, jsonl_to_yaml_file
 from .parser import discover_projects, parse_project_sessions
 
 
@@ -94,6 +95,29 @@ def prep(source_filter: str = "auto") -> None:
     )
 
 
+def jsonl_to_yaml(input_path: Path, output_path: Path | None = None) -> Path:
+    return jsonl_to_yaml_file(input_path, output_path)
+
+
+def diff_jsonl(
+    old_path: Path,
+    new_path: Path,
+    output_path: Path | None = None,
+    include_records_for_modified: bool = False,
+) -> dict:
+    result = diff_jsonl_files(
+        old_path,
+        new_path,
+        output_path,
+        include_records_for_modified=include_records_for_modified,
+    )
+    return {
+        "output_path": result.output_path,
+        "event_count": result.event_count,
+        "summary": result.summary,
+    }
+
+
 def _handle_config(args) -> None:
     commands.handle_config(
         args,
@@ -116,6 +140,14 @@ def _run_export(args) -> None:
     )
 
 
+def _run_jsonl_to_yaml(args) -> None:
+    commands.run_jsonl_to_yaml(args, jsonl_to_yaml_fn=jsonl_to_yaml)
+
+
+def _run_diff_jsonl(args) -> None:
+    commands.run_diff_jsonl(args, diff_jsonl_fn=diff_jsonl)
+
+
 def main() -> None:
     if not sys.flags.utf8_mode and "pytest" not in sys.modules:
         os.environ["PYTHONUTF8"] = "1"
@@ -131,6 +163,8 @@ def main() -> None:
         load_config_fn=load_config,
         handle_config_fn=_handle_config,
         run_export_fn=_run_export,
+        run_jsonl_to_yaml_fn=_run_jsonl_to_yaml,
+        run_diff_jsonl_fn=_run_diff_jsonl,
     )
 
 
