@@ -662,6 +662,23 @@ class TestRedactSession:
         result, count = redact_session(session)
         assert count == 0
 
+    def test_redacts_content_parts_and_preserves_blob_payloads(self):
+        blob = "data:image/png;base64," + ("A" * 5000)
+        session = {
+            "messages": [
+                {
+                    "content_parts": [
+                        {"type": "tool_result", "content": "Key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz"},
+                        {"type": "image", "source": {"type": "base64", "data": blob}},
+                    ]
+                }
+            ]
+        }
+        result, count = redact_session(session)
+        assert REDACTED in result["messages"][0]["content_parts"][0]["content"]
+        assert result["messages"][0]["content_parts"][1]["source"]["data"] == blob
+        assert count >= 1
+
 
 class TestLargeBinarySkipping:
     def test_detects_large_base64_blob(self):

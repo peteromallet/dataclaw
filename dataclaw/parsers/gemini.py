@@ -1,12 +1,21 @@
 import hashlib
 import logging
 import os
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
-from .common import collect_project_sessions, make_session_result, make_stats, update_time_bounds
+from ..secrets import should_skip_large_binary_string
+from .common import (
+    anonymize_value,
+    collect_project_sessions,
+    make_session_result,
+    make_stats,
+    parse_tool_input,
+    update_time_bounds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +291,145 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
     return {"tool": name, "input": inp, "output": out, "status": status}
 
 
+def anonymize_text_preserving_blobs(
+    text: Any,
+    anonymizer: Anonymizer,
+    *,
+    strip: bool = False,
+    drop_empty: bool = True,
+) -> str | None:
+    if not isinstance(text, str):
+        return None
+    if should_skip_large_binary_string(text):
+        return text
+    normalized = text.strip() if strip else text
+    if drop_empty and not normalized.strip():
+        return None
+    return anonymizer.text(normalized)
+
+
+def build_gemini_call_id(name: str, args: Any, counters: dict[str, int]) -> str:
+    counters[name] += 1
+    return f"fc_{name}_{counters[name]}"
+
+
+def anonymize_file_uri(file_uri: Any, anonymizer: Anonymizer) -> str | None:
+    if not isinstance(file_uri, str):
+        return None
+    if file_uri.startswith("file://"):
+        return f"file://{anonymizer.path(file_uri[7:])}"
+    return anonymizer.text(file_uri)
+
+
+def parse_gemini_user_part(
+    part: Any,
+    anonymizer: Anonymizer,
+    pending_call_ids: dict[str, deque[str]],
+    call_counters: dict[str, int],
+) -> tuple[str | None, dict[str, Any] | None]:
+    if isinstance(part, str):
+        text = anonymize_text_preserving_blobs(part, anonymizer, drop_empty=False)
+        if text is None:
+            return None, None
+        if should_skip_large_binary_string(part):
+            return None, {"type": "text", "text": text}
+        return text, None
+
+    if not isinstance(part, dict):
+        return None, None
+
+    if "text" in part:
+        text = anonymize_text_preserving_blobs(part.get("text"), anonymizer, drop_empty=False)
+        if text is None:
+            return None, None
+        if should_skip_large_binary_string(part.get("text", "")):
+            return None, {"type": "text", "text": text}
+        return text, None
+
+    inline = part.get("inlineData")
+    if isinstance(inline, dict):
+        mime_type = inline.get("mimeType", "")
+        return None, {
+            "type": "image" if isinstance(mime_type, str) and mime_type.startswith("image/") else "document",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": inline.get("data", ""),
+            },
+        }
+
+    file_data = part.get("fileData")
+    if isinstance(file_data, dict):
+        source: dict[str, Any] = {"type": "url"}
+        url = anonymize_file_uri(file_data.get("fileUri"), anonymizer)
+        if url:
+            source["url"] = url
+        mime_type = file_data.get("mimeType")
+        if mime_type:
+            source["media_type"] = mime_type
+        return None, {"type": "document", "source": source}
+
+    function_call = part.get("functionCall")
+    if isinstance(function_call, dict):
+        name = function_call.get("name", "unknown")
+        args = function_call.get("args", {})
+        call_id = function_call.get("id") or build_gemini_call_id(name, args, call_counters)
+        pending_call_ids[name].append(call_id)
+        return None, {
+            "type": "tool_use",
+            "id": call_id,
+            "name": name,
+            "input": parse_tool_input(name, args, anonymizer),
+        }
+
+    function_response = part.get("functionResponse")
+    if isinstance(function_response, dict):
+        name = function_response.get("name", "unknown")
+        tool_use_id = function_response.get("id") or (
+            pending_call_ids[name].popleft() if pending_call_ids.get(name) else f"fc_{name}"
+        )
+        response = function_response.get("response")
+        content: Any = None
+        if isinstance(response, dict) and "output" in response:
+            content = anonymize_text_preserving_blobs(response.get("output"), anonymizer)
+        elif response is not None:
+            content = anonymize_value("response", response, anonymizer)
+        part_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": tool_use_id}
+        if content not in (None, "", [], {}):
+            part_result["content"] = content
+        return None, part_result
+
+    return None, None
+
+
+def parse_gemini_user_content(content: Any, anonymizer: Anonymizer) -> tuple[str | None, list[dict[str, Any]]]:
+    if isinstance(content, str):
+        text = anonymize_text_preserving_blobs(content, anonymizer, drop_empty=False)
+        if text is None:
+            return None, []
+        if should_skip_large_binary_string(content):
+            return None, [{"type": "text", "text": text}]
+        return text, []
+
+    if not isinstance(content, list):
+        return None, []
+
+    text_parts: list[str] = []
+    content_parts: list[dict[str, Any]] = []
+    pending_call_ids: dict[str, deque[str]] = defaultdict(deque)
+    call_counters: dict[str, int] = defaultdict(int)
+
+    for part in content:
+        text, content_part = parse_gemini_user_part(part, anonymizer, pending_call_ids, call_counters)
+        if text is not None:
+            text_parts.append(text)
+        if content_part:
+            content_parts.append(content_part)
+
+    text_content = "\n".join(text_parts) if text_parts else None
+    return text_content, content_parts
+
+
 def parse_session_file(
     filepath: Path,
     anonymizer: Anonymizer,
@@ -313,23 +461,15 @@ def parse_session_file(
         timestamp = msg_data.get("timestamp")
 
         if msg_type == "user":
-            content = msg_data.get("content")
-            if isinstance(content, list):
-                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and "text" in part]
-                text = "\n".join(text_parts)
-            elif isinstance(content, str):
-                text = content
-            else:
+            text, content_parts = parse_gemini_user_content(msg_data.get("content"), anonymizer)
+            if text is None and not content_parts:
                 continue
-            if not text.strip():
-                continue
-            messages.append(
-                {
-                    "role": "user",
-                    "content": anonymizer.text(text.strip()),
-                    "timestamp": timestamp,
-                }
-            )
+            message: dict[str, Any] = {"role": "user", "timestamp": timestamp}
+            if text is not None:
+                message["content"] = text
+            if content_parts:
+                message["content_parts"] = content_parts
+            messages.append(message)
             stats["user_messages"] += 1
             update_time_bounds(metadata, timestamp)
 
