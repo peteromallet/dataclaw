@@ -98,7 +98,9 @@ class TestExportToJsonl:
 
     def test_skips_synthetic_model(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
-        session_data = [{"session_id": "s1", "model": "<synthetic>", "messages": [{"role": "user", "content": "hi"}], "stats": {}}]
+        session_data = [
+            {"session_id": "s1", "model": "<synthetic>", "messages": [{"role": "user", "content": "hi"}], "stats": {}}
+        ]
         projects = [{"dir_name": "test", "display_name": "test"}]
         meta = export_to_jsonl(
             projects,
@@ -132,7 +134,9 @@ class TestExportToJsonl:
 
     def test_skips_none_model(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
-        session_data = [{"session_id": "s1", "model": None, "messages": [{"role": "user", "content": "hi"}], "stats": {}}]
+        session_data = [
+            {"session_id": "s1", "model": None, "messages": [{"role": "user", "content": "hi"}], "stats": {}}
+        ]
         projects = [{"dir_name": "t", "display_name": "t"}]
         meta = export_to_jsonl(
             projects,
