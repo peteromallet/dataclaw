@@ -228,7 +228,7 @@ def sanitize_tool_use_result(
         return {"text": sanitized_text}
 
     sanitized = anonymize_value("toolUseResult", tool_use_result, anonymizer)
-    sanitized = drop_redundant_edit_result_fields(sanitized)
+    sanitized = drop_redundant_result_fields(sanitized)
     sanitized = drop_duplicate_text_fields(sanitized, text)
     pruned = prune_empty_values(sanitized)
     if pruned is None:
@@ -238,18 +238,21 @@ def sanitize_tool_use_result(
     return {"value": pruned}
 
 
-def drop_redundant_edit_result_fields(value: Any) -> Any:
+def drop_redundant_result_fields(value: Any) -> Any:
     if isinstance(value, dict):
+        redundant_keys = set()
+        if value.get("type") == "create":
+            # Claude create results repeat the full created file contents that are
+            # already present in the assistant Write tool input, so keeping them
+            # again in `output.raw` mostly doubles the largest payload in export.
+            redundant_keys.add("content")
         # Claude edit results repeat the same edit delta that is already present
         # in the assistant tool input (`old_string` / `new_string`), so keeping
         # these fields again in `output.raw` mostly adds export size, not signal.
-        return {
-            key: drop_redundant_edit_result_fields(item)
-            for key, item in value.items()
-            if key not in {"oldString", "newString", "structuredPatch"}
-        }
+        redundant_keys.update({"oldString", "newString", "structuredPatch"})
+        return {key: drop_redundant_result_fields(item) for key, item in value.items() if key not in redundant_keys}
     if isinstance(value, list):
-        return [drop_redundant_edit_result_fields(item) for item in value]
+        return [drop_redundant_result_fields(item) for item in value]
     return value
 
 

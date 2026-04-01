@@ -889,6 +889,35 @@ class TestBuildToolResultMap:
         assert "structuredPatch" not in raw
         assert raw["sourceToolAssistantUUID"] == "assistant-123"
 
+    def test_create_tool_result_drops_duplicate_created_file_content(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-create",
+                            "content": "File created successfully at: /Users/testuser/Documents/myproject/out.txt",
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "type": "create",
+                    "filePath": "/Users/testuser/Documents/myproject/out.txt",
+                    "content": "full file contents",
+                },
+                "sourceToolAssistantUUID": "assistant-create",
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        output = result["tu-create"]["output"]
+        assert output["text"].startswith("File created successfully at:")
+        assert output["raw"]["type"] == "create"
+        assert output["raw"]["filePath"] != "/Users/testuser/Documents/myproject/out.txt"
+        assert "content" not in output["raw"]
+        assert output["raw"]["sourceToolAssistantUUID"] == "assistant-create"
+
     def test_non_user_entries_ignored(self, mock_anonymizer):
         entries = [
             {
