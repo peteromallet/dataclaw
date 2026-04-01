@@ -228,6 +228,7 @@ def sanitize_tool_use_result(
         return {"text": sanitized_text}
 
     sanitized = anonymize_value("toolUseResult", tool_use_result, anonymizer)
+    sanitized = drop_redundant_edit_result_fields(sanitized)
     sanitized = drop_duplicate_text_fields(sanitized, text)
     pruned = prune_empty_values(sanitized)
     if pruned is None:
@@ -235,6 +236,21 @@ def sanitize_tool_use_result(
     if isinstance(pruned, dict):
         return pruned
     return {"value": pruned}
+
+
+def drop_redundant_edit_result_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        # Claude edit results repeat the same edit delta that is already present
+        # in the assistant tool input (`old_string` / `new_string`), so keeping
+        # these fields again in `output.raw` mostly adds export size, not signal.
+        return {
+            key: drop_redundant_edit_result_fields(item)
+            for key, item in value.items()
+            if key not in {"oldString", "newString", "structuredPatch"}
+        }
+    if isinstance(value, list):
+        return [drop_redundant_edit_result_fields(item) for item in value]
+    return value
 
 
 def drop_duplicate_text_fields(value: Any, text: str | None, key: str | None = None) -> Any:

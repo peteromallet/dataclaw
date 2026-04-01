@@ -876,6 +876,7 @@ class TestBuildToolResultMap:
                     "filePath": "/Users/testuser/Documents/myproject/app.py",
                     "oldString": "secret = 'abc'",
                     "newString": "secret = 'xyz'",
+                    "structuredPatch": [{"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1}],
                 },
                 "sourceToolAssistantUUID": "assistant-123",
             }
@@ -883,8 +884,9 @@ class TestBuildToolResultMap:
         result = build_tool_result_map(entries, mock_anonymizer)
         raw = result["tu-edit"]["output"]["raw"]
         assert raw["filePath"] != "/Users/testuser/Documents/myproject/app.py"
-        assert raw["oldString"] == "secret = 'abc'"
-        assert raw["newString"] == "secret = 'xyz'"
+        assert "oldString" not in raw
+        assert "newString" not in raw
+        assert "structuredPatch" not in raw
         assert raw["sourceToolAssistantUUID"] == "assistant-123"
 
     def test_non_user_entries_ignored(self, mock_anonymizer):
