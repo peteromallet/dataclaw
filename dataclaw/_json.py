@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, IO
+from typing import IO, Any
 
 import orjson
 

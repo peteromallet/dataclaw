@@ -140,11 +140,11 @@ def build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer)
             for line in lines:
                 if line.startswith("Exit code: "):
                     try:
-                        out["exit_code"] = int(line[len("Exit code: "):].strip())
+                        out["exit_code"] = int(line[len("Exit code: ") :].strip())
                     except ValueError:
-                        out["exit_code"] = line[len("Exit code: "):].strip()
+                        out["exit_code"] = line[len("Exit code: ") :].strip()
                 elif line.startswith("Wall time: "):
-                    out["wall_time"] = line[len("Wall time: "):].strip()
+                    out["wall_time"] = line[len("Wall time: ") :].strip()
                 elif line == "Output:":
                     in_output = True
                 elif in_output:

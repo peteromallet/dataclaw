@@ -12,7 +12,6 @@ from dataclaw.secrets import (
     scan_text,
 )
 
-
 # --- _shannon_entropy ---
 
 
@@ -569,9 +568,7 @@ class TestRedactCustomStrings:
         assert count == 1
 
     def test_multiple_replacements(self):
-        result, count = redact_custom_strings(
-            "foo myname bar myname baz", ["myname"]
-        )
+        result, count = redact_custom_strings("foo myname bar myname baz", ["myname"])
         assert "myname" not in result
         assert count == 2
 

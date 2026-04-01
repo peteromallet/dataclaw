@@ -97,7 +97,13 @@ class TestCursorParseSessions:
             conn,
             "conv-1",
             [
-                {"id": "b1", "type": 1, "text": "Fix the bug", "createdAt": 1706000000000, "workspaceUris": [f"file://{cwd}"]},
+                {
+                    "id": "b1",
+                    "type": 1,
+                    "text": "Fix the bug",
+                    "createdAt": 1706000000000,
+                    "workspaceUris": [f"file://{cwd}"],
+                },
                 {
                     "id": "b2",
                     "type": 2,
@@ -138,7 +144,13 @@ class TestCursorParseSessions:
             conn,
             "conv-2",
             [
-                {"id": "b1", "type": 1, "text": "Read the file", "createdAt": 1706000000000, "workspaceUris": [f"file://{cwd}"]},
+                {
+                    "id": "b1",
+                    "type": 1,
+                    "text": "Read the file",
+                    "createdAt": 1706000000000,
+                    "workspaceUris": [f"file://{cwd}"],
+                },
                 {
                     "id": "b2",
                     "type": 2,
@@ -181,7 +193,13 @@ class TestCursorParseSessions:
             conn,
             "conv-3",
             [
-                {"id": "b1", "type": 1, "text": "search", "createdAt": 1706000000000, "workspaceUris": [f"file://{cwd}"]},
+                {
+                    "id": "b1",
+                    "type": 1,
+                    "text": "search",
+                    "createdAt": 1706000000000,
+                    "workspaceUris": [f"file://{cwd}"],
+                },
                 {
                     "id": "b2",
                     "type": 2,
@@ -212,7 +230,13 @@ class TestCursorParseSessions:
             conn,
             "conv-4",
             [
-                {"id": "b1", "type": 1, "text": "Explain X", "createdAt": 1706000000000, "workspaceUris": [f"file://{cwd}"]},
+                {
+                    "id": "b1",
+                    "type": 1,
+                    "text": "Explain X",
+                    "createdAt": 1706000000000,
+                    "workspaceUris": [f"file://{cwd}"],
+                },
                 {
                     "id": "b2",
                     "type": 2,

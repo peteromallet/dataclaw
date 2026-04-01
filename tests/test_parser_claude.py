@@ -4,12 +4,26 @@ from dataclaw import _json as json
 from dataclaw.parser import discover_projects, parse_project_sessions
 from dataclaw.parsers.claude import (
     build_project_name as _build_project_name,
+)
+from dataclaw.parsers.claude import (
     build_tool_result_map as _build_tool_result_map,
+)
+from dataclaw.parsers.claude import (
     extract_assistant_content as _extract_assistant_content,
+)
+from dataclaw.parsers.claude import (
     extract_user_content as _extract_user_content,
+)
+from dataclaw.parsers.claude import (
     find_subagent_only_sessions as _find_subagent_only_sessions,
+)
+from dataclaw.parsers.claude import (
     parse_session_file as _parse_session_file,
+)
+from dataclaw.parsers.claude import (
     parse_subagent_session as _parse_subagent_session,
+)
+from dataclaw.parsers.claude import (
     process_entry as _process_entry,
 )
 from tests.parser_helpers import disable_other_providers, make_subagent_entry
@@ -284,7 +298,7 @@ class TestParseSessionFile:
         session_file = tmp_path / "session.jsonl"
         session_file.write_text(
             '{"type":"user","timestamp":1706000000000,"message":{"content":"Hello"},"cwd":"/tmp"}\n'
-            'not valid json\n'
+            "not valid json\n"
             '{"type":"assistant","timestamp":1706000001000,"message":{"model":"m","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n'
         )
         result = _parse_session_file(session_file, mock_anonymizer)
@@ -303,9 +317,7 @@ class TestParseSessionFile:
     def test_blank_lines_skipped(self, tmp_path, mock_anonymizer):
         session_file = tmp_path / "session.jsonl"
         session_file.write_text(
-            "\n\n"
-            '{"type":"user","timestamp":1706000000000,"message":{"content":"Hi"},"cwd":"/tmp"}\n'
-            "\n"
+            '\n\n{"type":"user","timestamp":1706000000000,"message":{"content":"Hi"},"cwd":"/tmp"}\n\n'
         )
         result = _parse_session_file(session_file, mock_anonymizer)
         assert result is not None
@@ -606,11 +618,7 @@ class TestBuildToolResultMap:
         entries = [
             {
                 "type": "user",
-                "message": {
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "tu-4", "content": ""}
-                    ]
-                },
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-4", "content": ""}]},
             }
         ]
         result = _build_tool_result_map(entries, mock_anonymizer)
@@ -620,11 +628,7 @@ class TestBuildToolResultMap:
         entries = [
             {
                 "type": "assistant",
-                "message": {
-                    "content": [
-                        {"type": "tool_result", "tool_use_id": "tu-5", "content": "ignored"}
-                    ]
-                },
+                "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-5", "content": "ignored"}]},
             }
         ]
         result = _build_tool_result_map(entries, mock_anonymizer)

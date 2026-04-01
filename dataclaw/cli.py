@@ -32,24 +32,24 @@ MIN_MANUAL_SCAN_SESSIONS = 20
 
 CONFIRM_COMMAND_EXAMPLE = (
     "dataclaw confirm "
-    "--full-name \"THEIR FULL NAME\" "
-    "--attest-full-name \"Asked for full name and scanned export for THEIR FULL NAME.\" "
-    "--attest-sensitive \"Asked about company/client/internal names and private URLs; user response recorded and redactions updated if needed.\" "
-    "--attest-manual-scan \"Manually scanned 20 sessions across beginning/middle/end and reviewed findings with the user.\""
+    '--full-name "THEIR FULL NAME" '
+    '--attest-full-name "Asked for full name and scanned export for THEIR FULL NAME." '
+    '--attest-sensitive "Asked about company/client/internal names and private URLs; user response recorded and redactions updated if needed." '
+    '--attest-manual-scan "Manually scanned 20 sessions across beginning/middle/end and reviewed findings with the user."'
 )
 
 CONFIRM_COMMAND_SKIP_FULL_NAME_EXAMPLE = (
     "dataclaw confirm "
     "--skip-full-name-scan "
-    "--attest-full-name \"User declined to share full name; skipped exact-name scan.\" "
-    "--attest-sensitive \"Asked about company/client/internal names and private URLs; user response recorded and redactions updated if needed.\" "
-    "--attest-manual-scan \"Manually scanned 20 sessions across beginning/middle/end and reviewed findings with the user.\""
+    '--attest-full-name "User declined to share full name; skipped exact-name scan." '
+    '--attest-sensitive "Asked about company/client/internal names and private URLs; user response recorded and redactions updated if needed." '
+    '--attest-manual-scan "Manually scanned 20 sessions across beginning/middle/end and reviewed findings with the user."'
 )
 
 EXPORT_REVIEW_PUBLISH_STEPS = [
     "Step 1/3: Export locally only: dataclaw export --no-push --output dataclaw_export.jsonl",
     "Step 2/3: Review/redact, then run confirm: dataclaw confirm ...",
-    "Step 3/3: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+    'Step 3/3: After explicit user approval, publish: dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."',
 ]
 PROVIDER_SOURCES = tuple(PROVIDERS)
 DEFAULT_SOURCE = PROVIDER_SOURCES[0]
@@ -108,7 +108,7 @@ def _setup_to_publish_steps() -> list[str]:
         "Step 3/6: Configure exclusions/redactions and confirm projects: dataclaw config ...",
         "Step 4/6: Export locally only: dataclaw export --no-push --output dataclaw_export.jsonl",
         "Step 5/6: Review and confirm: dataclaw confirm ...",
-        "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+        'Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."',
     ]
 
 
@@ -191,6 +191,7 @@ def get_hf_username() -> str | None:
     """Get the currently logged-in HF username, or None."""
     try:
         from huggingface_hub import HfApi
+
         return HfApi().whoami()["name"]
     except ImportError:
         return None
@@ -220,7 +221,10 @@ def _compute_stage(config: DataClawConfig) -> tuple[str, int, str | None]:
 
 
 def _build_status_next_steps(
-    stage: str, config: DataClawConfig, hf_user: str | None, repo_id: str | None,
+    stage: str,
+    config: DataClawConfig,
+    hf_user: str | None,
+    repo_id: str | None,
 ) -> tuple[list[str], str | None]:
     """Return (next_steps, next_command) for the given stage."""
     if stage == "auth":
@@ -228,7 +232,7 @@ def _build_status_next_steps(
             [
                 "Ask the user for their Hugging Face token. Sign up: https://huggingface.co/join — Create WRITE token: https://huggingface.co/settings/tokens",
                 "Run: huggingface-cli login --token <THEIR_TOKEN> (NEVER run bare huggingface-cli login — it hangs)",
-                "Run: dataclaw config --redact \"<THEIR_TOKEN>\" (so the token gets redacted from exports)",
+                'Run: dataclaw config --redact "<THEIR_TOKEN>" (so the token gets redacted from exports)',
                 "Run: dataclaw prep (to confirm login and get next steps)",
             ],
             None,
@@ -238,9 +242,7 @@ def _build_status_next_steps(
         projects_confirmed = config.get("projects_confirmed", False)
         configured_source = config.get("source")
         source_confirmed = _is_explicit_source_choice(configured_source)
-        list_command = (
-            f"dataclaw list --source {configured_source}" if source_confirmed else "dataclaw list"
-        )
+        list_command = f"dataclaw list --source {configured_source}" if source_confirmed else "dataclaw list"
         steps = []
         if not source_confirmed:
             steps.append(
@@ -259,15 +261,17 @@ def _build_status_next_steps(
                 "(name, source, sessions, size, excluded), and ask which to EXCLUDE."
             )
             steps.append(
-                "Configure project scope: dataclaw config --exclude \"project1,project2\" "
+                'Configure project scope: dataclaw config --exclude "project1,project2" '
                 "or dataclaw config --confirm-projects (to include all listed projects). "
                 "Do not run export until this folder review is confirmed."
             )
-        steps.extend([
-            "Ask about GitHub/Discord usernames to anonymize and sensitive strings to redact. "
-            "Configure: dataclaw config --redact-usernames \"handle1\" and dataclaw config --redact \"string1\"",
-            "When done configuring, export locally: dataclaw export --no-push --output dataclaw_export.jsonl",
-        ])
+        steps.extend(
+            [
+                "Ask about GitHub/Discord usernames to anonymize and sensitive strings to redact. "
+                'Configure: dataclaw config --redact-usernames "handle1" and dataclaw config --redact "string1"',
+                "When done configuring, export locally: dataclaw export --no-push --output dataclaw_export.jsonl",
+            ]
+        )
         # next_command is null because user input is needed before exporting
         return (steps, None)
 
@@ -279,12 +283,8 @@ def _build_status_next_steps(
                 "Ask the user: 'Are there any company names, internal project names, client names, private URLs, or other people's names in your conversations that you'd want redacted? Any custom domains or internal tools?' Add anything they mention with dataclaw config --redact.",
                 "Do a deep manual scan: sample ~20 sessions from the export (beginning, middle, end) and scan for names, private URLs, company names, credentials in conversation text, and anything else that looks sensitive. Report findings to the user.",
                 "If PII found in any of the above, add redactions (dataclaw config --redact) and re-export: dataclaw export --no-push",
-                (
-                    "Run: "
-                    + CONFIRM_COMMAND_EXAMPLE
-                    + " — scans for PII, shows project breakdown, and unlocks pushing."
-                ),
-                "Do NOT push until the user explicitly confirms. Once confirmed, push: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+                ("Run: " + CONFIRM_COMMAND_EXAMPLE + " — scans for PII, shows project breakdown, and unlocks pushing."),
+                'Do NOT push until the user explicitly confirms. Once confirmed, push: dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."',
             ],
             "dataclaw confirm",
         )
@@ -316,14 +316,21 @@ def list_projects(source_filter: str = "auto") -> None:
         return
     config = load_config()
     excluded = set(config.get("excluded_projects", []))
-    print(json.dumps(
-        [{"name": p["display_name"], "sessions": p["session_count"],
-          "size": _format_size(p["total_size_bytes"]),
-          "excluded": p["display_name"] in excluded,
-          "source": p.get("source", DEFAULT_SOURCE)}
-         for p in projects],
-        indent=2,
-    ))
+    print(
+        json.dumps(
+            [
+                {
+                    "name": p["display_name"],
+                    "sessions": p["session_count"],
+                    "size": _format_size(p["total_size_bytes"]),
+                    "excluded": p["display_name"] in excluded,
+                    "source": p.get("source", DEFAULT_SOURCE),
+                }
+                for p in projects
+            ],
+            indent=2,
+        )
+    )
 
 
 def _merge_config_list(config: DataClawConfig, key: str, new_values: list[str]) -> None:
@@ -386,7 +393,8 @@ def export_to_jsonl(
         for project in selected_projects:
             print(f"  Parsing {project['display_name']}...", end="", flush=True)
             sessions = parse_project_sessions(
-                project["dir_name"], anonymizer=anonymizer,
+                project["dir_name"],
+                anonymizer=anonymizer,
                 include_thinking=include_thinking,
                 source=project.get("source", DEFAULT_SOURCE),
             )
@@ -449,21 +457,24 @@ def push_to_huggingface(jsonl_path: Path, repo_id: str, meta: dict) -> None:
         api.upload_file(
             path_or_fileobj=str(jsonl_path),
             path_in_repo="conversations.jsonl",
-            repo_id=repo_id, repo_type="dataset",
+            repo_id=repo_id,
+            repo_type="dataset",
             commit_message="Update conversation data",
         )
 
         api.upload_file(
             path_or_fileobj=json.dumps_bytes(meta, indent=2),
             path_in_repo="metadata.json",
-            repo_id=repo_id, repo_type="dataset",
+            repo_id=repo_id,
+            repo_type="dataset",
             commit_message="Update metadata",
         )
 
         api.upload_file(
             path_or_fileobj=_build_dataset_card(repo_id, meta).encode(),
             path_in_repo="README.md",
-            repo_id=repo_id, repo_type="dataset",
+            repo_id=repo_id,
+            repo_type="dataset",
             commit_message="Update dataset card",
         )
     except (OSError, ValueError) as e:
@@ -483,9 +494,7 @@ def _build_dataset_card(repo_id: str, meta: dict) -> str:
     timestamp = meta.get("exported_at", "")[:10]
 
     model_tags = "\n".join(f"  - {m}" for m in sorted(models.keys()) if m != "unknown")
-    model_lines = "\n".join(
-        f"| {m} | {c} |" for m, c in sorted(models.items(), key=lambda x: -x[1])
-    )
+    model_lines = "\n".join(f"| {m} | {c} |" for m, c in sorted(models.items(), key=lambda x: -x[1]))
 
     return f"""---
 license: mit
@@ -616,11 +625,16 @@ def update_skill(target: str) -> None:
 
     dest.write_text(content)
     print(f"Skill installed to {dest}")
-    print(json.dumps({
-        "installed": str(dest),
-        "next_steps": ["Run: dataclaw prep"],
-        "next_command": "dataclaw prep",
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "installed": str(dest),
+                "next_steps": ["Run: dataclaw prep"],
+                "next_command": "dataclaw prep",
+            },
+            indent=2,
+        )
+    )
 
 
 def status() -> None:
@@ -658,13 +672,18 @@ def _find_export_file(file_path: Path | None) -> Path:
         for c in [Path("dataclaw_export.jsonl"), Path("dataclaw_conversations.jsonl")]:
             if c.exists():
                 return c
-    print(json.dumps({
-        "error": "No export file found.",
-        "hint": "Run step 1 first to generate a local export file.",
-        "blocked_on_step": "Step 1/3",
-        "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-        "next_command": "dataclaw export --no-push --output dataclaw_export.jsonl",
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "error": "No export file found.",
+                "hint": "Run step 1 first to generate a local export file.",
+                "blocked_on_step": "Step 1/3",
+                "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                "next_command": "dataclaw export --no-push --output dataclaw_export.jsonl",
+            },
+            indent=2,
+        )
+    )
     sys.exit(1)
 
 
@@ -677,34 +696,77 @@ def _scan_high_entropy_strings(content: str, max_results: int = 15) -> list[dict
     if not content:
         return []
 
-    _CANDIDATE_RE = re.compile(r'[A-Za-z0-9_/+=.-]{20,}')
+    _CANDIDATE_RE = re.compile(r"[A-Za-z0-9_/+=.-]{20,}")
 
     # Prefixes already caught by other scans
-    _KNOWN_PREFIXES = ("eyJ", "ghp_", "gho_", "ghs_", "ghr_", "sk-", "hf_",
-                       "AKIA", "pypi-", "npm_", "xox")
+    _KNOWN_PREFIXES = ("eyJ", "ghp_", "gho_", "ghs_", "ghr_", "sk-", "hf_", "AKIA", "pypi-", "npm_", "xox")
 
     # Benign prefixes that look random but aren't secrets
-    _BENIGN_PREFIXES = ("https://", "http://", "sha256-", "sha384-", "sha512-",
-                        "sha1-", "data:", "file://", "mailto:")
+    _BENIGN_PREFIXES = ("https://", "http://", "sha256-", "sha384-", "sha512-", "sha1-", "data:", "file://", "mailto:")
 
     # Substrings that indicate non-secret content
-    _BENIGN_SUBSTRINGS = ("node_modules", "[REDACTED]", "package-lock",
-                          "webpack", "babel", "eslint", ".chunk.",
-                          "vendor/", "dist/", "build/")
+    _BENIGN_SUBSTRINGS = (
+        "node_modules",
+        "[REDACTED]",
+        "package-lock",
+        "webpack",
+        "babel",
+        "eslint",
+        ".chunk.",
+        "vendor/",
+        "dist/",
+        "build/",
+    )
 
     # File extensions that indicate path-like strings
-    _FILE_EXTENSIONS = (".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html",
-                        ".json", ".yaml", ".yml", ".toml", ".md", ".rst",
-                        ".txt", ".sh", ".go", ".rs", ".java", ".rb", ".php",
-                        ".c", ".h", ".cpp", ".hpp", ".swift", ".kt",
-                        ".lock", ".cfg", ".ini", ".xml", ".svg", ".png",
-                        ".jpg", ".gif", ".woff", ".ttf", ".map", ".vue",
-                        ".scss", ".less", ".sql", ".env", ".log")
-
-    _HEX_RE = re.compile(r'^[0-9a-fA-F]+$')
-    _UUID_RE = re.compile(
-        r'^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$'
+    _FILE_EXTENSIONS = (
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".css",
+        ".html",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".md",
+        ".rst",
+        ".txt",
+        ".sh",
+        ".go",
+        ".rs",
+        ".java",
+        ".rb",
+        ".php",
+        ".c",
+        ".h",
+        ".cpp",
+        ".hpp",
+        ".swift",
+        ".kt",
+        ".lock",
+        ".cfg",
+        ".ini",
+        ".xml",
+        ".svg",
+        ".png",
+        ".jpg",
+        ".gif",
+        ".woff",
+        ".ttf",
+        ".map",
+        ".vue",
+        ".scss",
+        ".less",
+        ".sql",
+        ".env",
+        ".log",
     )
+
+    _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+    _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$")
 
     # Collect unique candidates first
     unique_candidates: dict[str, list[int]] = {}
@@ -766,11 +828,13 @@ def _scan_high_entropy_strings(content: str, max_results: int = 15) -> list[dict
         ctx_end = min(len(content), pos + len(token) + 40)
         context = content[ctx_start:ctx_end].replace("\n", " ")
 
-        results.append({
-            "match": token,
-            "entropy": round(entropy, 2),
-            "context": context,
-        })
+        results.append(
+            {
+                "match": token,
+                "entropy": round(entropy, 2),
+                "context": context,
+            }
+        )
 
     # Sort by entropy descending, cap at max_results
     results.sort(key=lambda r: r["entropy"], reverse=True)
@@ -781,16 +845,14 @@ def _scan_pii(file_path: Path) -> dict:
     """Run PII regex scans on the export file. Returns dict of findings."""
     import re
 
-    p = str(file_path.resolve())
     scans = {
-        "emails": r'[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}',
-        "jwt_tokens": r'eyJ[A-Za-z0-9_-]{20,}',
-        "api_keys": r'(ghp_|sk-|hf_)[A-Za-z0-9_-]{10,}',
-        "ip_addresses": r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}',
+        "emails": r"[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}",
+        "jwt_tokens": r"eyJ[A-Za-z0-9_-]{20,}",
+        "api_keys": r"(ghp_|sk-|hf_)[A-Za-z0-9_-]{10,}",
+        "ip_addresses": r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
     }
     # Known false positives
-    fp_emails = {"noreply", "pytest.fixture", "mcp.tool", "mcp.resource",
-                 "server.tool", "tasks.loop", "github.com"}
+    fp_emails = {"noreply", "pytest.fixture", "mcp.tool", "mcp.resource", "server.tool", "tasks.loop", "github.com"}
     fp_keys = {"sk-notification"}
 
     results = {}
@@ -830,7 +892,9 @@ def _extract_manual_scan_sessions(attestation: str) -> int | None:
 
 
 def _scan_for_text_occurrences(
-    file_path: Path, query: str, max_examples: int = 5,
+    file_path: Path,
+    query: str,
+    max_examples: int = 5,
 ) -> dict[str, object]:
     """Scan file for case-insensitive occurrences of query and return a compact summary."""
     pattern = re.compile(re.escape(query), re.IGNORECASE)
@@ -880,10 +944,7 @@ def _collect_review_attestations(
     else:
         lower = full_name_attestation.lower()
         if skip_full_name_scan:
-            mentions_skip = any(
-                token in lower
-                for token in ("skip", "skipped", "declined", "opt out", "prefer not")
-            )
+            mentions_skip = any(token in lower for token in ("skip", "skipped", "declined", "opt out", "prefer not"))
             if "full name" not in lower or not mentions_skip:
                 errors["asked_full_name"] = (
                     "When skipping full-name scan, attestation must say the user declined/skipped full name."
@@ -902,24 +963,15 @@ def _collect_review_attestations(
 
     sensitive_attestation = provided["asked_sensitive_entities"]
     if len(sensitive_attestation) < MIN_ATTESTATION_CHARS:
-        errors["asked_sensitive_entities"] = (
-            "Provide a detailed text attestation for sensitive-entity review."
-        )
+        errors["asked_sensitive_entities"] = "Provide a detailed text attestation for sensitive-entity review."
     else:
         lower = sensitive_attestation.lower()
         asked = "ask" in lower
-        topics = any(
-            token in lower
-            for token in ("company", "client", "internal", "url", "domain", "tool", "name")
-        )
-        outcome = any(
-            token in lower
-            for token in ("none", "no", "redact", "added", "updated", "configured")
-        )
+        topics = any(token in lower for token in ("company", "client", "internal", "url", "domain", "tool", "name"))
+        outcome = any(token in lower for token in ("none", "no", "redact", "added", "updated", "configured"))
         if not asked or not topics or not outcome:
             errors["asked_sensitive_entities"] = (
-                "Sensitive attestation must say what you asked and the outcome "
-                "(none found or redactions updated)."
+                "Sensitive attestation must say what you asked and the outcome (none found or redactions updated)."
             )
 
     manual_attestation = provided["manual_scan_done"]
@@ -929,9 +981,7 @@ def _collect_review_attestations(
     else:
         lower = manual_attestation.lower()
         if "manual" not in lower or "scan" not in lower:
-            errors["manual_scan_done"] = (
-                "Manual scan attestation must explicitly mention a manual scan."
-            )
+            errors["manual_scan_done"] = "Manual scan attestation must explicitly mention a manual scan."
         elif manual_sessions is None or manual_sessions < MIN_MANUAL_SCAN_SESSIONS:
             errors["manual_scan_done"] = (
                 f"Manual scan attestation must include a reviewed-session count >= {MIN_MANUAL_SCAN_SESSIONS}."
@@ -946,9 +996,7 @@ def _validate_publish_attestation(attestation: object) -> tuple[str, str | None]
         return normalized, "Provide a detailed text publish attestation."
     lower = normalized.lower()
     if "approv" not in lower or ("publish" not in lower and "push" not in lower):
-        return normalized, (
-            "Publish attestation must state that the user explicitly approved publishing/pushing."
-        )
+        return normalized, ("Publish attestation must state that the user explicitly approved publishing/pushing.")
     return normalized, None
 
 
@@ -967,29 +1015,39 @@ def confirm(
 
     normalized_full_name = _normalize_attestation_text(full_name)
     if skip_full_name_scan and normalized_full_name:
-        print(json.dumps({
-            "error": "Use either --full-name or --skip-full-name-scan, not both.",
-            "hint": (
-                "Provide --full-name for an exact-name scan, or use --skip-full-name-scan "
-                "if the user declines sharing their name."
-            ),
-            "blocked_on_step": "Step 2/3",
-            "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-            "next_command": CONFIRM_COMMAND_EXAMPLE,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "error": "Use either --full-name or --skip-full-name-scan, not both.",
+                    "hint": (
+                        "Provide --full-name for an exact-name scan, or use --skip-full-name-scan "
+                        "if the user declines sharing their name."
+                    ),
+                    "blocked_on_step": "Step 2/3",
+                    "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                    "next_command": CONFIRM_COMMAND_EXAMPLE,
+                },
+                indent=2,
+            )
+        )
         sys.exit(1)
     if not normalized_full_name and not skip_full_name_scan:
-        print(json.dumps({
-            "error": "Missing required --full-name for verification scan.",
-            "hint": (
-                "Ask the user for their full name and pass it via --full-name "
-                "to run an exact-name privacy check. If the user declines, rerun with "
-                "--skip-full-name-scan and a full-name attestation describing the skip."
-            ),
-            "blocked_on_step": "Step 2/3",
-            "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-            "next_command": CONFIRM_COMMAND_SKIP_FULL_NAME_EXAMPLE,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "error": "Missing required --full-name for verification scan.",
+                    "hint": (
+                        "Ask the user for their full name and pass it via --full-name "
+                        "to run an exact-name privacy check. If the user declines, rerun with "
+                        "--skip-full-name-scan and a full-name attestation describing the skip."
+                    ),
+                    "blocked_on_step": "Step 2/3",
+                    "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                    "next_command": CONFIRM_COMMAND_SKIP_FULL_NAME_EXAMPLE,
+                },
+                indent=2,
+            )
+        )
         sys.exit(1)
 
     attestations, attestation_errors, manual_scan_sessions = _collect_review_attestations(
@@ -1000,14 +1058,19 @@ def confirm(
         skip_full_name_scan=skip_full_name_scan,
     )
     if attestation_errors:
-        print(json.dumps({
-            "error": "Missing or invalid review attestations.",
-            "attestation_errors": attestation_errors,
-            "required_attestations": REQUIRED_REVIEW_ATTESTATIONS,
-            "blocked_on_step": "Step 2/3",
-            "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-            "next_command": CONFIRM_COMMAND_EXAMPLE,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "error": "Missing or invalid review attestations.",
+                    "attestation_errors": attestation_errors,
+                    "required_attestations": REQUIRED_REVIEW_ATTESTATIONS,
+                    "blocked_on_step": "Step 2/3",
+                    "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                    "next_command": CONFIRM_COMMAND_EXAMPLE,
+                },
+                indent=2,
+            )
+        )
         sys.exit(1)
 
     if skip_full_name_scan:
@@ -1081,7 +1144,7 @@ def confirm(
     if pii_findings:
         next_steps.append(
             "PII findings detected — review each one with the user. "
-            "If real: dataclaw config --redact \"string\" then re-export with --no-push. "
+            'If real: dataclaw config --redact "string" then re-export with --no-push. '
             "False positives can be ignored."
         )
     if "high_entropy_strings" in pii_findings:
@@ -1089,14 +1152,17 @@ def confirm(
             "High-entropy strings detected — these may be leaked secrets (API keys, tokens, "
             "passwords) that escaped automatic redaction. Review each one using the provided "
             "context snippets. If any are real secrets, redact with: "
-            "dataclaw config --redact \"the_secret\" then re-export with --no-push."
+            'dataclaw config --redact "the_secret" then re-export with --no-push.'
         )
-    next_steps.extend([
-        "If any project should be excluded, run: dataclaw config --exclude \"project_name\" and re-export with --no-push.",
-        f"This will publish {total} sessions ({_format_size(file_size)}) publicly to Hugging Face"
-        + (f" at {repo_id}" if repo_id else "") + ". Ask the user: 'Are you ready to proceed?'",
-        "Once confirmed, push: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
-    ])
+    next_steps.extend(
+        [
+            'If any project should be excluded, run: dataclaw config --exclude "project_name" and re-export with --no-push.',
+            f"This will publish {total} sessions ({_format_size(file_size)}) publicly to Hugging Face"
+            + (f" at {repo_id}" if repo_id else "")
+            + ". Ask the user: 'Are you ready to proceed?'",
+            'Once confirmed, push: dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."',
+        ]
+    )
 
     result = {
         "stage": "confirmed",
@@ -1106,8 +1172,7 @@ def confirm(
         "file_size": _format_size(file_size),
         "total_sessions": total,
         "projects": [
-            {"name": name, "sessions": count}
-            for name, count in sorted(projects.items(), key=lambda x: -x[1])
+            {"name": name, "sessions": count} for name, count in sorted(projects.items(), key=lambda x: -x[1])
         ],
         "models": {m: c for m, c in sorted(models.items(), key=lambda x: -x[1])},
         "pii_scan": pii_findings if pii_findings else "clean",
@@ -1116,7 +1181,7 @@ def confirm(
         "repo": repo_id,
         "last_export_timestamp": last_export.get("timestamp"),
         "next_steps": next_steps,
-        "next_command": "dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+        "next_command": 'dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."',
         "attestations": attestations,
     }
     print(json.dumps(result, indent=2))
@@ -1197,7 +1262,7 @@ def prep(source_filter: str = "auto") -> None:
 def main() -> None:
     # If not in UTF-8 mode, then rerun in UTF-8 mode
     if not sys.flags.utf8_mode and "pytest" not in sys.modules:
-        os.environ['PYTHONUTF8'] = '1'
+        os.environ["PYTHONUTF8"] = "1"
         ret = subprocess.run([sys.executable, "-m", "dataclaw.cli"] + sys.argv[1:]).returncode
         sys.exit(ret)
 
@@ -1209,16 +1274,34 @@ def main() -> None:
     sub.add_parser("status", help="Show current stage and next steps (JSON)")
     cf = sub.add_parser("confirm", help="Scan for PII, summarize export, and unlock pushing (JSON)")
     cf.add_argument("--file", "-f", type=Path, default=None, help="Path to export JSONL file")
-    cf.add_argument("--full-name", type=str, default=None,
-                    help="User's full name to scan for in the export file (exact-name privacy check).")
-    cf.add_argument("--skip-full-name-scan", action="store_true",
-                    help="Skip exact full-name scan when the user declines sharing their name.")
-    cf.add_argument("--attest-full-name", type=str, default=None,
-                    help="Text attestation describing how full-name scan was done.")
-    cf.add_argument("--attest-sensitive", type=str, default=None,
-                    help="Text attestation describing sensitive-entity review and outcome.")
-    cf.add_argument("--attest-manual-scan", type=str, nargs="?", const="__DEPRECATED_FLAG__", default=None,
-                    help=f"Text attestation describing manual scan ({MIN_MANUAL_SCAN_SESSIONS}+ sessions).")
+    cf.add_argument(
+        "--full-name",
+        type=str,
+        default=None,
+        help="User's full name to scan for in the export file (exact-name privacy check).",
+    )
+    cf.add_argument(
+        "--skip-full-name-scan",
+        action="store_true",
+        help="Skip exact full-name scan when the user declines sharing their name.",
+    )
+    cf.add_argument(
+        "--attest-full-name", type=str, default=None, help="Text attestation describing how full-name scan was done."
+    )
+    cf.add_argument(
+        "--attest-sensitive",
+        type=str,
+        default=None,
+        help="Text attestation describing sensitive-entity review and outcome.",
+    )
+    cf.add_argument(
+        "--attest-manual-scan",
+        type=str,
+        nargs="?",
+        const="__DEPRECATED_FLAG__",
+        default=None,
+        help=f"Text attestation describing manual scan ({MIN_MANUAL_SCAN_SESSIONS}+ sessions).",
+    )
     # Deprecated boolean attestations retained only for a guided migration error.
     cf.add_argument("--attest-asked-full-name", action="store_true", help=argparse.SUPPRESS)
     cf.add_argument("--attest-asked-sensitive", action="store_true", help=argparse.SUPPRESS)
@@ -1231,15 +1314,21 @@ def main() -> None:
 
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
-    cfg.add_argument("--source", choices=sorted(EXPLICIT_SOURCE_CHOICES),
-                     help=f"Set export source scope explicitly: {_source_scope_literals()}")
+    cfg.add_argument(
+        "--source",
+        choices=sorted(EXPLICIT_SOURCE_CHOICES),
+        help=f"Set export source scope explicitly: {_source_scope_literals()}",
+    )
     cfg.add_argument("--exclude", type=str, help="Comma-separated projects to exclude")
-    cfg.add_argument("--redact", type=str,
-                     help="Comma-separated strings to always redact (API keys, usernames, domains)")
-    cfg.add_argument("--redact-usernames", type=str,
-                     help="Comma-separated usernames to anonymize (GitHub handles, Discord names)")
-    cfg.add_argument("--confirm-projects", action="store_true",
-                     help="Mark project selection as confirmed (include all)")
+    cfg.add_argument(
+        "--redact", type=str, help="Comma-separated strings to always redact (API keys, usernames, domains)"
+    )
+    cfg.add_argument(
+        "--redact-usernames", type=str, help="Comma-separated usernames to anonymize (GitHub handles, Discord names)"
+    )
+    cfg.add_argument(
+        "--confirm-projects", action="store_true", help="Mark project selection as confirmed (include all)"
+    )
 
     exp = sub.add_parser("export", help="Export and push (default)")
     # Export flags on both the subcommand and root parser so `dataclaw --no-push` works
@@ -1276,15 +1365,18 @@ def main() -> None:
             or args.attest_asked_manual_scan
             or args.attest_manual_scan == "__DEPRECATED_FLAG__"
         ):
-            print(json.dumps({
-                "error": "Deprecated boolean attestation flags were provided.",
-                "hint": (
-                    "Use text attestations instead so the command can validate what was reviewed."
-                ),
-                "blocked_on_step": "Step 2/3",
-                "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-                "next_command": CONFIRM_COMMAND_EXAMPLE,
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "error": "Deprecated boolean attestation flags were provided.",
+                        "hint": ("Use text attestations instead so the command can validate what was reviewed."),
+                        "blocked_on_step": "Step 2/3",
+                        "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                        "next_command": CONFIRM_COMMAND_EXAMPLE,
+                    },
+                    indent=2,
+                )
+            )
             sys.exit(1)
         confirm(
             file_path=args.file,
@@ -1322,12 +1414,7 @@ def _parse_csv_arg(value: str | None) -> list[str] | None:
 def _handle_config(args) -> None:
     """Handle the config subcommand."""
     has_changes = (
-        args.repo
-        or args.source
-        or args.exclude
-        or args.redact
-        or args.redact_usernames
-        or args.confirm_projects
+        args.repo or args.source or args.exclude or args.redact or args.redact_usernames or args.confirm_projects
     )
     if not has_changes:
         print(json.dumps(_mask_config_for_display(load_config()), indent=2))
@@ -1349,60 +1436,77 @@ def _run_export(args) -> None:
     source_filter = _normalize_source_filter(source_choice)
 
     if not source_explicit:
-        print(json.dumps({
-            "error": "Source scope is not confirmed yet.",
-            "hint": (
-                "Explicitly choose one source scope before exporting: "
-                f"{_source_scope_literals()}."
-            ),
-            "required_action": (
-                f"Ask the user whether to export {_all_provider_labels()} or all. "
-                f"Then run `dataclaw config --source {_source_scope_placeholder()}` "
-                f"or pass `--source {_source_scope_placeholder()}` on the export command."
-            ),
-            "allowed_sources": sorted(EXPLICIT_SOURCE_CHOICES),
-            "blocked_on_step": "Step 2/6",
-            "process_steps": _setup_to_publish_steps(),
-            "next_command": "dataclaw config --source all",
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "error": "Source scope is not confirmed yet.",
+                    "hint": (f"Explicitly choose one source scope before exporting: {_source_scope_literals()}."),
+                    "required_action": (
+                        f"Ask the user whether to export {_all_provider_labels()} or all. "
+                        f"Then run `dataclaw config --source {_source_scope_placeholder()}` "
+                        f"or pass `--source {_source_scope_placeholder()}` on the export command."
+                    ),
+                    "allowed_sources": sorted(EXPLICIT_SOURCE_CHOICES),
+                    "blocked_on_step": "Step 2/6",
+                    "process_steps": _setup_to_publish_steps(),
+                    "next_command": "dataclaw config --source all",
+                },
+                indent=2,
+            )
+        )
         sys.exit(1)
 
     # Gate: require `dataclaw confirm` before pushing
     if not args.no_push:
         if args.attest_user_approved_publish and not args.publish_attestation:
-            print(json.dumps({
-                "error": "Deprecated publish attestation flag was provided.",
-                "hint": "Use --publish-attestation with a detailed text statement.",
-                "blocked_on_step": "Step 3/3",
-                "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-                "next_command": (
-                    "dataclaw export --publish-attestation "
-                    "\"User explicitly approved publishing to Hugging Face on YYYY-MM-DD.\""
-                ),
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "error": "Deprecated publish attestation flag was provided.",
+                        "hint": "Use --publish-attestation with a detailed text statement.",
+                        "blocked_on_step": "Step 3/3",
+                        "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                        "next_command": (
+                            "dataclaw export --publish-attestation "
+                            '"User explicitly approved publishing to Hugging Face on YYYY-MM-DD."'
+                        ),
+                    },
+                    indent=2,
+                )
+            )
             sys.exit(1)
         if config.get("stage") != "confirmed":
-            print(json.dumps({
-                "error": "You must run `dataclaw confirm` before pushing.",
-                "hint": "Export first with --no-push, review the data, then run `dataclaw confirm`.",
-                "blocked_on_step": "Step 2/3",
-                "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-                "next_command": "dataclaw confirm",
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "error": "You must run `dataclaw confirm` before pushing.",
+                        "hint": "Export first with --no-push, review the data, then run `dataclaw confirm`.",
+                        "blocked_on_step": "Step 2/3",
+                        "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                        "next_command": "dataclaw confirm",
+                    },
+                    indent=2,
+                )
+            )
             sys.exit(1)
         publish_attestation, publish_error = _validate_publish_attestation(args.publish_attestation)
         if publish_error:
-            print(json.dumps({
-                "error": "Missing or invalid publish attestation.",
-                "publish_attestation_error": publish_error,
-                "hint": "Ask the user to explicitly approve publishing, then pass a detailed text attestation.",
-                "blocked_on_step": "Step 3/3",
-                "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-                "next_command": (
-                    "dataclaw export --publish-attestation "
-                    "\"User explicitly approved publishing to Hugging Face on YYYY-MM-DD.\""
-                ),
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "error": "Missing or invalid publish attestation.",
+                        "publish_attestation_error": publish_error,
+                        "hint": "Ask the user to explicitly approve publishing, then pass a detailed text attestation.",
+                        "blocked_on_step": "Step 3/3",
+                        "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                        "next_command": (
+                            "dataclaw export --publish-attestation "
+                            '"User explicitly approved publishing to Hugging Face on YYYY-MM-DD."'
+                        ),
+                    },
+                    indent=2,
+                )
+            )
             sys.exit(1)
 
         review_attestations = config.get("review_attestations", {})
@@ -1426,13 +1530,18 @@ def _run_export(args) -> None:
             )
 
         if review_errors:
-            print(json.dumps({
-                "error": "Missing or invalid review attestations from confirm step.",
-                "attestation_errors": review_errors,
-                "blocked_on_step": "Step 2/3",
-                "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
-                "next_command": CONFIRM_COMMAND_EXAMPLE,
-            }, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "error": "Missing or invalid review attestations from confirm step.",
+                        "attestation_errors": review_errors,
+                        "blocked_on_step": "Step 2/3",
+                        "process_steps": EXPORT_REVIEW_PUBLISH_STEPS,
+                        "next_command": CONFIRM_COMMAND_EXAMPLE,
+                    },
+                    indent=2,
+                )
+            )
             sys.exit(1)
 
         config["publish_attestation"] = publish_attestation
@@ -1458,36 +1567,40 @@ def _run_export(args) -> None:
     if not args.all_projects and not config.get("projects_confirmed", False):
         excluded = set(config.get("excluded_projects", []))
         list_command = f"dataclaw list --source {source_choice}"
-        print(json.dumps({
-            "error": "Project selection is not confirmed yet.",
-            "hint": (
-                f"Run `{list_command}`, present the full project list to the user, discuss which projects to exclude, then run "
-                "`dataclaw config --exclude \"p1,p2\"` or `dataclaw config --confirm-projects`."
-            ),
-            "required_action": (
-                "Send the full project/folder list below to the user in a message and get explicit "
-                "confirmation on exclusions before exporting."
-            ),
-            "projects": [
+        print(
+            json.dumps(
                 {
-                    "name": p["display_name"],
-                    "source": p.get("source", DEFAULT_SOURCE),
-                    "sessions": p["session_count"],
-                    "size": _format_size(p["total_size_bytes"]),
-                    "excluded": p["display_name"] in excluded,
-                }
-                for p in projects
-            ],
-            "blocked_on_step": "Step 3/6",
-            "process_steps": _setup_to_publish_steps(),
-            "next_command": "dataclaw config --confirm-projects",
-        }, indent=2))
+                    "error": "Project selection is not confirmed yet.",
+                    "hint": (
+                        f"Run `{list_command}`, present the full project list to the user, discuss which projects to exclude, then run "
+                        '`dataclaw config --exclude "p1,p2"` or `dataclaw config --confirm-projects`.'
+                    ),
+                    "required_action": (
+                        "Send the full project/folder list below to the user in a message and get explicit "
+                        "confirmation on exclusions before exporting."
+                    ),
+                    "projects": [
+                        {
+                            "name": p["display_name"],
+                            "source": p.get("source", DEFAULT_SOURCE),
+                            "sessions": p["session_count"],
+                            "size": _format_size(p["total_size_bytes"]),
+                            "excluded": p["display_name"] in excluded,
+                        }
+                        for p in projects
+                    ],
+                    "blocked_on_step": "Step 3/6",
+                    "process_steps": _setup_to_publish_steps(),
+                    "next_command": "dataclaw config --confirm-projects",
+                },
+                indent=2,
+            )
+        )
         sys.exit(1)
 
     total_sessions = sum(p["session_count"] for p in projects)
     total_size = sum(p["total_size_bytes"] for p in projects)
-    print(f"\nFound {total_sessions} sessions across {len(projects)} projects "
-          f"({_format_size(total_size)} raw)")
+    print(f"\nFound {total_sessions} sessions across {len(projects)} projects ({_format_size(total_size)} raw)")
     print(f"Source scope: {source_choice}")
 
     # Resolve repo — CLI flag > config > auto-detect from HF username
@@ -1538,7 +1651,10 @@ def _run_export(args) -> None:
 
     print(f"\nExporting to {output_path}...")
     meta = export_to_jsonl(
-        included, output_path, anonymizer, not args.no_thinking,
+        included,
+        output_path,
+        anonymizer,
+        not args.no_thinking,
         custom_strings=custom_strings,
     )
     file_size = output_path.stat().st_size
@@ -1581,8 +1697,8 @@ def _run_export(args) -> None:
         return
 
     if not repo_id:
-        print(f"\nNo HF repo. Log in first: huggingface-cli login")
-        print(f"Then re-run dataclaw and it will auto-detect your username.")
+        print("\nNo HF repo. Log in first: huggingface-cli login")
+        print("Then re-run dataclaw and it will auto-detect your username.")
         print(f"Or set manually: dataclaw config --repo {default_repo_name('username')}")
         print(f"\nLocal file: {output_path}")
         return

@@ -4,6 +4,8 @@ from dataclaw import _json as json
 from dataclaw.parser import discover_projects, parse_project_sessions
 from dataclaw.parsers.codex import (
     build_tool_result_map as _build_codex_tool_result_map,
+)
+from dataclaw.parsers.codex import (
     parse_session_file as _parse_codex_session_file,
 )
 from tests.parser_helpers import disable_other_providers
@@ -196,7 +198,9 @@ class TestDiscoverCodexProjects:
         assert result is not None
         assistant_messages = [message for message in result["messages"] if message["role"] == "assistant"]
         assert len(assistant_messages) == 1
-        paragraphs = [paragraph.strip() for paragraph in assistant_messages[0]["thinking"].split("\n\n") if paragraph.strip()]
+        paragraphs = [
+            paragraph.strip() for paragraph in assistant_messages[0]["thinking"].split("\n\n") if paragraph.strip()
+        ]
         assert paragraphs == ["Planning fix", "Reading code"]
 
 

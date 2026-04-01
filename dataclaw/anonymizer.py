@@ -68,9 +68,11 @@ def anonymize_text(text: str, username: str, username_hash: str, home: str | Non
         pat_home = _get_custom_home_pattern(home)
         if pat_home:
             pat_user = _get_username_pattern(username)
+
             def f(match):
                 # match.group(0) is a non-escaped string
                 return pat_user.sub(username_hash, match.group(0))
+
             text = pat_home.sub(f, text)
 
     return text
@@ -89,7 +91,7 @@ class Anonymizer:
 
         # Additional usernames to anonymize (GitHub handles, Discord names, etc.)
         self._extra_dict = {}
-        for name in (extra_usernames or []):
+        for name in extra_usernames or []:
             name = name.strip()
             if name and name != self.username and len(name) >= 4:
                 self._extra_dict[name.lower()] = _hash_username(name)
@@ -98,7 +100,9 @@ class Anonymizer:
 
         if self._extra_dict:
             escaped_names = [re.escape(k) for k in sorted(self._extra_dict.keys(), key=len, reverse=True)]
-            self._extra_pattern = re.compile(rf"(?<![a-zA-Z0-9])({'|'.join(escaped_names)})(?![a-zA-Z0-9])", flags=re.IGNORECASE)
+            self._extra_pattern = re.compile(
+                rf"(?<![a-zA-Z0-9])({'|'.join(escaped_names)})(?![a-zA-Z0-9])", flags=re.IGNORECASE
+            )
         else:
             self._extra_pattern = None
 
@@ -108,8 +112,10 @@ class Anonymizer:
     def text(self, content: str) -> str:
         result = anonymize_text(content, self.username, self.username_hash, self.home)
         if self._extra_pattern:
+
             def f(match):
                 return self._extra_dict[match.group(1).lower()]
+
             result = self._extra_pattern.sub(f, result)
         return result
 

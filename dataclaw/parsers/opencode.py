@@ -87,9 +87,7 @@ def build_project_index(db_path: Path) -> dict[str, list[str]]:
     index: dict[str, list[str]] = {}
     try:
         with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(
-                "SELECT id, directory FROM session ORDER BY time_updated DESC, id DESC"
-            ).fetchall()
+            rows = conn.execute("SELECT id, directory FROM session ORDER BY time_updated DESC, id DESC").fetchall()
     except sqlite3.Error as e:
         logger.warning("Failed to query OpenCode database %s: %s", db_path, e)
         return {}
@@ -202,12 +200,7 @@ def extract_model(message_data: dict[str, Any]) -> str | None:
         return None
     provider_id = model.get("providerID")
     model_id = model.get("modelID")
-    if (
-        isinstance(provider_id, str)
-        and provider_id.strip()
-        and isinstance(model_id, str)
-        and model_id.strip()
-    ):
+    if isinstance(provider_id, str) and provider_id.strip() and isinstance(model_id, str) and model_id.strip():
         return f"{provider_id}/{model_id}"
     if isinstance(model_id, str) and model_id.strip():
         return model_id

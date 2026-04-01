@@ -42,29 +42,10 @@ def disable_other_providers(monkeypatch, tmp_path, keep=()):
 def write_opencode_db(db_path):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE session ("
-        "id TEXT PRIMARY KEY, "
-        "directory TEXT, "
-        "time_created INTEGER, "
-        "time_updated INTEGER"
-        ")"
+        "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_created INTEGER, time_updated INTEGER)"
     )
-    conn.execute(
-        "CREATE TABLE message ("
-        "id TEXT PRIMARY KEY, "
-        "session_id TEXT, "
-        "time_created INTEGER, "
-        "data TEXT"
-        ")"
-    )
-    conn.execute(
-        "CREATE TABLE part ("
-        "id TEXT PRIMARY KEY, "
-        "message_id TEXT, "
-        "time_created INTEGER, "
-        "data TEXT"
-        ")"
-    )
+    conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+    conn.execute("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, time_created INTEGER, data TEXT)")
     conn.commit()
     return conn
 

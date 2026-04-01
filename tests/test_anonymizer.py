@@ -1,7 +1,5 @@
 """Tests for dataclaw.anonymizer — PII anonymization."""
 
-import pytest
-
 from dataclaw.anonymizer import (
     Anonymizer,
     _hash_username,
@@ -9,7 +7,6 @@ from dataclaw.anonymizer import (
     anonymize_path,
     anonymize_text,
 )
-
 
 # --- _hash_username ---
 
@@ -41,58 +38,67 @@ class TestAnonymizePath:
 
     def test_global_replace(self):
         # if username is >= 4 chars, username is hashed using global replace
-        result = anonymize_path(
-            "/Users/alice/something",
-            "alice", "user_abc12345"
-        )
+        result = anonymize_path("/Users/alice/something", "alice", "user_abc12345")
         assert result == "/Users/user_abc12345/something"
 
     def test_bare_home_hashed(self):
         result = anonymize_path(
             "/Users/s/somedir/file.py",
-            "s", "user_abc12345", home="/Users/s",
+            "s",
+            "user_abc12345",
+            home="/Users/s",
         )
         assert result == "/Users/user_abc12345/somedir/file.py"
 
     def test_linux_home_path(self):
         result = anonymize_path(
             "/home/s/Documents/project/file.py",
-            "s", "user_abc12345", home="/home/s",
+            "s",
+            "user_abc12345",
+            home="/home/s",
         )
         assert result == "/home/user_abc12345/Documents/project/file.py"
 
     def test_path_not_under_home(self):
         result = anonymize_path(
             "/var/log/syslog",
-            "s", "user_abc12345", home="/Users/s",
+            "s",
+            "user_abc12345",
+            home="/Users/s",
         )
         assert result == "/var/log/syslog"
 
     def test_windows_users_path(self):
         result = anonymize_path(
             r"C:\Users\bob\Documents\file.txt",
-            "bob", "user_abc12345",
+            "bob",
+            "user_abc12345",
         )
         assert result == r"C:\Users\user_abc12345\Documents\file.txt"
 
     def test_windows_users_path_double_backslashes(self):
         result = anonymize_path(
             r"\\Users\\bob\\Documents\\file.txt",
-            "bob", "user_abc12345",
+            "bob",
+            "user_abc12345",
         )
         assert result == r"\\Users\\user_abc12345\\Documents\\file.txt"
 
     def test_windows_custom_home_path(self):
         result = anonymize_path(
             "C:\\custom_home\\bob\\project\\file.py",
-            "bob", "user_abc12345", home=r"C:\custom_home\bob",
+            "bob",
+            "user_abc12345",
+            home=r"C:\custom_home\bob",
         )
         assert result == "C:\\custom_home\\user_abc12345\\project\\file.py"
 
     def test_msys2_custom_home_path(self):
         result = anonymize_path(
             "/c/custom_home/bob/project/file.py",
-            "bob", "user_abc12345", home=r"C:\custom_home\bob",
+            "bob",
+            "user_abc12345",
+            home=r"C:\custom_home\bob",
         )
         assert result == "/c/custom_home/user_abc12345/project/file.py"
 
@@ -113,35 +119,40 @@ class TestAnonymizeText:
     def test_users_path_replaced(self):
         result = anonymize_text(
             "File at /Users/alice/project/main.py",
-            "alice", "user_abc12345",
+            "alice",
+            "user_abc12345",
         )
         assert result == "File at /Users/user_abc12345/project/main.py"
 
     def test_home_path_replaced(self):
         result = anonymize_text(
             "File at /home/alice/project/main.py",
-            "alice", "user_abc12345",
+            "alice",
+            "user_abc12345",
         )
         assert result == "File at /home/user_abc12345/project/main.py"
 
     def test_hyphen_encoded_path(self):
         result = anonymize_text(
             "-Users-alice-Documents-myproject",
-            "alice", "user_abc12345",
+            "alice",
+            "user_abc12345",
         )
         assert result == "-Users-user_abc12345-Documents-myproject"
 
     def test_temp_path(self):
         result = anonymize_text(
             "/private/tmp/claude-501/-Users-alice-Documents-proj/foo",
-            "alice", "user_abc12345",
+            "alice",
+            "user_abc12345",
         )
         assert result == "/private/tmp/claude-501/-Users-user_abc12345-Documents-proj/foo"
 
     def test_bare_username_replaced(self):
         result = anonymize_text(
             "Hello alice, welcome back",
-            "alice", "user_abc12345",
+            "alice",
+            "user_abc12345",
         )
         assert result == "Hello user_abc12345, welcome back"
 
@@ -149,7 +160,8 @@ class TestAnonymizeText:
         # Usernames < 4 chars should NOT be replaced as bare words
         result = anonymize_text(
             "Hello bob, welcome back",
-            "bob", "user_abc12345",
+            "bob",
+            "user_abc12345",
         )
         assert result == "Hello bob, welcome back"
 
@@ -157,7 +169,8 @@ class TestAnonymizeText:
         # Even short usernames should be replaced in path contexts
         result = anonymize_text(
             "File at /Users/bob/project",
-            "bob", "user_abc12345",
+            "bob",
+            "user_abc12345",
         )
         assert result == "File at /Users/user_abc12345/project"
 

@@ -96,9 +96,7 @@ def build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer)
             content = block.get("content", "")
             if isinstance(content, list):
                 text = "\n\n".join(
-                    part.get("text", "")
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
+                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
                 ).strip()
             else:
                 text = str(content).strip() if content else ""
@@ -330,9 +328,9 @@ def build_project_name(dir_name: str) -> str:
 
     if home_idx >= 0:
         if len(parts) > home_idx + 3 and parts[home_idx + 2] in common_dirs:
-            meaningful = parts[home_idx + 3:]
+            meaningful = parts[home_idx + 3 :]
         elif len(parts) > home_idx + 2 and parts[home_idx + 2] not in common_dirs:
-            meaningful = parts[home_idx + 2:]
+            meaningful = parts[home_idx + 2 :]
         else:
             meaningful = []
     else:

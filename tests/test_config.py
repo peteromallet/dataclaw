@@ -1,7 +1,5 @@
 """Tests for dataclaw.config — config persistence."""
 
-import pytest
-
 from dataclaw import _json as json
 from dataclaw.config import load_config, save_config
 
@@ -57,9 +55,6 @@ class TestSaveConfig:
             "dataclaw.config.CONFIG_DIR",
             tmp_config.parent / "nonexistent" / "deep" / "dir",
         )
-        # Actually mock mkdir to raise
-        import dataclaw.config as config_mod
-        original_mkdir = type(tmp_config.parent).mkdir
 
         def failing_mkdir(self, *a, **kw):
             raise OSError("Permission denied")

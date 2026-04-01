@@ -1,14 +1,13 @@
 """Tests for dataclaw.cli — CLI commands and helpers."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from dataclaw import _json as json
 from dataclaw.cli import (
-    _build_status_next_steps,
     _build_dataset_card,
+    _build_status_next_steps,
     _collect_review_attestations,
     _format_size,
     _format_token_count,
@@ -26,7 +25,6 @@ from dataclaw.cli import (
     main,
     push_to_huggingface,
 )
-
 
 # --- _format_size ---
 
@@ -84,9 +82,7 @@ class TestFormatTokenCount:
 class TestAttestationHelpers:
     def test_collect_review_attestations_valid(self):
         attestations, errors, manual_count = _collect_review_attestations(
-            attest_asked_full_name=(
-                "I asked Jane Doe for their full name and scanned the export for Jane Doe."
-            ),
+            attest_asked_full_name=("I asked Jane Doe for their full name and scanned the export for Jane Doe."),
             attest_asked_sensitive=(
                 "I asked about company, client, and internal names plus URLs; "
                 "none were sensitive and no extra redactions were needed."
@@ -115,9 +111,7 @@ class TestAttestationHelpers:
 
     def test_collect_review_attestations_skip_full_name_valid(self):
         _attestations, errors, manual_count = _collect_review_attestations(
-            attest_asked_full_name=(
-                "User declined to share full name; skipped exact-name scan."
-            ),
+            attest_asked_full_name=("User declined to share full name; skipped exact-name scan."),
             attest_asked_sensitive=(
                 "I asked about company/client/internal names and private URLs; "
                 "none were sensitive and no extra redactions were needed."
@@ -134,9 +128,7 @@ class TestAttestationHelpers:
     def test_collect_review_attestations_skip_full_name_invalid(self):
         _attestations, errors, _manual_count = _collect_review_attestations(
             attest_asked_full_name="Asked user and scanned it.",
-            attest_asked_sensitive=(
-                "I asked about company/client/internal names and private URLs; none found."
-            ),
+            attest_asked_sensitive=("I asked about company/client/internal names and private URLs; none found."),
             attest_manual_scan=(
                 "I performed a manual scan and reviewed 20 sessions across beginning, middle, and end."
             ),
@@ -146,9 +138,7 @@ class TestAttestationHelpers:
         assert "asked_full_name" in errors
 
     def test_validate_publish_attestation(self):
-        _normalized, err = _validate_publish_attestation(
-            "User explicitly approved publishing this dataset now."
-        )
+        _normalized, err = _validate_publish_attestation("User explicitly approved publishing this dataset now.")
         assert err is None
 
         _normalized, err = _validate_publish_attestation("ok to go")
@@ -260,21 +250,27 @@ class TestBuildDatasetCard:
 
     def test_yaml_frontmatter(self):
         meta = {
-            "models": {}, "sessions": 0, "projects": [],
-            "total_input_tokens": 0, "total_output_tokens": 0,
+            "models": {},
+            "sessions": 0,
+            "projects": [],
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
             "exported_at": "",
         }
         card = _build_dataset_card("user/repo", meta)
         lines = card.strip().split("\n")
         assert lines[0] == "---"
         # Find second ---
-        second_dash = [i for i, l in enumerate(lines[1:], 1) if l.strip() == "---"]
+        second_dash = [i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"]
         assert len(second_dash) >= 1
 
     def test_contains_repo_id(self):
         meta = {
-            "models": {}, "sessions": 0, "projects": [],
-            "total_input_tokens": 0, "total_output_tokens": 0,
+            "models": {},
+            "sessions": 0,
+            "projects": [],
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
             "exported_at": "",
         }
         card = _build_dataset_card("alice/my-dataset", meta)
@@ -287,16 +283,18 @@ class TestBuildDatasetCard:
 class TestExportToJsonl:
     def test_writes_jsonl(self, tmp_path, mock_anonymizer, monkeypatch):
         output = tmp_path / "out.jsonl"
-        session_data = [{
-            "session_id": "s1",
-            "model": "claude-sonnet-4-20250514",
-            "git_branch": "main",
-            "start_time": "2025-01-01T00:00:00",
-            "end_time": "2025-01-01T01:00:00",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stats": {"input_tokens": 100, "output_tokens": 50},
-            "project": "test",
-        }]
+        session_data = [
+            {
+                "session_id": "s1",
+                "model": "claude-sonnet-4-20250514",
+                "git_branch": "main",
+                "start_time": "2025-01-01T00:00:00",
+                "end_time": "2025-01-01T01:00:00",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {"input_tokens": 100, "output_tokens": 50},
+                "project": "test",
+            }
+        ]
         monkeypatch.setattr(
             "dataclaw.cli.parse_project_sessions",
             lambda *a, **kw: session_data,
@@ -312,12 +310,14 @@ class TestExportToJsonl:
 
     def test_skips_synthetic_model(self, tmp_path, mock_anonymizer, monkeypatch):
         output = tmp_path / "out.jsonl"
-        session_data = [{
-            "session_id": "s1",
-            "model": "<synthetic>",
-            "messages": [{"role": "user", "content": "hi"}],
-            "stats": {},
-        }]
+        session_data = [
+            {
+                "session_id": "s1",
+                "model": "<synthetic>",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {},
+            }
+        ]
         monkeypatch.setattr(
             "dataclaw.cli.parse_project_sessions",
             lambda *a, **kw: session_data,
@@ -329,12 +329,14 @@ class TestExportToJsonl:
 
     def test_counts_redactions(self, tmp_path, mock_anonymizer, monkeypatch):
         output = tmp_path / "out.jsonl"
-        session_data = [{
-            "session_id": "s1",
-            "model": "claude-sonnet-4-20250514",
-            "messages": [{"role": "user", "content": "Key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz"}],
-            "stats": {"input_tokens": 10, "output_tokens": 5},
-        }]
+        session_data = [
+            {
+                "session_id": "s1",
+                "model": "claude-sonnet-4-20250514",
+                "messages": [{"role": "user", "content": "Key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz"}],
+                "stats": {"input_tokens": 10, "output_tokens": 5},
+            }
+        ]
         monkeypatch.setattr(
             "dataclaw.cli.parse_project_sessions",
             lambda *a, **kw: session_data,
@@ -345,12 +347,14 @@ class TestExportToJsonl:
 
     def test_skips_none_model(self, tmp_path, mock_anonymizer, monkeypatch):
         output = tmp_path / "out.jsonl"
-        session_data = [{
-            "session_id": "s1",
-            "model": None,
-            "messages": [{"role": "user", "content": "hi"}],
-            "stats": {},
-        }]
+        session_data = [
+            {
+                "session_id": "s1",
+                "model": None,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {},
+            }
+        ]
         monkeypatch.setattr(
             "dataclaw.cli.parse_project_sessions",
             lambda *a, **kw: session_data,
@@ -368,7 +372,9 @@ class TestConfigure:
     def test_sets_repo(self, tmp_config, monkeypatch, capsys):
         # Also monkeypatch the cli module's references
         monkeypatch.setattr("dataclaw.cli.CONFIG_FILE", tmp_config)
-        monkeypatch.setattr("dataclaw.cli.load_config", lambda: {"repo": None, "excluded_projects": [], "redact_strings": []})
+        monkeypatch.setattr(
+            "dataclaw.cli.load_config", lambda: {"repo": None, "excluded_projects": [], "redact_strings": []}
+        )
         saved = {}
         monkeypatch.setattr("dataclaw.cli.save_config", lambda c: saved.update(c))
 
@@ -471,6 +477,7 @@ class TestPushToHuggingface:
 
         # Simulate ImportError for huggingface_hub
         import builtins
+
         real_import = builtins.__import__
 
         def mock_import(name, *args, **kwargs):
@@ -494,6 +501,7 @@ class TestPushToHuggingface:
 
         # Patch the import inside push_to_huggingface
         import dataclaw.cli as cli_mod
+
         monkeypatch.setattr(cli_mod, "push_to_huggingface", lambda *a, **kw: None)
 
         # Direct test with mock
@@ -514,7 +522,9 @@ class TestPushToHuggingface:
         with patch.dict("sys.modules", {"huggingface_hub": mock_hf_module}):
             # Need to reimport to pick up the mock
             import importlib
+
             import dataclaw.cli
+
             importlib.reload(dataclaw.cli)
             with pytest.raises(SystemExit):
                 dataclaw.cli.push_to_huggingface(jsonl_path, "user/repo", {})
@@ -643,7 +653,18 @@ class TestWorkflowGateMessages:
         assert payload["error"] == "Source scope is not confirmed yet."
         assert payload["blocked_on_step"] == "Step 2/6"
         assert len(payload["process_steps"]) == 6
-        assert payload["allowed_sources"] == ["all", "both", "claude", "codex", "cursor", "custom", "gemini", "kimi", "openclaw", "opencode"]
+        assert payload["allowed_sources"] == [
+            "all",
+            "both",
+            "claude",
+            "codex",
+            "cursor",
+            "custom",
+            "gemini",
+            "kimi",
+            "openclaw",
+            "opencode",
+        ]
         assert payload["next_command"] == "dataclaw config --source all"
 
     def test_configure_next_steps_require_full_folder_presentation(self):
@@ -697,7 +718,7 @@ class TestScanHighEntropyStrings:
         assert not any("550e8400" in r["match"] for r in results)
 
     def test_filters_hex_hash(self):
-        content = f"commit=abcdef1234567890abcdef1234567890abcdef12 done"
+        content = "commit=abcdef1234567890abcdef1234567890abcdef12 done"
         results = _scan_high_entropy_strings(content)
         assert not any("abcdef1234567890" in r["match"] for r in results)
 
@@ -746,8 +767,9 @@ class TestScanHighEntropyStrings:
 
     def test_results_capped_at_max(self):
         # Generate many distinct high-entropy strings
-        import string
         import random
+        import string
+
         rng = random.Random(42)
         chars = string.ascii_letters + string.digits
         secrets = []

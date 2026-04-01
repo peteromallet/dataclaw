@@ -30,11 +30,7 @@ def load_work_dirs(config_path: Path) -> dict[str, str]:
     try:
         data = json.loads(config_path.read_text())
         work_dirs = data.get("work_dirs", [])
-        return {
-            entry.get("path", ""): entry.get("path", "")
-            for entry in work_dirs
-            if entry.get("path")
-        }
+        return {entry.get("path", ""): entry.get("path", "") for entry in work_dirs if entry.get("path")}
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to load Kimi config %s: %s", config_path, e)
         return {}

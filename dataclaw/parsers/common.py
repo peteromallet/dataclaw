@@ -10,10 +10,20 @@ from ..secrets import redact_text
 
 logger = logging.getLogger(__name__)
 
-_PATH_KEYS = frozenset({
-    "file_path", "path", "dir", "dir_path", "cwd", "workdir",
-    "targetFile", "targetDirectory", "relativeWorkspacePath", "rootDir",
-})
+_PATH_KEYS = frozenset(
+    {
+        "file_path",
+        "path",
+        "dir",
+        "dir_path",
+        "cwd",
+        "workdir",
+        "targetFile",
+        "targetDirectory",
+        "relativeWorkspacePath",
+        "rootDir",
+    }
+)
 _CMD_KEYS = frozenset({"command", "cmd"})
 
 

@@ -2,6 +2,8 @@
 
 from dataclaw.parsers.common import (
     normalize_timestamp as _normalize_timestamp,
+)
+from dataclaw.parsers.common import (
     parse_tool_input as _parse_tool_input,
 )
 

@@ -9,8 +9,9 @@ from .parsers import cursor as _cursor_mod
 from .parsers import custom as _custom_mod
 from .parsers import gemini as _gemini_mod
 from .parsers import kimi as _kimi_mod
-from .parsers import opencode as _opencode_mod
 from .parsers import openclaw as _openclaw_mod
+from .parsers import opencode as _opencode_mod
+
 
 @dataclass(frozen=True)
 class Provider:

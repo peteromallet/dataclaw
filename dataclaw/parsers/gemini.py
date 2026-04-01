@@ -190,9 +190,7 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
             "old_string": anonymizer.text(args.get("old_string", "")),
             "new_string": anonymizer.text(args.get("new_string", "")),
             "expected_replacements": args.get("expected_replacements"),
-            "instruction": (
-                anonymizer.text(args.get("instruction", "")) if args.get("instruction") else None
-            ),
+            "instruction": (anonymizer.text(args.get("instruction", "")) if args.get("instruction") else None),
         }
         inp = {k: v for k, v in inp.items() if v is not None}
     elif name == "run_shell_command":
@@ -257,7 +255,7 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
                     if current_key:
                         parsed[current_key] = "\n".join(current_val).strip()
                     current_key = key
-                    current_val = [line[len(prefix):]]
+                    current_val = [line[len(prefix) :]]
                     break
             else:
                 if current_key:
@@ -317,11 +315,7 @@ def parse_session_file(
         if msg_type == "user":
             content = msg_data.get("content")
             if isinstance(content, list):
-                text_parts = [
-                    part.get("text", "")
-                    for part in content
-                    if isinstance(part, dict) and "text" in part
-                ]
+                text_parts = [part.get("text", "") for part in content if isinstance(part, dict) and "text" in part]
                 text = "\n".join(text_parts)
             elif isinstance(content, str):
                 text = content

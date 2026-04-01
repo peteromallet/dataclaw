@@ -53,14 +53,14 @@ def _strip_mcp_prefix(name: str) -> str:
         if underscore_pos > 0:
             dash_pos = name.rfind("-", 0, underscore_pos)
             if dash_pos > 3:
-                return name[dash_pos + 1:]
+                return name[dash_pos + 1 :]
         rest = name[4:]
         for length in range(1, len(rest) // 2 + 1):
             server = rest[:length]
             after = rest[length:]
             for sep in ("-", "-user-"):
                 if after.startswith(sep + server + "-"):
-                    return after[len(sep) + len(server) + 1:]
+                    return after[len(sep) + len(server) + 1 :]
     return name
 
 
@@ -76,9 +76,7 @@ def _build_project_index() -> dict[str, list[str]]:
     index: dict[str, list[str]] = {}
     try:
         with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
-            rows = conn.execute(
-                "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
-            ).fetchall()
+            rows = conn.execute("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'").fetchall()
 
             cid_to_first_bid: dict[str, str] = {}
             for key, value in rows:
@@ -255,11 +253,13 @@ def parse_session(
             if not text:
                 continue
             redacted, _ = redact_text(text)
-            messages.append({
-                "role": "user",
-                "content": anonymizer.text(redacted),
-                "timestamp": timestamp,
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": anonymizer.text(redacted),
+                    "timestamp": timestamp,
+                }
+            )
             stats["user_messages"] += 1
             update_time_bounds(metadata, timestamp)
 
@@ -289,7 +289,9 @@ def parse_session(
                     redacted_out, _ = redact_text(result_raw)
                     tool_output = {"text": anonymizer.text(redacted_out)}
                 elif isinstance(result_raw, dict):
-                    tool_output = {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in result_raw.items()}
+                    tool_output = {
+                        k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in result_raw.items()
+                    }
                 elif result_raw is not None:
                     tool_output = {"text": anonymizer.text(str(result_raw))}
 

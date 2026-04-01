@@ -155,9 +155,7 @@ def parse_session_file(
         content = msg_data.get("content", [])
         if isinstance(content, list):
             text_parts = [
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
+                block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
             ]
             output_text = "\n".join(text_parts).strip()
         elif isinstance(content, str):
@@ -222,9 +220,7 @@ def parse_session_file(
 
             usage = msg_data.get("usage", {})
             if isinstance(usage, dict):
-                stats["input_tokens"] += safe_int(usage.get("input")) + safe_int(
-                    usage.get("cacheRead")
-                )
+                stats["input_tokens"] += safe_int(usage.get("input")) + safe_int(usage.get("cacheRead"))
                 stats["output_tokens"] += safe_int(usage.get("output"))
 
             content = msg_data.get("content", [])
