@@ -150,6 +150,7 @@ ALLOWLIST = [
 ]
 
 _BASE64_BLOB_RE = re.compile(r"(?:[A-Za-z0-9+/]{4}){1024,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def should_skip_large_binary_string(text: str) -> bool:
@@ -161,10 +162,13 @@ def should_skip_large_binary_string(text: str) -> bool:
     if sample.startswith("data:") and "base64," in sample[:128]:
         return True
 
-    if any(ord(char) < 9 or (13 < ord(char) < 32) for char in sample):
+    # ANSI color/control sequences are common in long terminal output and should
+    # still be treated as text, not binary blobs.
+    sample_without_ansi = _ANSI_ESCAPE_RE.sub("", sample)
+    if any(ord(char) < 9 or (13 < ord(char) < 32) for char in sample_without_ansi):
         return True
 
-    compact = re.sub(r"\s+", "", sample)
+    compact = re.sub(r"\s+", "", sample_without_ansi)
     if len(compact) < 4096:
         return False
     return _BASE64_BLOB_RE.fullmatch(compact) is not None

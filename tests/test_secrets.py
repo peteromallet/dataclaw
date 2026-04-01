@@ -668,6 +668,19 @@ class TestLargeBinarySkipping:
         blob = "A" * 5000
         assert should_skip_large_binary_string(blob) is True
 
+    def test_allows_large_ansi_terminal_output(self):
+        text = (
+            "Exit code 1\n"
+            + "\x1b[92mSuccessfully preprocessed all matching files.\x1b[0m\n"
+            + ("Traceback line with context\n" * 250)
+            + "sk-ant-abcdefghijklmnopqrstuvwxyz123456\n"
+        )
+        assert len(text) > 4096
+        assert should_skip_large_binary_string(text) is False
+        result, count = redact_text(text)
+        assert count >= 1
+        assert REDACTED in result
+
     def test_redact_text_skips_large_base64_blob(self):
         blob = "A" * 5000
         result, count = redact_text(blob)

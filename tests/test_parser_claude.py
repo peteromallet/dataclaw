@@ -859,6 +859,32 @@ class TestBuildToolResultMap:
         assert output["raw"]["content"][0]["type"] == "image"
         assert output["raw"]["content"][0]["source"]["data"] == image_data
 
+    def test_long_ansi_terminal_output_is_preserved_as_text(self, mock_anonymizer):
+        terminal_output = (
+            "Exit code 1\n"
+            + "\x1b[92mSuccessfully preprocessed all matching files.\x1b[0m\n"
+            + ("Traceback line with context\n" * 250)
+        )
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-ansi",
+                            "content": terminal_output,
+                            "is_error": True,
+                        }
+                    ]
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        output = result["tu-ansi"]["output"]
+        assert output["text"].startswith("Exit code 1")
+        assert "Successfully preprocessed" in output["text"]
+
     def test_edit_tool_result_preserves_raw_payload(self, mock_anonymizer):
         entries = [
             {
