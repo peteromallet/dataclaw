@@ -37,7 +37,7 @@ Issues = "https://github.com/banodoco/dataclaw/issues"
 dataclaw = "dataclaw.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pre-commit", "pytest", "ruff"]
 
 [tool.ruff]
 line-length = 120

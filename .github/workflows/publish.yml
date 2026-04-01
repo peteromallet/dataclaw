@@ -13,6 +13,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      - run: pre-commit run --all-files --show-diff-on-failure
       - run: python -m pytest tests/ -v
 
   publish:
