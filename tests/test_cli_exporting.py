@@ -148,6 +148,73 @@ class TestExportToJsonl:
         assert meta["sessions"] == 0
         assert meta["skipped"] == 1
 
+    def test_dedupes_identical_gemini_sessions_ignoring_project_label(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        session_upper = {
+            "session_id": "g1",
+            "model": "gemini-2.5-pro",
+            "git_branch": None,
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T00:01:00Z",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stats": {"input_tokens": 1, "output_tokens": 2},
+            "project": "gemini:ComfyUI",
+            "source": "gemini",
+        }
+        session_lower = {**session_upper, "project": "gemini:comfyui"}
+        projects = [
+            {"dir_name": "upper", "display_name": "gemini:ComfyUI", "source": "gemini"},
+            {"dir_name": "lower", "display_name": "gemini:comfyui", "source": "gemini"},
+        ]
+
+        def parse_project_sessions(*args, **kwargs):
+            return [session_upper] if args[0] == "upper" else [session_lower]
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=parse_project_sessions,
+            default_source="gemini",
+        )
+
+        lines = output.read_text().strip().split("\n")
+        assert len(lines) == 1
+        assert meta["sessions"] == 1
+
+    def test_keeps_distinct_gemini_snapshots(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        session_old = {
+            "session_id": "g1",
+            "model": "gemini-2.5-pro",
+            "git_branch": None,
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T00:01:00Z",
+            "messages": [{"role": "user", "content": "short"}],
+            "stats": {"input_tokens": 1, "output_tokens": 2},
+            "project": "gemini:comfyui",
+            "source": "gemini",
+        }
+        session_new = {
+            **session_old,
+            "end_time": "2026-01-01T00:02:00Z",
+            "messages": [{"role": "user", "content": "longer"}],
+            "stats": {"input_tokens": 3, "output_tokens": 4},
+        }
+        projects = [{"dir_name": "proj", "display_name": "gemini:comfyui", "source": "gemini"}]
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: [session_old, session_new],
+            default_source="gemini",
+        )
+
+        lines = output.read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert meta["sessions"] == 2
+
 
 class TestPushToHuggingface:
     def test_missing_huggingface_hub(self, tmp_path, monkeypatch):

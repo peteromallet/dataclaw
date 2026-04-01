@@ -1,5 +1,7 @@
 """Export and publish helpers for the DataClaw CLI."""
 
+import hashlib
+import json as std_json
 import sys
 import urllib.error
 import urllib.request
@@ -10,6 +12,17 @@ from .. import _json as json
 from ..anonymizer import Anonymizer
 from ..secrets import redact_session
 from .common import HF_TAG, REPO_URL, SKILL_URL, _format_token_count, _provider_dataset_tags
+
+
+def _gemini_dedupe_fingerprint(session: dict, source: str) -> str | None:
+    if source != "gemini":
+        return None
+
+    canonical = dict(session)
+    canonical["source"] = source
+    canonical.pop("project", None)
+    payload = std_json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def export_to_jsonl(
@@ -28,6 +41,7 @@ def export_to_jsonl(
     total_input_tokens = 0
     total_output_tokens = 0
     project_names = []
+    seen_fingerprints: set[str] = set()
 
     try:
         fh = open(output_path, "wb")
@@ -46,13 +60,21 @@ def export_to_jsonl(
             )
             proj_count = 0
             for session in sessions:
+                source = session.get("source") or project.get("source", default_source)
                 model = session.get("model")
                 if not model or model == "<synthetic>":
                     skipped += 1
                     continue
 
+                fingerprint = _gemini_dedupe_fingerprint(session, source)
+                if fingerprint is not None and fingerprint in seen_fingerprints:
+                    continue
+
                 session, n_redacted = redact_session(session, custom_strings=custom_strings)
                 total_redactions += n_redacted
+
+                if fingerprint is not None:
+                    seen_fingerprints.add(fingerprint)
 
                 f.write(json.dumps_bytes(session))
                 f.write(b"\n")
