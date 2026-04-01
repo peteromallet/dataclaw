@@ -1,4 +1,4 @@
-"""Parse Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw session data into conversations."""
+"""Parse Claude Code, Codex, Cursor, Gemini CLI, OpenCode, and OpenClaw session data into conversations."""
 
 import dataclasses
 import hashlib
@@ -44,6 +44,10 @@ KIMI_DIR = Path.home() / ".kimi"
 KIMI_SESSIONS_DIR = KIMI_DIR / "sessions"
 KIMI_CONFIG_PATH = KIMI_DIR / "kimi.json"
 UNKNOWN_KIMI_CWD = "<unknown-cwd>"
+
+from .parsers import cursor as _cursor_mod
+CURSOR_SOURCE = _cursor_mod.CURSOR_SOURCE
+CURSOR_DB = _cursor_mod.CURSOR_DB
 
 CUSTOM_DIR = Path.home() / ".dataclaw" / "custom"
 
@@ -140,6 +144,7 @@ def discover_projects() -> list[dict]:
     projects.extend(_discover_opencode_projects())
     projects.extend(_discover_openclaw_projects())
     projects.extend(_discover_kimi_projects())
+    projects.extend(_cursor_mod.discover_projects())
     projects.extend(_discover_custom_projects())
     return sorted(projects, key=lambda p: (p["display_name"], p["source"]))
 
@@ -492,6 +497,32 @@ def parse_project_sessions(
                 parsed["project"] = _build_opencode_project_name(project_dir_name)
                 parsed["source"] = OPENCODE_SOURCE
                 sessions.append(parsed)
+        return sessions
+
+    if source == CURSOR_SOURCE:
+        index = _cursor_mod.get_project_index()
+        composer_ids = index.get(project_dir_name, [])
+        if not composer_ids:
+            return []
+        sessions = []
+        try:
+            with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
+                for cid in composer_ids:
+                    parsed = _cursor_mod.parse_session(
+                        cid, conn, anonymizer, include_thinking,
+                        _make_stats=_make_stats,
+                        _make_session_result=_make_session_result,
+                        _parse_tool_input=_parse_tool_input,
+                        _update_time_bounds=_update_time_bounds,
+                        _normalize_timestamp=_normalize_timestamp,
+                        _safe_int=_safe_int,
+                    )
+                    if parsed and parsed["messages"]:
+                        parsed["project"] = _cursor_mod.build_project_name(project_dir_name)
+                        parsed["source"] = CURSOR_SOURCE
+                        sessions.append(parsed)
+        except sqlite3.Error:
+            pass
         return sessions
 
     if source == CODEX_SOURCE:
@@ -1988,8 +2019,62 @@ def _parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonym
             "plan": [anonymizer.text(str(p)) if isinstance(p, str) else p for p in plan],
         }
 
+    # Cursor tools
+    if name in ("read_file", "read_file_v2"):
+        return {"file_path": anonymizer.path(input_data.get("targetFile", input_data.get("file_path", "")))}
+    if name in ("edit_file", "edit_file_v2"):
+        result: dict[str, Any] = {"file_path": anonymizer.path(
+            input_data.get("relativeWorkspacePath", input_data.get("targetFile", ""))
+        )}
+        content = input_data.get("streamingContent") or input_data.get("content")
+        if content:
+            result["content"] = anonymizer.text(str(content))
+        return result
+    if name == "search_replace":
+        return {
+            "file_path": anonymizer.path(input_data.get("targetFile", input_data.get("file_path", ""))),
+            "old_string": anonymizer.text(input_data.get("old_string", "")),
+            "new_string": anonymizer.text(input_data.get("new_string", "")),
+        }
+    if name in ("run_terminal_cmd", "run_terminal_command_v2"):
+        cmd, _ = redact_text(input_data.get("command", ""))
+        result = {"command": anonymizer.text(cmd)}
+        cwd = input_data.get("cwd")
+        if cwd:
+            result["cwd"] = anonymizer.path(cwd)
+        return result
+    if name == "codebase_search":
+        result = {"query": anonymizer.text(input_data.get("query", ""))}
+        inc = input_data.get("includePattern")
+        if inc:
+            result["include"] = inc
+        return result
+    if name == "grep_search":
+        pi = input_data.get("patternInfo", {})
+        pattern = pi.get("pattern", "") if isinstance(pi, dict) else str(pi)
+        return {"pattern": anonymizer.text(pattern)}
+    if name in ("list_dir", "list_dir_v2"):
+        return {"dir_path": anonymizer.path(input_data.get("targetDirectory", ""))}
+    if name == "ripgrep_raw_search":
+        return {
+            "query": anonymizer.text(input_data.get("query", "")),
+            "dir": anonymizer.path(input_data.get("rootDir", "")),
+        }
+    if name == "glob_file_search":
+        return {
+            "pattern": input_data.get("pattern", ""),
+            "dir": anonymizer.path(input_data.get("rootDir", "")),
+        }
+    if name == "semantic_search_full":
+        return {"query": anonymizer.text(input_data.get("query", ""))}
+    if name == "web_search":
+        return {"query": anonymizer.text(input_data.get("query", input_data.get("search_term", "")))}
+    if name == "web_fetch":
+        return {"url": anonymizer.text(input_data.get("url", ""))}
+
     # Fallback: anonymize all string values
     return {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in input_data.items()}
+
 
 def _normalize_timestamp(value) -> str | None:
     if value is None:
