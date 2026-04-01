@@ -27,7 +27,7 @@ SECRET_PATTERNS = [
     # Fly.io machine/access tokens
     ("flyio_token", re.compile(r"fm[12]_[A-Za-z0-9/+=]{20,}")),
     # Ethereum / EVM private keys (0x + 64 hex chars)
-    ("eth_private_key", re.compile(r"0x[0-9a-fA-F]{64}\b")),
+    ("eth_private_key", re.compile(r"0x[0-9a-fA-F]{56,64}\b")),
     # Hugging Face tokens
     ("hf_token", re.compile(r"hf_[A-Za-z0-9]{20,}")),
     # GitHub tokens
