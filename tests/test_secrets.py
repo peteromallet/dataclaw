@@ -10,6 +10,7 @@ from dataclaw.secrets import (
     redact_session,
     redact_text,
     scan_text,
+    should_skip_large_binary_string,
 )
 
 # --- _shannon_entropy ---
@@ -659,4 +660,35 @@ class TestRedactSession:
             ]
         }
         result, count = redact_session(session)
+        assert count == 0
+
+
+class TestLargeBinarySkipping:
+    def test_detects_large_base64_blob(self):
+        blob = "A" * 5000
+        assert should_skip_large_binary_string(blob) is True
+
+    def test_redact_text_skips_large_base64_blob(self):
+        blob = "A" * 5000
+        result, count = redact_text(blob)
+        assert result == blob
+        assert count == 0
+
+    def test_redact_session_skips_large_base64_in_tool_output(self):
+        blob = "A" * 5000
+        session = {
+            "messages": [
+                {
+                    "tool_uses": [
+                        {
+                            "output": {
+                                "raw": {"content": [{"type": "image", "source": {"type": "base64", "data": blob}}]}
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        result, count = redact_session(session)
+        assert result["messages"][0]["tool_uses"][0]["output"]["raw"]["content"][0]["source"]["data"] == blob
         assert count == 0

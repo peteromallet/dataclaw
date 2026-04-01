@@ -184,7 +184,10 @@ Each line in `conversations.jsonl` is one session:
           {
             "tool": "bash",
             "input": {"command": "grep -r 'login' src/"},
-            "output": {"text": "src/auth.py:42: def login(user, password):"},
+            "output": {
+              "text": "src/auth.py:42: def login(user, password):",
+              "raw": {"stderr": "", "interrupted": false}
+            },
             "status": "success"
           }
         ],
@@ -197,6 +200,8 @@ Each line in `conversations.jsonl` is one session:
   }
 }
 ```
+
+`tool_uses[].output.raw` is optional and preserves extra structured tool-result fields when the source provides them. The canonical human-readable result text remains in `tool_uses[].output.text`.
 
 Each HF repo also includes a `metadata.json` with aggregate stats.
 

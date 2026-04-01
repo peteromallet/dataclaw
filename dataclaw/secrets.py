@@ -149,6 +149,26 @@ ALLOWLIST = [
     re.compile(r"1\.1\.1\.1"),  # Cloudflare DNS
 ]
 
+_BASE64_BLOB_RE = re.compile(r"(?:[A-Za-z0-9+/]{4}){1024,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+
+
+def should_skip_large_binary_string(text: str) -> bool:
+    """Return True for large base64/binary-like payloads we should not rewrite."""
+    if not text or len(text) < 4096:
+        return False
+
+    sample = text[:8192]
+    if sample.startswith("data:") and "base64," in sample[:128]:
+        return True
+
+    if any(ord(char) < 9 or (13 < ord(char) < 32) for char in sample):
+        return True
+
+    compact = re.sub(r"\s+", "", sample)
+    if len(compact) < 4096:
+        return False
+    return _BASE64_BLOB_RE.fullmatch(compact) is not None
+
 
 def _shannon_entropy(s: str) -> float:
     """Higher values indicate more random-looking strings."""
@@ -206,6 +226,8 @@ def scan_text(text: str) -> list[dict]:
 def redact_text(text: str) -> tuple[str, int]:
     if not text:
         return text, 0
+    if should_skip_large_binary_string(text):
+        return text, 0
 
     findings = scan_text(text)
     if not findings:
@@ -247,6 +269,8 @@ def redact_custom_strings(text: str, strings: list[str]) -> tuple[str, int]:
 def _redact_value(value: Any, custom_strings: list[str] | None = None) -> tuple[Any, int]:
     """Recursively redact secrets from a string, list, or dict value."""
     if isinstance(value, str):
+        if should_skip_large_binary_string(value):
+            return value, 0
         result, count = redact_text(value)
         if custom_strings:
             result, n = redact_custom_strings(result, custom_strings)

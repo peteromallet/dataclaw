@@ -6,17 +6,19 @@ from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
-from ..secrets import redact_text
+from ..secrets import redact_text, should_skip_large_binary_string
 
 logger = logging.getLogger(__name__)
 
 _PATH_KEYS = frozenset(
     {
         "file_path",
+        "filePath",
         "path",
         "dir",
         "dir_path",
         "cwd",
+        "outputFile",
         "workdir",
         "targetFile",
         "targetDirectory",
@@ -109,6 +111,8 @@ def normalize_timestamp(value: Any) -> str | None:
 
 def anonymize_value(key: str, value: Any, anonymizer: Anonymizer) -> Any:
     if isinstance(value, str):
+        if should_skip_large_binary_string(value):
+            return value
         if key in _PATH_KEYS:
             return anonymizer.path(value)
         if key in _CMD_KEYS:

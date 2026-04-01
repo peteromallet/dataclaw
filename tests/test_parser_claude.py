@@ -711,6 +711,182 @@ class TestBuildToolResultMap:
         result = build_tool_result_map(entries, mock_anonymizer)
         assert result["tu-4"]["output"] == {}
 
+    def test_structured_tool_result_keeps_extra_fields_without_dup_text(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-structured",
+                            "content": "command output",
+                            "is_error": False,
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "stdout": "command output",
+                    "stderr": "warning text",
+                    "interrupted": False,
+                    "isImage": False,
+                    "noOutputExpected": False,
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        output = result["tu-structured"]["output"]
+        assert output["text"] == "command output"
+        assert "stdout" not in output["raw"]
+        assert output["raw"]["stderr"] == "warning text"
+        assert output["raw"]["interrupted"] is False
+        assert output["raw"]["isImage"] is False
+
+    def test_file_tool_result_omits_duplicate_file_content(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-file",
+                            "content": "line one\nline two",
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "type": "text",
+                    "file": {
+                        "filePath": "/Users/testuser/Documents/myproject/out.txt",
+                        "content": "line one\nline two",
+                        "numLines": 2,
+                        "startLine": 1,
+                        "totalLines": 2,
+                    },
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        raw = result["tu-file"]["output"]["raw"]
+        assert raw["type"] == "text"
+        assert raw["file"]["numLines"] == 2
+        assert "content" not in raw["file"]
+        assert "testuser" not in raw["file"]["filePath"]
+
+    def test_file_tool_result_omits_duplicate_content_with_line_prefixes(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-file-numbered",
+                            "content": "     1→line one\n     2→line two",
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "type": "text",
+                    "file": {
+                        "filePath": "/Users/testuser/Documents/myproject/out.txt",
+                        "content": "line one\nline two",
+                        "numLines": 2,
+                    },
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        raw = result["tu-file-numbered"]["output"]["raw"]
+        assert raw["type"] == "text"
+        assert "content" not in raw["file"]
+
+    def test_file_tool_result_omits_duplicate_content_when_output_wraps_it(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-file-wrapped",
+                            "content": (
+                                "     1→line one\n     2→line two\n\n<system-reminder>extra wrapper</system-reminder>"
+                            ),
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "type": "text",
+                    "file": {
+                        "filePath": "/Users/testuser/Documents/myproject/out.txt",
+                        "content": "line one\nline two",
+                        "numLines": 2,
+                    },
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        raw = result["tu-file-wrapped"]["output"]["raw"]
+        assert raw["type"] == "text"
+        assert "content" not in raw["file"]
+
+    def test_non_text_tool_result_blocks_preserved(self, mock_anonymizer):
+        image_data = "A" * 5000
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-image",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {"type": "base64", "data": image_data},
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        output = result["tu-image"]["output"]
+        assert "text" not in output
+        assert output["raw"]["content"][0]["type"] == "image"
+        assert output["raw"]["content"][0]["source"]["data"] == image_data
+
+    def test_edit_tool_result_preserves_raw_payload(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-edit",
+                            "content": "The file was updated successfully.",
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "filePath": "/Users/testuser/Documents/myproject/app.py",
+                    "oldString": "secret = 'abc'",
+                    "newString": "secret = 'xyz'",
+                },
+                "sourceToolAssistantUUID": "assistant-123",
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        raw = result["tu-edit"]["output"]["raw"]
+        assert raw["filePath"] != "/Users/testuser/Documents/myproject/app.py"
+        assert raw["oldString"] == "secret = 'abc'"
+        assert raw["newString"] == "secret = 'xyz'"
+        assert raw["sourceToolAssistantUUID"] == "assistant-123"
+
     def test_non_user_entries_ignored(self, mock_anonymizer):
         entries = [
             {
