@@ -14,7 +14,8 @@ from typing import Any, Mapping, cast
 from . import _json as json
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, DataClawConfig, load_config, save_config
-from .parser import CLAUDE_DIR, CODEX_DIR, CURSOR_DB, CUSTOM_DIR, GEMINI_DIR, KIMI_DIR, OPENCODE_DIR, OPENCLAW_DIR, discover_projects, parse_project_sessions
+from .parser import discover_projects, parse_project_sessions
+from .providers import PROVIDERS
 from .secrets import _has_mixed_char_types, _shannon_entropy, redact_session
 
 HF_TAG = "dataclaw"
@@ -50,18 +51,10 @@ EXPORT_REVIEW_PUBLISH_STEPS = [
     "Step 2/3: Review/redact, then run confirm: dataclaw confirm ...",
     "Step 3/3: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
 ]
-
-SETUP_TO_PUBLISH_STEPS = [
-    "Step 1/6: Run prep/list to review project scope: dataclaw prep && dataclaw list",
-    "Step 2/6: Explicitly choose source scope: dataclaw config --source <claude|codex|gemini|all>",
-    "Step 3/6: Configure exclusions/redactions and confirm projects: dataclaw config ...",
-    "Step 4/6: Export locally only: dataclaw export --no-push --output dataclaw_export.jsonl",
-    "Step 5/6: Review and confirm: dataclaw confirm ...",
-    "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
-]
-
-EXPLICIT_SOURCE_CHOICES = {"claude", "codex", "cursor", "custom", "gemini", "kimi", "opencode", "openclaw", "all", "both"}
-SOURCE_CHOICES = ["auto", "claude", "codex", "cursor", "custom", "gemini", "kimi", "opencode", "openclaw", "all"]
+PROVIDER_SOURCES = tuple(PROVIDERS)
+DEFAULT_SOURCE = PROVIDER_SOURCES[0]
+EXPLICIT_SOURCE_CHOICES = set(PROVIDER_SOURCES) | {"all", "both"}
+SOURCE_CHOICES = ["auto", *PROVIDER_SOURCES, "all"]
 
 
 def _mask_secret(s: str) -> str:
@@ -79,25 +72,56 @@ def _mask_config_for_display(config: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _format_human_list(items: list[str], conjunction: str = "or") -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} {conjunction} {items[1]}"
+    return f"{', '.join(items[:-1])}, {conjunction} {items[-1]}"
+
+
+def _all_provider_labels() -> str:
+    return _format_human_list([provider.source for provider in PROVIDERS.values()])
+
+
+def _source_scope_choices(include_aliases: bool = False) -> list[str]:
+    choices = [*PROVIDER_SOURCES, "all"]
+    if include_aliases:
+        choices.append("both")
+    return choices
+
+
+def _source_scope_placeholder() -> str:
+    return f"<{'|'.join(_source_scope_choices())}>"
+
+
+def _source_scope_literals() -> str:
+    return _format_human_list([f"`{choice}`" for choice in _source_scope_choices()])
+
+
+def _setup_to_publish_steps() -> list[str]:
+    return [
+        "Step 1/6: Run prep/list to review project scope: dataclaw prep && dataclaw list",
+        f"Step 2/6: Explicitly choose source scope: dataclaw config --source {_source_scope_placeholder()}",
+        "Step 3/6: Configure exclusions/redactions and confirm projects: dataclaw config ...",
+        "Step 4/6: Export locally only: dataclaw export --no-push --output dataclaw_export.jsonl",
+        "Step 5/6: Review and confirm: dataclaw confirm ...",
+        "Step 6/6: After explicit user approval, publish: dataclaw export --publish-attestation \"User explicitly approved publishing to Hugging Face.\"",
+    ]
+
+
+def _provider_dataset_tags() -> str:
+    return "\n".join(f"  - {provider.hf_metadata_tag}" for provider in PROVIDERS.values())
+
+
 def _source_label(source_filter: str) -> str:
     source_filter = _normalize_source_filter(source_filter)
-    if source_filter == "claude":
-        return "Claude Code"
-    if source_filter == "codex":
-        return "Codex"
-    if source_filter == "gemini":
-        return "Gemini CLI"
-    if source_filter == "opencode":
-        return "OpenCode"
-    if source_filter == "openclaw":
-        return "OpenClaw"
-    if source_filter == "kimi":
-        return "Kimi CLI"
-    if source_filter == "cursor":
-        return "Cursor"
-    if source_filter == "custom":
-        return "Custom"
-    return "Claude Code, Codex, Cursor, Gemini CLI, OpenCode, OpenClaw, Kimi CLI, or Custom"
+    provider = PROVIDERS.get(source_filter)
+    if provider:
+        return provider.source
+    return _all_provider_labels()
 
 
 def _normalize_source_filter(source_filter: str) -> str:
@@ -117,8 +141,8 @@ def _resolve_source_choice(
     """Resolve source choice from CLI + config.
 
     Returns:
-      (source_choice, explicit) where source_choice is one of
-      "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "all" | "auto".
+      (source_choice, explicit) where source_choice is one of the registered provider
+      source names, or "all" / "auto".
     """
     if _is_explicit_source_choice(requested_source):
         return requested_source, True
@@ -131,30 +155,17 @@ def _resolve_source_choice(
 
 def _has_session_sources(source_filter: str = "auto") -> bool:
     source_filter = _normalize_source_filter(source_filter)
-    if source_filter == "claude":
-        return CLAUDE_DIR.exists()
-    if source_filter == "codex":
-        return CODEX_DIR.exists()
-    if source_filter == "gemini":
-        return GEMINI_DIR.exists()
-    if source_filter == "opencode":
-        return OPENCODE_DIR.exists()
-    if source_filter == "openclaw":
-        return OPENCLAW_DIR.exists()
-    if source_filter == "kimi":
-        return KIMI_DIR.exists()
-    if source_filter == "cursor":
-        return CURSOR_DB.exists()
-    if source_filter == "custom":
-        return CUSTOM_DIR.exists()
-    return CLAUDE_DIR.exists() or CODEX_DIR.exists() or CURSOR_DB.exists() or CUSTOM_DIR.exists() or GEMINI_DIR.exists() or KIMI_DIR.exists() or OPENCODE_DIR.exists() or OPENCLAW_DIR.exists()
+    provider = PROVIDERS.get(source_filter)
+    if provider:
+        return provider.has_session_source()
+    return any(provider.has_session_source() for provider in PROVIDERS.values())
 
 
 def _filter_projects_by_source(projects: list[dict], source_filter: str) -> list[dict]:
     source_filter = _normalize_source_filter(source_filter)
     if source_filter == "auto":
         return projects
-    return [p for p in projects if p.get("source", "claude") == source_filter]
+    return [p for p in projects if p.get("source", DEFAULT_SOURCE) == source_filter]
 
 
 def _format_size(size_bytes: int) -> str:
@@ -188,7 +199,7 @@ def get_hf_username() -> str | None:
 
 
 def default_repo_name(hf_username: str) -> str:
-    """Standard repo name: {username}/my-personal-codex-data"""
+    """Return the default Hugging Face dataset repo name for a user."""
     return f"{hf_username}/my-personal-codex-data"
 
 
@@ -233,14 +244,14 @@ def _build_status_next_steps(
         steps = []
         if not source_confirmed:
             steps.append(
-                "Ask the user to explicitly choose export source scope: Claude Code, Codex, Gemini, or all. "
-                "Then set it: dataclaw config --source <claude|codex|gemini|all>. "
+                f"Ask the user to explicitly choose export source scope: {_all_provider_labels()} or all. "
+                f"Then set it: dataclaw config --source {_source_scope_placeholder()}. "
                 "Do not run export until source scope is explicitly confirmed."
             )
         else:
             steps.append(
                 f"Source scope is currently set to '{configured_source}'. "
-                "If the user wants a different scope, run: dataclaw config --source <claude|codex|gemini|all>."
+                f"If the user wants a different scope, run: dataclaw config --source {_source_scope_placeholder()}."
             )
         if not projects_confirmed:
             steps.append(
@@ -309,7 +320,7 @@ def list_projects(source_filter: str = "auto") -> None:
         [{"name": p["display_name"], "sessions": p["session_count"],
           "size": _format_size(p["total_size_bytes"]),
           "excluded": p["display_name"] in excluded,
-          "source": p.get("source", "claude")}
+          "source": p.get("source", DEFAULT_SOURCE)}
          for p in projects],
         indent=2,
     ))
@@ -377,7 +388,7 @@ def export_to_jsonl(
             sessions = parse_project_sessions(
                 project["dir_name"], anonymizer=anonymizer,
                 include_thinking=include_thinking,
-                source=project.get("source", "claude"),
+                source=project.get("source", DEFAULT_SOURCE),
             )
             proj_count = 0
             for session in sessions:
@@ -484,11 +495,7 @@ language:
   - en
 tags:
   - dataclaw
-  - claude-code
-  - codex-cli
-  - gemini-cli
-  - opencode
-  - openclaw
+{_provider_dataset_tags()}
   - conversations
   - coding-assistant
   - tool-use
@@ -1126,15 +1133,11 @@ def prep(source_filter: str = "auto") -> None:
     effective_source_filter = _normalize_source_filter(resolved_source_choice)
 
     if not _has_session_sources(effective_source_filter):
-        if effective_source_filter == "claude":
-            err = "~/.claude was not found."
-        elif effective_source_filter == "codex":
-            err = "~/.codex was not found."
-        elif effective_source_filter == "gemini":
-            from .parser import GEMINI_DIR
-            err = f"{GEMINI_DIR} was not found."
+        provider = PROVIDERS.get(effective_source_filter)
+        if provider:
+            err = provider.missing_source_message()
         else:
-            err = "None of ~/.claude, ~/.codex, or ~/.gemini/tmp were found."
+            err = "None of the supported provider session directories were found."
         print(json.dumps({"error": err}))
         sys.exit(1)
 
@@ -1179,7 +1182,7 @@ def prep(source_filter: str = "auto") -> None:
                 "sessions": p["session_count"],
                 "size": _format_size(p["total_size_bytes"]),
                 "excluded": p["display_name"] in excluded,
-                "source": p.get("source", "claude"),
+                "source": p.get("source", DEFAULT_SOURCE),
             }
             for p in projects
         ],
@@ -1198,7 +1201,7 @@ def main() -> None:
         ret = subprocess.run([sys.executable, "-m", "dataclaw.cli"] + sys.argv[1:]).returncode
         sys.exit(ret)
 
-    parser = argparse.ArgumentParser(description="DataClaw — Claude/Codex -> Hugging Face")
+    parser = argparse.ArgumentParser(description="DataClaw — Coding Agent Logs -> Hugging Face")
     sub = parser.add_subparsers(dest="command")
 
     prep_parser = sub.add_parser("prep", help="Data prep — discover projects, detect HF, output JSON")
@@ -1229,7 +1232,7 @@ def main() -> None:
     cfg = sub.add_parser("config", help="View or set config")
     cfg.add_argument("--repo", type=str, help="Set HF repo")
     cfg.add_argument("--source", choices=sorted(EXPLICIT_SOURCE_CHOICES),
-                     help="Set export source scope explicitly: claude, codex, gemini, or all")
+                     help=f"Set export source scope explicitly: {_source_scope_literals()}")
     cfg.add_argument("--exclude", type=str, help="Comma-separated projects to exclude")
     cfg.add_argument("--redact", type=str,
                      help="Comma-separated strings to always redact (API keys, usernames, domains)")
@@ -1350,16 +1353,16 @@ def _run_export(args) -> None:
             "error": "Source scope is not confirmed yet.",
             "hint": (
                 "Explicitly choose one source scope before exporting: "
-                "`claude`, `codex`, `gemini`, or `all`."
+                f"{_source_scope_literals()}."
             ),
             "required_action": (
-                "Ask the user whether to export Claude Code, Codex, Gemini, or all. "
-                "Then run `dataclaw config --source <claude|codex|gemini|all>` "
-                "or pass `--source <claude|codex|gemini|all>` on the export command."
+                f"Ask the user whether to export {_all_provider_labels()} or all. "
+                f"Then run `dataclaw config --source {_source_scope_placeholder()}` "
+                f"or pass `--source {_source_scope_placeholder()}` on the export command."
             ),
             "allowed_sources": sorted(EXPLICIT_SOURCE_CHOICES),
             "blocked_on_step": "Step 2/6",
-            "process_steps": SETUP_TO_PUBLISH_STEPS,
+            "process_steps": _setup_to_publish_steps(),
             "next_command": "dataclaw config --source all",
         }, indent=2))
         sys.exit(1)
@@ -1436,19 +1439,15 @@ def _run_export(args) -> None:
         save_config(config)
 
     print("=" * 50)
-    print("  DataClaw — Claude/Codex Log Exporter")
+    print("  DataClaw — Coding Agent Log Exporter")
     print("=" * 50)
 
     if not _has_session_sources(source_filter):
-        if source_filter == "claude":
-            print(f"Error: {CLAUDE_DIR} not found.", file=sys.stderr)
-        elif source_filter == "codex":
-            print(f"Error: {CODEX_DIR} not found.", file=sys.stderr)
-        elif source_filter == "gemini":
-            from .parser import GEMINI_DIR
-            print(f"Error: {GEMINI_DIR} not found.", file=sys.stderr)
+        provider = PROVIDERS.get(source_filter)
+        if provider:
+            print(f"Error: {provider.missing_source_message()}", file=sys.stderr)
         else:
-            print("Error: none of ~/.claude, ~/.codex, or ~/.gemini/tmp were found.", file=sys.stderr)
+            print("Error: none of the supported provider session directories were found.", file=sys.stderr)
         sys.exit(1)
 
     projects = _filter_projects_by_source(discover_projects(), source_filter)
@@ -1472,7 +1471,7 @@ def _run_export(args) -> None:
             "projects": [
                 {
                     "name": p["display_name"],
-                    "source": p.get("source", "claude"),
+                    "source": p.get("source", DEFAULT_SOURCE),
                     "sessions": p["session_count"],
                     "size": _format_size(p["total_size_bytes"]),
                     "excluded": p["display_name"] in excluded,
@@ -1480,7 +1479,7 @@ def _run_export(args) -> None:
                 for p in projects
             ],
             "blocked_on_step": "Step 3/6",
-            "process_steps": SETUP_TO_PUBLISH_STEPS,
+            "process_steps": _setup_to_publish_steps(),
             "next_command": "dataclaw config --confirm-projects",
         }, indent=2))
         sys.exit(1)
@@ -1584,7 +1583,7 @@ def _run_export(args) -> None:
     if not repo_id:
         print(f"\nNo HF repo. Log in first: huggingface-cli login")
         print(f"Then re-run dataclaw and it will auto-detect your username.")
-        print(f"Or set manually: dataclaw config --repo username/my-personal-codex-data")
+        print(f"Or set manually: dataclaw config --repo {default_repo_name('username')}")
         print(f"\nLocal file: {output_path}")
         return
 
