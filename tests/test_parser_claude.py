@@ -8,6 +8,7 @@ from dataclaw.parsers.claude import (
     extract_assistant_content,
     extract_user_content,
     find_subagent_only_sessions,
+    find_subagent_sessions,
     parse_session_file,
     parse_subagent_session,
     process_entry,
@@ -363,6 +364,22 @@ class TestDiscoverProjects:
 
 
 class TestFindSubagentOnlySessions:
+    def test_finds_all_subagent_dirs(self, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "has-root.jsonl").write_text("{}\n")
+
+        attached_subagent_dir = project_dir / "has-root" / "subagents"
+        attached_subagent_dir.mkdir(parents=True)
+        (attached_subagent_dir / "agent-a1.jsonl").write_text("{}\n")
+
+        subagent_only_dir = project_dir / "subagent-only" / "subagents"
+        subagent_only_dir.mkdir(parents=True)
+        (subagent_only_dir / "agent-b1.jsonl").write_text("{}\n")
+
+        result = find_subagent_sessions(project_dir)
+        assert [entry.name for entry in result] == ["has-root", "subagent-only"]
+
     def test_finds_subagent_dirs_without_root_jsonl(self, tmp_path):
         project_dir = tmp_path / "project"
         project_dir.mkdir()
@@ -469,8 +486,59 @@ class TestParseSubagentSession:
         assert result["stats"]["input_tokens"] == 100
         assert result["stats"]["output_tokens"] == 40
 
+    def test_suffixes_session_id_when_root_session_exists(self, tmp_path, mock_anonymizer):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "same-session.jsonl").write_text("{}\n")
+
+        session_dir = project_dir / "same-session"
+        subagent_dir = session_dir / "subagents"
+        subagent_dir.mkdir(parents=True)
+        (subagent_dir / "agent-a.jsonl").write_text(
+            json.dumps(
+                make_subagent_entry("user", "Hello", "2026-01-10T10:00:00Z", cwd="/tmp/p", session_id="same-session")
+            )
+            + "\n"
+            + json.dumps(make_subagent_entry("assistant", "Hi", "2026-01-10T10:00:01Z"))
+            + "\n"
+        )
+
+        result = parse_subagent_session(session_dir, mock_anonymizer)
+        assert result is not None
+        assert result["session_id"] == "same-session:subagents"
+
 
 class TestDiscoverSubagentProjects:
+    def test_discover_counts_attached_subagent_sessions(self, tmp_path, monkeypatch):
+        disable_other_providers(monkeypatch, tmp_path, keep={"claude"})
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "-Users-alice-Documents-research"
+        project_dir.mkdir(parents=True)
+        (project_dir / "same-session.jsonl").write_text(
+            json.dumps(
+                make_subagent_entry("user", "Root msg", "2026-01-01T00:00:00Z", cwd="/tmp", session_id="same-session")
+            )
+            + "\n"
+            + json.dumps(make_subagent_entry("assistant", "Root reply", "2026-01-01T00:00:01Z"))
+            + "\n"
+        )
+
+        subagent_dir = project_dir / "same-session" / "subagents"
+        subagent_dir.mkdir(parents=True)
+        (subagent_dir / "agent-a.jsonl").write_text(
+            json.dumps(
+                make_subagent_entry("user", "SA msg", "2026-01-02T00:00:00Z", cwd="/tmp", session_id="same-session")
+            )
+            + "\n"
+            + json.dumps(make_subagent_entry("assistant", "SA reply", "2026-01-02T00:00:01Z"))
+            + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parsers.claude.PROJECTS_DIR", projects_dir)
+        projects = discover_projects()
+        assert len(projects) == 1
+        assert projects[0]["session_count"] == 2
+
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch):
         disable_other_providers(monkeypatch, tmp_path, keep={"claude"})
         projects_dir = tmp_path / "projects"
@@ -532,6 +600,39 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parsers.claude.PROJECTS_DIR", projects_dir)
         sessions = parse_project_sessions("mixed-project", mock_anonymizer)
         assert len(sessions) == 2
+        contents = {session["messages"][0]["content"] for session in sessions}
+        assert "Root msg" in contents
+        assert "SA msg" in contents
+
+    def test_parse_includes_attached_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"claude"})
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "attached-project"
+        project_dir.mkdir(parents=True)
+        (project_dir / "same-session.jsonl").write_text(
+            json.dumps(
+                make_subagent_entry("user", "Root msg", "2026-01-01T00:00:00Z", cwd="/tmp", session_id="same-session")
+            )
+            + "\n"
+            + json.dumps(make_subagent_entry("assistant", "Root reply", "2026-01-01T00:00:01Z"))
+            + "\n"
+        )
+
+        subagent_dir = project_dir / "same-session" / "subagents"
+        subagent_dir.mkdir(parents=True)
+        (subagent_dir / "agent-a.jsonl").write_text(
+            json.dumps(
+                make_subagent_entry("user", "SA msg", "2026-01-02T00:00:00Z", cwd="/tmp", session_id="same-session")
+            )
+            + "\n"
+            + json.dumps(make_subagent_entry("assistant", "SA reply", "2026-01-02T00:00:01Z"))
+            + "\n"
+        )
+
+        monkeypatch.setattr("dataclaw.parsers.claude.PROJECTS_DIR", projects_dir)
+        sessions = parse_project_sessions("attached-project", mock_anonymizer)
+        assert len(sessions) == 2
+        assert {session["session_id"] for session in sessions} == {"same-session", "same-session:subagents"}
         contents = {session["messages"][0]["content"] for session in sessions}
         assert "Root msg" in contents
         assert "SA msg" in contents

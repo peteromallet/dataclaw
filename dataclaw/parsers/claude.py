@@ -29,7 +29,7 @@ def discover_projects(projects_dir: Path | None = None) -> list[dict]:
         if not project_dir.is_dir():
             continue
         root_sessions = list(project_dir.glob("*.jsonl"))
-        subagent_sessions = find_subagent_only_sessions(project_dir)
+        subagent_sessions = find_subagent_sessions(project_dir)
         total_count = len(root_sessions) + len(subagent_sessions)
         if total_count == 0:
             continue
@@ -71,7 +71,7 @@ def parse_project_sessions(
     )
     sessions.extend(
         collect_project_sessions(
-            find_subagent_only_sessions(project_path),
+            find_subagent_sessions(project_path),
             lambda session_dir: parse_subagent_session(session_dir, anonymizer, include_thinking),
             project_name,
             SOURCE,
@@ -144,17 +144,22 @@ def parse_session_file(
     return make_session_result(metadata, messages, stats)
 
 
-def find_subagent_only_sessions(project_dir: Path) -> list[Path]:
-    """Find session directories that have subagent data but no root-level JSONL."""
-    root_stems = {f.stem for f in project_dir.glob("*.jsonl")}
+def find_subagent_sessions(project_dir: Path) -> list[Path]:
+    """Find session directories that contain Claude subagent logs."""
     sessions = []
     for entry in sorted(project_dir.iterdir()):
-        if not entry.is_dir() or entry.name in root_stems:
+        if not entry.is_dir():
             continue
         subagent_dir = entry / "subagents"
         if subagent_dir.is_dir() and any(subagent_dir.glob("agent-*.jsonl")):
             sessions.append(entry)
     return sessions
+
+
+def find_subagent_only_sessions(project_dir: Path) -> list[Path]:
+    """Find session directories that have subagent data but no root-level JSONL."""
+    root_stems = {f.stem for f in project_dir.glob("*.jsonl")}
+    return [entry for entry in find_subagent_sessions(project_dir) if entry.name not in root_stems]
 
 
 def parse_subagent_session(
@@ -203,7 +208,15 @@ def parse_subagent_session(
             tool_result_map,
         )
 
+    metadata["session_id"] = resolve_subagent_session_id(session_dir, metadata["session_id"])
     return make_session_result(metadata, messages, stats)
+
+
+def resolve_subagent_session_id(session_dir: Path, session_id: str) -> str:
+    root_session_file = session_dir.parent / f"{session_dir.name}.jsonl"
+    if root_session_file.exists():
+        return f"{session_id}:subagents"
+    return session_id
 
 
 def process_entry(
