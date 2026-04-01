@@ -859,6 +859,51 @@ class TestBuildToolResultMap:
         assert output["raw"]["content"][0]["type"] == "image"
         assert output["raw"]["content"][0]["source"]["data"] == image_data
 
+    def test_large_string_blob_content_preserved_verbatim_in_raw(self, mock_anonymizer):
+        blob = "A" * 5000
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-blob",
+                            "content": blob,
+                        }
+                    ]
+                },
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        output = result["tu-blob"]["output"]
+        assert "text" not in output
+        assert output["raw"]["content"] == blob
+
+    def test_large_string_tool_use_result_preserved_verbatim_in_raw(self, mock_anonymizer):
+        blob = "A" * 5000
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-blob-result",
+                            "content": blob,
+                        }
+                    ]
+                },
+                "toolUseResult": blob,
+                "sourceToolAssistantUUID": "assistant-blob",
+            }
+        ]
+        result = build_tool_result_map(entries, mock_anonymizer)
+        output = result["tu-blob-result"]["output"]
+        assert "text" not in output
+        assert output["raw"]["content"] == blob
+        assert output["raw"]["sourceToolAssistantUUID"] == "assistant-blob"
+
     def test_long_ansi_terminal_output_is_preserved_as_text(self, mock_anonymizer):
         terminal_output = (
             "Exit code 1\n"

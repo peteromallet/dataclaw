@@ -135,7 +135,12 @@ def build_tool_result_output(
 
 def parse_tool_result_content(content: Any, anonymizer: Anonymizer) -> tuple[str | None, Any]:
     if isinstance(content, str):
-        return normalize_tool_result_text(content, anonymizer), None
+        text = normalize_tool_result_text(content, anonymizer)
+        if text is not None:
+            return text, None
+        if should_skip_large_binary_string(content):
+            return None, content
+        return None, None
 
     if isinstance(content, list):
         text_parts: list[str] = []
@@ -222,6 +227,8 @@ def sanitize_tool_use_result(
         return None
 
     if isinstance(tool_use_result, str):
+        if should_skip_large_binary_string(tool_use_result):
+            return {"text": tool_use_result}
         sanitized_text = normalize_tool_result_text(tool_use_result, anonymizer)
         if not sanitized_text or text_matches_tool_result(sanitized_text, text):
             return None
@@ -314,6 +321,11 @@ def merge_tool_result_raw(raw_content: Any, raw_result: dict[str, Any] | None) -
         return raw_result
     if raw_result is None:
         return {"content": raw_content}
+    if isinstance(raw_content, str) and raw_result.get("text") == raw_content:
+        merged = {key: value for key, value in raw_result.items() if key != "text"}
+        if not merged:
+            return {"content": raw_content}
+        return {"content": raw_content, **merged}
     return {"content": raw_content, "toolUseResult": raw_result}
 
 
