@@ -175,7 +175,14 @@ Each line in `conversations.jsonl` is one session:
   "start_time": "2025-06-15T10:00:00+00:00",
   "end_time": "2025-06-15T10:30:00+00:00",
   "messages": [
-    {"role": "user", "content": "Fix the login bug", "timestamp": "..."},
+    {
+      "role": "user",
+      "content": "Fix the login bug",
+      "content_parts": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
+      ],
+      "timestamp": "..."
+    },
     {
       "role": "assistant",
       "content": "I'll investigate the login flow.",
@@ -200,6 +207,8 @@ Each line in `conversations.jsonl` is one session:
   }
 }
 ```
+
+`messages[].content_parts` is optional and preserves structured user content such as attachments when the source provides them. The canonical human-readable user text remains in `messages[].content`.
 
 `tool_uses[].output.raw` is optional and preserves extra structured tool-result fields when the source provides them. The canonical human-readable result text remains in `tool_uses[].output.text`.
 

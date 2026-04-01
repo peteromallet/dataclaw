@@ -310,6 +310,9 @@ def redact_session(session: dict, custom_strings: list[str] | None = None) -> tu
                 if custom_strings:
                     msg[field], count = redact_custom_strings(msg[field], custom_strings)
                     total += count
+        if msg.get("content_parts"):
+            msg["content_parts"], count = _redact_value(msg["content_parts"], custom_strings)
+            total += count
         for tool_use in msg.get("tool_uses", []):
             for field in ("input", "output"):
                 if tool_use.get(field):
