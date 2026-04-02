@@ -348,7 +348,7 @@ class TestJsonlUtilityCommands:
             "input_path": Path("sample.jsonl"),
             "output_path": Path("sample.yaml"),
         }
-        assert "Written to /tmp/rendered.yaml" in capsys.readouterr().out
+        assert f"Written to {Path('/tmp/rendered.yaml')}" in capsys.readouterr().out
 
     def test_main_diff_jsonl_dispatches(self, monkeypatch, capsys):
         captured = {}
@@ -384,4 +384,4 @@ class TestJsonlUtilityCommands:
             "output_path": Path("diff.yaml"),
             "include_records_for_modified": True,
         }
-        assert "Wrote 2 change documents to /tmp/diff.yaml" in capsys.readouterr().out
+        assert f"Wrote 2 change documents to {Path('/tmp/diff.yaml')}" in capsys.readouterr().out
