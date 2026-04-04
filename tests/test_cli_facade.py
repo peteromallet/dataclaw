@@ -1,5 +1,7 @@
 """Tests for CLI facade commands and main dispatch."""
 
+from pathlib import Path
+
 import pytest
 
 from dataclaw import _json as json
@@ -297,7 +299,7 @@ class TestHelpAndCommandOrdering:
 
         output = capsys.readouterr().out
         assert "usage:" in output
-        assert "{status,update-skill,prep,config,list,export,confirm}" in output
+        assert "{status,update-skill,prep,config,list,export,confirm,jsonl-to-yaml,diff-jsonl}" in output
 
     def test_help_lists_commands_in_workflow_order(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.argv", ["dataclaw", "--help"])
@@ -313,4 +315,73 @@ class TestHelpAndCommandOrdering:
         list_idx = output.index("list")
         export_idx = output.index("export")
         confirm_idx = output.index("confirm")
-        assert status_idx < update_skill_idx < prep_idx < config_idx < list_idx < export_idx < confirm_idx
+        jsonl_idx = output.index("jsonl-to-yaml")
+        diff_idx = output.index("diff-jsonl")
+        assert (
+            status_idx
+            < update_skill_idx
+            < prep_idx
+            < config_idx
+            < list_idx
+            < export_idx
+            < confirm_idx
+            < jsonl_idx
+            < diff_idx
+        )
+
+
+class TestJsonlUtilityCommands:
+    def test_main_jsonl_to_yaml_dispatches(self, monkeypatch, capsys):
+        captured = {}
+
+        def fake_jsonl_to_yaml(input_path, output_path):
+            captured["input_path"] = input_path
+            captured["output_path"] = output_path
+            return Path("/tmp/rendered.yaml")
+
+        monkeypatch.setattr("dataclaw.cli.jsonl_to_yaml", fake_jsonl_to_yaml)
+        monkeypatch.setattr("sys.argv", ["dataclaw", "jsonl-to-yaml", "sample.jsonl", "-o", "sample.yaml"])
+
+        main()
+
+        assert captured == {
+            "input_path": Path("sample.jsonl"),
+            "output_path": Path("sample.yaml"),
+        }
+        assert f"Written to {Path('/tmp/rendered.yaml')}" in capsys.readouterr().out
+
+    def test_main_diff_jsonl_dispatches(self, monkeypatch, capsys):
+        captured = {}
+
+        def fake_diff_jsonl(old_path, new_path, output_path, include_records_for_modified):
+            captured["old_path"] = old_path
+            captured["new_path"] = new_path
+            captured["output_path"] = output_path
+            captured["include_records_for_modified"] = include_records_for_modified
+            return {"event_count": 2, "output_path": Path("/tmp/diff.yaml"), "summary": {}}
+
+        monkeypatch.setattr("dataclaw.cli.diff_jsonl", fake_diff_jsonl)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "dataclaw",
+                "diff-jsonl",
+                "--old",
+                "old.jsonl",
+                "--new",
+                "new.jsonl",
+                "-o",
+                "diff.yaml",
+                "--include-records-for-modified",
+            ],
+        )
+
+        main()
+
+        assert captured == {
+            "old_path": Path("old.jsonl"),
+            "new_path": Path("new.jsonl"),
+            "output_path": Path("diff.yaml"),
+            "include_records_for_modified": True,
+        }
+        assert f"Wrote 2 change documents to {Path('/tmp/diff.yaml')}" in capsys.readouterr().out
