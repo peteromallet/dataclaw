@@ -2,6 +2,7 @@
 
 import hashlib
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -18,6 +19,10 @@ def _token_totals(stats: object) -> tuple[int, int]:
     if not isinstance(stats, dict):
         return 0, 0
     return stats.get("input_tokens", 0), stats.get("output_tokens", 0)
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    return f"{seconds:.2f}s"
 
 
 def _normalize_model_stats_key(key: object) -> str | None:
@@ -155,6 +160,7 @@ def export_to_jsonl(
     with fh as f:
         for project in selected_projects:
             print(f"  Parsing {project['display_name']}...", end="", flush=True)
+            project_start_time = time.perf_counter()
             sessions = parse_project_sessions_fn(
                 project["dir_name"],
                 anonymizer=anonymizer,
@@ -162,6 +168,9 @@ def export_to_jsonl(
                 source=project.get("source", default_source),
             )
             proj_count = 0
+            project_input_tokens = 0
+            project_output_tokens = 0
+            project_has_token_stats = False
             for session in sessions:
                 source = session.get("source") or project.get("source", default_source)
                 model = session.get("model")
@@ -183,7 +192,12 @@ def export_to_jsonl(
                 f.write(b"\n")
                 total += 1
                 proj_count += 1
-                input_tokens, output_tokens = _token_totals(session.get("stats", {}))
+                stats = session.get("stats", {})
+                input_tokens, output_tokens = _token_totals(stats)
+                if isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats):
+                    project_has_token_stats = True
+                project_input_tokens += input_tokens
+                project_output_tokens += output_tokens
                 total_input_tokens += input_tokens
                 total_output_tokens += output_tokens
                 _add_breakdown_row(
@@ -198,7 +212,14 @@ def export_to_jsonl(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
-            print(f" {proj_count} sessions")
+            project_elapsed = time.perf_counter() - project_start_time
+            token_summary = ""
+            if project_has_token_stats:
+                token_summary = (
+                    f" ({_format_token_count(project_input_tokens)} input / "
+                    f"{_format_token_count(project_output_tokens)} output tokens)"
+                )
+            print(f" {proj_count} sessions in {_format_elapsed_seconds(project_elapsed)}{token_summary}")
 
     return {
         "sessions": total,

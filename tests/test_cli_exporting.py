@@ -153,6 +153,31 @@ class TestExportToJsonl:
         }
         assert meta["project_breakdown"] == {"test": {"sessions": 1, "input_tokens": 100, "output_tokens": 50}}
 
+    def test_prints_per_project_elapsed_and_tokens_when_available(self, tmp_path, mock_anonymizer, monkeypatch, capsys):
+        output = tmp_path / "out.jsonl"
+        perf_counter_values = iter([10.0, 11.25])
+        session_data = [
+            {
+                "session_id": "s1",
+                "model": "claude-sonnet-4-20250514",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {"input_tokens": 12, "output_tokens": 34},
+                "project": "test",
+            }
+        ]
+
+        monkeypatch.setattr("dataclaw._cli.exporting.time.perf_counter", lambda: next(perf_counter_values))
+
+        export_to_jsonl(
+            [{"dir_name": "test", "display_name": "test"}],
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: session_data,
+            default_source="claude",
+        )
+
+        assert "Parsing test... 1 sessions in 1.25s (12 input / 34 output tokens)" in capsys.readouterr().out
+
     def test_normalizes_stats_without_changing_dataset_rows(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
         session_data = [
