@@ -4,6 +4,7 @@ import json
 
 from dataclaw._cli.review import (
     _collect_review_attestations,
+    _scan_export_review,
     _scan_for_text_occurrences,
     _scan_high_entropy_strings,
     _scan_pii,
@@ -221,6 +222,41 @@ class TestScanPiiHighEntropy:
 
 
 class TestConfirmStreaming:
+    def test_scan_export_review_parallel_matches_serial(self, tmp_path, monkeypatch):
+        export_file = tmp_path / "export.jsonl"
+        export_file.write_text(
+            "".join(
+                [
+                    '{"project":"proj-a","model":"model-a","message":"Jane Doe","messages":[]}\n',
+                    '{"project":"proj-b","model":"model-b","message":"contact jane@example.com","messages":[]}\n',
+                    '{"project":"proj-a","model":"model-a","message":"token aB3dE6gH9jK2mN5pQ8rS1tU4wX7yZ0c","messages":[]}\n',
+                    '{"project":"proj-c","model":"model-c","message":"Jane Doe again","messages":[]}\n',
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, payloads, chunksize=1):
+                del chunksize
+                return [fn(payload) for payload in payloads]
+
+        monkeypatch.setattr("dataclaw._cli.review.ProcessPoolExecutor", FakeExecutor)
+
+        serial = _scan_export_review(export_file, full_name_query="Jane Doe", workers=1)
+        parallel = _scan_export_review(export_file, full_name_query="Jane Doe", workers=2)
+
+        assert parallel == serial
+
     def test_confirm_reviews_export_in_single_pass(self, tmp_path, monkeypatch, capsys):
         export_file = tmp_path / "export.jsonl"
         export_file.write_text(
@@ -228,6 +264,7 @@ class TestConfirmStreaming:
             '{"project":"proj-b","model":"model-b","message":"contact jane@example.com","messages":[]}\n',
             encoding="utf-8",
         )
+        perf_counter_values = iter([10.0, 11.5])
 
         open_calls = 0
         real_open = open
@@ -239,6 +276,7 @@ class TestConfirmStreaming:
             return real_open(file, *args, **kwargs)
 
         monkeypatch.setattr("builtins.open", counting_open)
+        monkeypatch.setattr("dataclaw._cli.review.time.perf_counter", lambda: next(perf_counter_values))
 
         saved_config = {}
         confirm(
@@ -255,6 +293,7 @@ class TestConfirmStreaming:
         )
 
         payload = json.loads(capsys.readouterr().out)
+        assert payload["elapsed"] == "1.50s"
         assert payload["total_sessions"] == 2
         assert payload["full_name_scan"]["match_count"] == 1
         assert payload["pii_scan"]["emails"] == ["jane@example.com"]

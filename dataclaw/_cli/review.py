@@ -1,7 +1,10 @@
 """Review, PII scan, and confirm helpers for the DataClaw CLI."""
 
+import os
 import re
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +31,8 @@ _PII_FALSE_POSITIVE_EMAIL_SUBSTRINGS = frozenset(
     {"noreply", "pytest.fixture", "mcp.tool", "mcp.resource", "server.tool", "tasks.loop", "github.com"}
 )
 _PII_FALSE_POSITIVE_API_KEYS = frozenset({"sk-notification"})
+_REVIEW_MIN_PARALLEL_BYTES = 16 * 1024 * 1024
+_REVIEW_MIN_CHUNK_BYTES = 8 * 1024 * 1024
 
 
 def _find_export_file(file_path: Path | None) -> Path:
@@ -162,8 +167,8 @@ def _scan_pii(file_path: Path) -> dict:
 
     try:
         with open(file_path) as f:
-            for line in f:
-                _update_pii_matches(line, matches_by_scan, high_entropy_matches)
+            for line_no, line in enumerate(f, start=1):
+                _update_pii_matches(line, matches_by_scan, high_entropy_matches, line_no=line_no)
     except OSError:
         return {}
 
@@ -174,13 +179,23 @@ def _update_pii_matches(
     line: str,
     matches_by_scan: dict[str, set[str]],
     high_entropy_matches: dict[str, dict],
+    *,
+    line_no: int | None = None,
 ) -> None:
     for name, pattern in _PII_SCANS.items():
         matches_by_scan[name].update(pattern.findall(line))
 
     for result in _scan_high_entropy_strings(line, max_results=50):
+        if line_no is not None:
+            result = {**result, "_line_no": line_no}
         existing = high_entropy_matches.get(result["match"])
-        if existing is None or result["entropy"] > existing["entropy"]:
+        existing_line = existing.get("_line_no", sys.maxsize) if isinstance(existing, dict) else sys.maxsize
+        result_line = result.get("_line_no", sys.maxsize)
+        if (
+            existing is None
+            or result["entropy"] > existing["entropy"]
+            or (result["entropy"] == existing["entropy"] and result_line < existing_line)
+        ):
             high_entropy_matches[result["match"]] = result
 
 
@@ -196,9 +211,14 @@ def _finalize_pii_results(matches_by_scan: dict[str, set[str]], high_entropy_mat
         if matches:
             results[name] = sorted(matches)[:20]
 
-    high_entropy = sorted(high_entropy_matches.values(), key=lambda result: result["entropy"], reverse=True)[:15]
+    high_entropy = sorted(
+        high_entropy_matches.values(),
+        key=lambda result: (-result["entropy"], result.get("_line_no", sys.maxsize)),
+    )[:15]
     if high_entropy:
-        results["high_entropy_strings"] = high_entropy
+        results["high_entropy_strings"] = [
+            {key: value for key, value in result.items() if key != "_line_no"} for result in high_entropy
+        ]
 
     return results
 
@@ -226,7 +246,166 @@ def _record_text_occurrence(
     return 1
 
 
-def _scan_export_review(file_path: Path, full_name_query: str | None = None, max_examples: int = 5) -> dict:
+def _resolve_review_workers(file_size: int, workers: int | None = None) -> int:
+    if workers is not None:
+        return max(1, workers)
+
+    if file_size < _REVIEW_MIN_PARALLEL_BYTES:
+        return 1
+
+    raw = os.environ.get("DATACLAW_CONFIRM_WORKERS")
+    if raw:
+        try:
+            workers = int(raw)
+        except ValueError:
+            workers = None
+
+    if workers is None:
+        workers = os.cpu_count() or 1
+
+    max_by_size = max(1, (file_size + _REVIEW_MIN_CHUNK_BYTES - 1) // _REVIEW_MIN_CHUNK_BYTES)
+    return max(1, min(workers, max_by_size))
+
+
+def _plan_review_chunks(file_path: Path, workers: int) -> list[tuple[int, int, int]]:
+    file_size = file_path.stat().st_size
+    if file_size <= 0 or workers <= 1:
+        return [(0, file_size, 1)]
+
+    target_bytes = max(file_size // workers, 1)
+    chunks: list[tuple[int, int, int]] = []
+    start_offset = 0
+    start_line = 1
+    offset = 0
+    line_no = 1
+    chunk_bytes = 0
+
+    with file_path.open("rb") as handle:
+        while block := handle.read(1024 * 1024):
+            for byte in block:
+                offset += 1
+                chunk_bytes += 1
+                if byte != 0x0A:
+                    continue
+                line_no += 1
+                if chunk_bytes >= target_bytes and len(chunks) < workers - 1:
+                    chunks.append((start_offset, offset, start_line))
+                    start_offset = offset
+                    start_line = line_no
+                    chunk_bytes = 0
+
+    if start_offset < offset or not chunks:
+        chunks.append((start_offset, offset, start_line))
+    return chunks
+
+
+def _scan_review_chunk(payload: tuple[str, int, int, int, str | None, int]) -> dict:
+    file_path_str, start_offset, end_offset, start_line, full_name_query, max_examples = payload
+    full_name_pattern = re.compile(re.escape(full_name_query), re.IGNORECASE) if full_name_query else None
+    matches_by_scan: dict[str, set[str]] = {name: set() for name in _PII_SCANS}
+    high_entropy_matches: dict[str, dict] = {}
+    full_name_matches = 0
+    full_name_examples: list[dict[str, object]] = []
+    projects: dict[str, int] = {}
+    models: dict[str, int] = {}
+    total = 0
+
+    with open(file_path_str, "rb") as handle:
+        handle.seek(start_offset)
+        line_no = start_line
+        while handle.tell() < end_offset:
+            raw_line = handle.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+            if full_name_pattern is not None:
+                full_name_matches += _record_text_occurrence(
+                    line_no,
+                    line,
+                    full_name_pattern,
+                    full_name_examples,
+                    max_examples=max_examples,
+                )
+
+            _update_pii_matches(line, matches_by_scan, high_entropy_matches, line_no=line_no)
+
+            stripped = line.strip()
+            if stripped:
+                row = json.loads(stripped)
+                total += 1
+                project = row.get("project", "<unknown>")
+                projects[project] = projects.get(project, 0) + 1
+                model = row.get("model", "<unknown>")
+                models[model] = models.get(model, 0) + 1
+
+            line_no += 1
+
+    return {
+        "total_sessions": total,
+        "projects": projects,
+        "models": models,
+        "matches_by_scan": matches_by_scan,
+        "high_entropy_matches": high_entropy_matches,
+        "full_name_matches": full_name_matches,
+        "full_name_examples": full_name_examples,
+    }
+
+
+def _merge_review_chunk_results(
+    results: list[dict],
+    full_name_query: str | None = None,
+    max_examples: int = 5,
+) -> dict:
+    matches_by_scan: dict[str, set[str]] = {name: set() for name in _PII_SCANS}
+    high_entropy_matches: dict[str, dict] = {}
+    full_name_matches = 0
+    full_name_examples: list[dict[str, object]] = []
+    projects: dict[str, int] = {}
+    models: dict[str, int] = {}
+    total = 0
+
+    for result in results:
+        total += result["total_sessions"]
+        full_name_matches += result["full_name_matches"]
+        full_name_examples.extend(result["full_name_examples"])
+
+        for name, matches in result["matches_by_scan"].items():
+            matches_by_scan[name].update(matches)
+
+        for token, candidate in result["high_entropy_matches"].items():
+            existing = high_entropy_matches.get(token)
+            existing_line = existing.get("_line_no", sys.maxsize) if isinstance(existing, dict) else sys.maxsize
+            candidate_line = candidate.get("_line_no", sys.maxsize)
+            if (
+                existing is None
+                or candidate["entropy"] > existing["entropy"]
+                or (candidate["entropy"] == existing["entropy"] and candidate_line < existing_line)
+            ):
+                high_entropy_matches[token] = candidate
+
+        for project, count in result["projects"].items():
+            projects[project] = projects.get(project, 0) + count
+        for model, count in result["models"].items():
+            models[model] = models.get(model, 0) + count
+
+    merged = {
+        "total_sessions": total,
+        "projects": projects,
+        "models": models,
+        "pii_scan": _finalize_pii_results(matches_by_scan, high_entropy_matches),
+    }
+    if full_name_query is not None:
+        full_name_examples.sort(key=lambda example: example["line"])
+        merged["full_name_scan"] = {
+            "query": full_name_query,
+            "match_count": full_name_matches,
+            "examples": full_name_examples[:max_examples],
+        }
+    return merged
+
+
+def _scan_export_review_serial(file_path: Path, full_name_query: str | None = None, max_examples: int = 5) -> dict:
     full_name_pattern = None
     if full_name_query:
         full_name_pattern = re.compile(re.escape(full_name_query), re.IGNORECASE)
@@ -250,7 +429,7 @@ def _scan_export_review(file_path: Path, full_name_query: str | None = None, max
                     max_examples=max_examples,
                 )
 
-            _update_pii_matches(line, matches_by_scan, high_entropy_matches)
+            _update_pii_matches(line, matches_by_scan, high_entropy_matches, line_no=line_no)
 
             line = line.strip()
             if not line:
@@ -276,6 +455,24 @@ def _scan_export_review(file_path: Path, full_name_query: str | None = None, max
             "examples": full_name_examples,
         }
     return result
+
+
+def _scan_export_review(
+    file_path: Path, full_name_query: str | None = None, max_examples: int = 5, workers: int | None = None
+) -> dict:
+    resolved_workers = _resolve_review_workers(file_path.stat().st_size, workers)
+    if resolved_workers <= 1:
+        return _scan_export_review_serial(file_path, full_name_query, max_examples)
+
+    chunks = _plan_review_chunks(file_path, resolved_workers)
+    payloads = [
+        (str(file_path), start_offset, end_offset, start_line, full_name_query, max_examples)
+        for start_offset, end_offset, start_line in chunks
+    ]
+
+    with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
+        results = list(executor.map(_scan_review_chunk, payloads, chunksize=1))
+    return _merge_review_chunk_results(results, full_name_query, max_examples)
 
 
 def _normalize_attestation_text(value: object) -> str:
@@ -397,6 +594,7 @@ def confirm(
     load_config_fn,
     save_config_fn,
 ) -> None:
+    start_time = time.perf_counter()
     config: DataClawConfig = load_config_fn()
     last_export = config.get("last_export", {})
     file_path = _find_export_file(file_path)
@@ -545,6 +743,7 @@ def confirm(
         "stage": "confirmed",
         "stage_number": 3,
         "total_stages": 4,
+        "elapsed": f"{time.perf_counter() - start_time:.2f}s",
         "file": str(file_path.resolve()),
         "file_size": _format_size(file_size),
         "total_sessions": total,
