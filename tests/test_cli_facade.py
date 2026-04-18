@@ -287,6 +287,53 @@ class TestWorkflowGateMessages:
         ]
         assert payload["next_command"] == "dataclaw config --source all"
 
+    def test_export_shows_total_time(self, tmp_path, monkeypatch, capsys):
+        output_file = tmp_path / "export.jsonl"
+        perf_counter_values = iter([10.0, 13.5])
+
+        monkeypatch.setattr(
+            "dataclaw.cli.load_config",
+            lambda: {"source": "claude", "projects_confirmed": True},
+        )
+        monkeypatch.setattr("dataclaw.cli.save_config", lambda _cfg: None)
+        monkeypatch.setattr("dataclaw.cli._has_session_sources", lambda _src: True)
+        monkeypatch.setattr(
+            "dataclaw.cli.discover_projects",
+            lambda: [
+                {
+                    "dir_name": "proj1",
+                    "display_name": "proj1",
+                    "session_count": 1,
+                    "total_size_bytes": 128,
+                    "source": "claude",
+                }
+            ],
+        )
+
+        def fake_export_to_jsonl(_projects, output_path, _anonymizer, _include_thinking, custom_strings=None):
+            assert custom_strings == []
+            output_path.write_text('{"project":"p","model":"m","messages":[]}\n')
+            return {
+                "sessions": 1,
+                "skipped": 0,
+                "redactions": 0,
+                "model_breakdown": {},
+                "exported_at": "2026-04-18T00:00:00+00:00",
+            }
+
+        monkeypatch.setattr("dataclaw.cli.export_to_jsonl", fake_export_to_jsonl)
+        monkeypatch.setattr("dataclaw._cli.commands.time.perf_counter", lambda: next(perf_counter_values))
+        monkeypatch.setattr(
+            "sys.argv",
+            ["dataclaw", "export", "--no-push", "--source", "claude", "--output", str(output_file)],
+        )
+
+        main()
+
+        output = capsys.readouterr().out
+        assert "Exported 1 sessions" in output
+        assert "Total time: 3.50s" in output
+
 
 class TestHelpAndCommandOrdering:
     def test_main_without_command_shows_help(self, monkeypatch, capsys):

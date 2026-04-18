@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import cast
 
@@ -42,6 +43,15 @@ from .review import (
     _print_pii_guidance,
     _validate_publish_attestation,
 )
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    return f"{seconds:.2f}s"
+
+
+def _print_export_elapsed(start_time: float) -> None:
+    elapsed = time.perf_counter() - start_time
+    print(f"Total time: {_format_elapsed_seconds(elapsed)}")
 
 
 def list_projects(source_filter: str, *, discover_projects_fn, load_config_fn) -> None:
@@ -368,6 +378,7 @@ def run_export(
     print("=" * 50)
     print("  DataClaw: Coding Agent Logs -> Hugging Face")
     print("=" * 50)
+    export_start_time = time.perf_counter()
 
     repo_id = args.repo or config.get("repo")
     if not repo_id and not args.no_push:
@@ -389,6 +400,7 @@ def run_export(
             print("Then re-run dataclaw and it will auto-detect your username.")
             print(f"Or set manually: dataclaw config --repo {default_repo_name('username')}")
             print(f"\nLocal file: {confirmed_file}")
+            _print_export_elapsed(export_start_time)
             return
 
         push_to_huggingface_fn(confirmed_file, repo_id, meta)
@@ -396,6 +408,7 @@ def run_export(
         config["stage"] = "done"
         save_config_fn(config)
 
+        _print_export_elapsed(export_start_time)
         print("\n---DATACLAW_JSON---")
         print(
             json.dumps(
@@ -539,6 +552,7 @@ def run_export(
         abs_path = str(output_path.resolve())
         next_steps, next_command = _build_status_next_steps("review", config, None, None)
         print(f"\nDone! JSONL file: {output_path}")
+        _print_export_elapsed(export_start_time)
         print("\n---DATACLAW_JSON---")
         print(
             json.dumps(
@@ -563,6 +577,7 @@ def run_export(
         print("Then re-run dataclaw and it will auto-detect your username.")
         print(f"Or set manually: dataclaw config --repo {default_repo_name('username')}")
         print(f"\nLocal file: {output_path}")
+        _print_export_elapsed(export_start_time)
         return
 
     push_to_huggingface_fn(output_path, repo_id, meta)
@@ -570,6 +585,7 @@ def run_export(
     config["stage"] = "done"
     save_config_fn(config)
 
+    _print_export_elapsed(export_start_time)
     print("\n---DATACLAW_JSON---")
     print(
         json.dumps(
