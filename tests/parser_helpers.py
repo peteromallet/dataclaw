@@ -23,6 +23,7 @@ def disable_other_providers(monkeypatch, tmp_path, keep=()):
     if "opencode" not in keep:
         monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
     monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
+    monkeypatch.setattr("dataclaw.parsers.opencode._SESSION_SIZE_MAP", {})
 
     if "openclaw" not in keep:
         monkeypatch.setattr("dataclaw.parsers.openclaw.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
@@ -37,6 +38,7 @@ def disable_other_providers(monkeypatch, tmp_path, keep=()):
     if "cursor" not in keep:
         monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", tmp_path / "no-cursor.vscdb")
     monkeypatch.setattr("dataclaw.parsers.cursor._PROJECT_INDEX", {})
+    monkeypatch.setattr("dataclaw.parsers.cursor._SESSION_SIZE_MAP", {})
 
 
 def write_opencode_db(db_path):

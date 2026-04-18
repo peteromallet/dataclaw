@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from types import ModuleType
 
 from .anonymizer import Anonymizer
+from .export_tasks import ExportSessionTask
 from .parsers import claude as _claude_mod
 from .parsers import codex as _codex_mod
 from .parsers import cursor as _cursor_mod
@@ -19,8 +22,28 @@ class Provider:
     source: str
     hf_metadata_tag: str
     source_path: Path
-    discover_projects: Callable[[], list[dict]]
-    parse_project_sessions: Callable[[str, Anonymizer, bool], Iterable[dict]]
+
+    def discover_projects(self) -> list[dict]:
+        raise NotImplementedError
+
+    def parse_project_sessions(
+        self,
+        project_dir_name: str,
+        anonymizer: Anonymizer,
+        include_thinking: bool,
+    ) -> Iterable[dict]:
+        raise NotImplementedError
+
+    def build_export_session_tasks(self, project_index: int, project: dict) -> list[ExportSessionTask]:
+        raise NotImplementedError
+
+    def parse_export_session_task(
+        self,
+        task: ExportSessionTask,
+        anonymizer: Anonymizer,
+        include_thinking: bool,
+    ) -> dict | None:
+        raise NotImplementedError
 
     def has_session_source(self) -> bool:
         return self.source_path.exists()
@@ -29,62 +52,82 @@ class Provider:
         return f"{self.source_path} was not found."
 
 
+@dataclass(frozen=True)
+class ModuleProvider(Provider):
+    module: ModuleType
+
+    @classmethod
+    def from_module(cls, module: ModuleType, *, hf_metadata_tag: str, source_path_attr: str) -> ModuleProvider:
+        return cls(
+            source=module.SOURCE,
+            hf_metadata_tag=hf_metadata_tag,
+            source_path=getattr(module, source_path_attr),
+            module=module,
+        )
+
+    def discover_projects(self) -> list[dict]:
+        return self.module.discover_projects()
+
+    def parse_project_sessions(
+        self,
+        project_dir_name: str,
+        anonymizer: Anonymizer,
+        include_thinking: bool,
+    ) -> Iterable[dict]:
+        return self.module.parse_project_sessions(project_dir_name, anonymizer, include_thinking)
+
+    def build_export_session_tasks(self, project_index: int, project: dict) -> list[ExportSessionTask]:
+        return self.module.build_export_session_tasks(project_index, project)
+
+    def parse_export_session_task(
+        self,
+        task: ExportSessionTask,
+        anonymizer: Anonymizer,
+        include_thinking: bool,
+    ) -> dict | None:
+        return self.module.parse_export_session_task(task, anonymizer, include_thinking)
+
+
 PROVIDERS: dict[str, Provider] = {
-    _claude_mod.SOURCE: Provider(
-        source=_claude_mod.SOURCE,
+    _claude_mod.SOURCE: ModuleProvider.from_module(
+        _claude_mod,
         hf_metadata_tag="claude-code",
-        source_path=_claude_mod.CLAUDE_DIR,
-        discover_projects=_claude_mod.discover_projects,
-        parse_project_sessions=_claude_mod.parse_project_sessions,
+        source_path_attr="CLAUDE_DIR",
     ),
-    _codex_mod.SOURCE: Provider(
-        source=_codex_mod.SOURCE,
+    _codex_mod.SOURCE: ModuleProvider.from_module(
+        _codex_mod,
         hf_metadata_tag="codex-cli",
-        source_path=_codex_mod.CODEX_DIR,
-        discover_projects=_codex_mod.discover_projects,
-        parse_project_sessions=_codex_mod.parse_project_sessions,
+        source_path_attr="CODEX_DIR",
     ),
-    _cursor_mod.SOURCE: Provider(
-        source=_cursor_mod.SOURCE,
+    _cursor_mod.SOURCE: ModuleProvider.from_module(
+        _cursor_mod,
         hf_metadata_tag="cursor",
-        source_path=_cursor_mod.CURSOR_DB,
-        discover_projects=_cursor_mod.discover_projects,
-        parse_project_sessions=_cursor_mod.parse_project_sessions,
+        source_path_attr="CURSOR_DB",
     ),
-    _custom_mod.SOURCE: Provider(
-        source=_custom_mod.SOURCE,
+    _custom_mod.SOURCE: ModuleProvider.from_module(
+        _custom_mod,
         hf_metadata_tag="custom",
-        source_path=_custom_mod.CUSTOM_DIR,
-        discover_projects=_custom_mod.discover_projects,
-        parse_project_sessions=_custom_mod.parse_project_sessions,
+        source_path_attr="CUSTOM_DIR",
     ),
-    _gemini_mod.SOURCE: Provider(
-        source=_gemini_mod.SOURCE,
+    _gemini_mod.SOURCE: ModuleProvider.from_module(
+        _gemini_mod,
         hf_metadata_tag="gemini-cli",
-        source_path=_gemini_mod.GEMINI_DIR,
-        discover_projects=_gemini_mod.discover_projects,
-        parse_project_sessions=_gemini_mod.parse_project_sessions,
+        source_path_attr="GEMINI_DIR",
     ),
-    _kimi_mod.SOURCE: Provider(
-        source=_kimi_mod.SOURCE,
+    _kimi_mod.SOURCE: ModuleProvider.from_module(
+        _kimi_mod,
         hf_metadata_tag="kimi-cli",
-        source_path=_kimi_mod.KIMI_DIR,
-        discover_projects=_kimi_mod.discover_projects,
-        parse_project_sessions=_kimi_mod.parse_project_sessions,
+        source_path_attr="KIMI_DIR",
     ),
-    _opencode_mod.SOURCE: Provider(
-        source=_opencode_mod.SOURCE,
+    _opencode_mod.SOURCE: ModuleProvider.from_module(
+        _opencode_mod,
         hf_metadata_tag="opencode",
-        source_path=_opencode_mod.OPENCODE_DIR,
-        discover_projects=_opencode_mod.discover_projects,
-        parse_project_sessions=_opencode_mod.parse_project_sessions,
+        source_path_attr="OPENCODE_DIR",
     ),
-    _openclaw_mod.SOURCE: Provider(
-        source=_openclaw_mod.SOURCE,
+    _openclaw_mod.SOURCE: ModuleProvider.from_module(
+        _openclaw_mod,
         hf_metadata_tag="openclaw",
-        source_path=_openclaw_mod.OPENCLAW_DIR,
-        discover_projects=_openclaw_mod.discover_projects,
-        parse_project_sessions=_openclaw_mod.parse_project_sessions,
+        source_path_attr="OPENCLAW_DIR",
     ),
 }
 

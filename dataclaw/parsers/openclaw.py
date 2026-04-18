@@ -5,6 +5,7 @@ from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from .common import (
     build_prefixed_project_name,
     build_projects_from_index,
@@ -67,6 +68,34 @@ def parse_project_sessions(
         build_project_name(project_dir_name),
         SOURCE,
     )
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    tasks: list[ExportSessionTask] = []
+    for task_index, session_file in enumerate(get_project_index().get(project["dir_name"], [])):
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=session_file.stat().st_size if session_file.exists() else 0,
+                kind="openclaw",
+                file_path=str(session_file),
+            )
+        )
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    if not task.file_path:
+        return None
+    return parse_session_file(Path(task.file_path), anonymizer, include_thinking)
 
 
 def build_project_index(agents_dir: Path) -> dict[str, list[Path]]:

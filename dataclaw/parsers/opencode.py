@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from .common import (
     build_prefixed_project_name,
     build_projects_from_index,
@@ -27,6 +28,7 @@ OPENCODE_DB_PATH = OPENCODE_DIR / "opencode.db"
 UNKNOWN_OPENCODE_CWD = "<unknown-cwd>"
 
 _PROJECT_INDEX: dict[str, list[str]] = {}
+_SESSION_SIZE_MAP: dict[str, int] = {}
 
 
 def get_project_index(refresh: bool = False) -> dict[str, list[str]]:
@@ -93,6 +95,63 @@ def parse_project_sessions(
             return
 
     return iter_sessions()
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    size_map = build_session_size_map()
+    tasks: list[ExportSessionTask] = []
+    for task_index, session_id in enumerate(get_project_index().get(project["dir_name"], [])):
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=size_map.get(session_id, 0),
+                kind="opencode",
+                item_id=session_id,
+            )
+        )
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    if not task.item_id:
+        return None
+    return parse_session(task.item_id, OPENCODE_DB_PATH, anonymizer, include_thinking, task.project_dir_name)
+
+
+def build_session_size_map() -> dict[str, int]:
+    global _SESSION_SIZE_MAP
+    if _SESSION_SIZE_MAP:
+        return _SESSION_SIZE_MAP
+    if not OPENCODE_DB_PATH.exists():
+        return {}
+
+    query = """
+        WITH message_sizes AS (
+          SELECT session_id, SUM(LENGTH(data)) AS total FROM message GROUP BY session_id
+        ),
+        part_sizes AS (
+          SELECT session_id, SUM(LENGTH(data)) AS total FROM part GROUP BY session_id
+        )
+        SELECT s.id, COALESCE(ms.total, 0) + COALESCE(ps.total, 0)
+        FROM session s
+        LEFT JOIN message_sizes ms ON ms.session_id = s.id
+        LEFT JOIN part_sizes ps ON ps.session_id = s.id
+    """
+
+    try:
+        with sqlite3.connect(OPENCODE_DB_PATH) as conn:
+            _SESSION_SIZE_MAP = {session_id: int(total or 0) for session_id, total in conn.execute(query)}
+            return _SESSION_SIZE_MAP
+    except sqlite3.Error:
+        return {}
 
 
 def build_project_index(db_path: Path) -> dict[str, list[str]]:

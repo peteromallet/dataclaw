@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from ..secrets import should_skip_large_binary_string
 from .common import (
     anonymize_value,
@@ -169,6 +170,38 @@ def parse_project_sessions(
         build_project_name(project_dir_name),
         SOURCE,
     )
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    project_path = GEMINI_DIR / project["dir_name"] / "chats"
+    if not project_path.exists():
+        return []
+
+    tasks: list[ExportSessionTask] = []
+    for task_index, session_file in enumerate(sorted(project_path.glob("session-*.json"))):
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=session_file.stat().st_size if session_file.exists() else 0,
+                kind="gemini",
+                file_path=str(session_file),
+            )
+        )
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    if not task.file_path:
+        return None
+    return parse_session_file(Path(task.file_path), anonymizer, include_thinking)
 
 
 def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:

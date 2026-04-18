@@ -1,17 +1,22 @@
 """Export and publish helpers for the DataClaw CLI."""
 
 import hashlib
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
+from ..parser import iter_project_sessions
 from ..secrets import redact_session
+from ..session_tasks import ExportSessionTask, build_export_session_tasks, parse_export_session_task
 from .common import HF_TAG, REPO_URL, SKILL_URL, _format_token_count, _provider_dataset_tags
 
 
@@ -133,14 +138,122 @@ def _gemini_dedupe_fingerprint(session: dict, source: str) -> str | None:
     return hasher.hexdigest()
 
 
-def export_to_jsonl(
+@dataclass(frozen=True, slots=True)
+class _WorkerSessionResult:
+    project_index: int
+    model: str | None = None
+    row_bytes: bytes | None = None
+    fingerprint: str | None = None
+    redactions: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    has_token_stats: bool = False
+    skipped_model: bool = False
+
+
+def _export_extra_usernames(anonymizer: Anonymizer) -> tuple[str, ...]:
+    extra = getattr(anonymizer, "_extra_dict", {})
+    if isinstance(extra, dict):
+        return tuple(sorted(extra.keys()))
+    return ()
+
+
+def _resolve_export_workers(task_count: int, workers: int | None = None) -> int:
+    if task_count < 2:
+        return 1
+
+    raw = os.environ.get("DATACLAW_EXPORT_WORKERS")
+    if workers is None and raw:
+        try:
+            workers = int(raw)
+        except ValueError:
+            workers = None
+
+    if workers is None:
+        workers = os.cpu_count() or 1
+
+    return max(1, min(workers, task_count))
+
+
+def _can_parallelize_export(parse_project_sessions_fn, task_count: int, workers: int) -> bool:
+    return parse_project_sessions_fn is iter_project_sessions and task_count > 1 and workers > 1
+
+
+def _export_session_task_worker(payload) -> _WorkerSessionResult:
+    task, include_thinking, custom_strings, extra_usernames = payload
+    anonymizer = Anonymizer(extra_usernames=list(extra_usernames))
+    try:
+        session = parse_export_session_task(task, anonymizer, include_thinking)
+    except OSError:
+        return _WorkerSessionResult(project_index=task.project_index)
+
+    if not session or not session.get("messages"):
+        return _WorkerSessionResult(project_index=task.project_index)
+
+    session["project"] = task.project_display_name
+    session["source"] = task.source
+    if task.default_model and not session.get("model"):
+        session["model"] = task.default_model
+
+    model = session.get("model")
+    if not model or model == "<synthetic>":
+        return _WorkerSessionResult(project_index=task.project_index, skipped_model=True)
+
+    fingerprint = _gemini_dedupe_fingerprint(session, task.source)
+    session, n_redacted = redact_session(session, custom_strings=custom_strings)
+    stats = session.get("stats", {})
+    input_tokens, output_tokens = _token_totals(stats)
+    has_token_stats = isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats)
+    return _WorkerSessionResult(
+        project_index=task.project_index,
+        model=model,
+        row_bytes=json.dumps_bytes(session),
+        fingerprint=fingerprint,
+        redactions=n_redacted,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        has_token_stats=has_token_stats,
+    )
+
+
+def _build_project_state(selected_projects: list[dict]) -> list[dict[str, Any]]:
+    start_time = time.perf_counter()
+    return [
+        {
+            "display_name": project["display_name"],
+            "start_time": start_time,
+            "remaining": 0,
+            "sessions": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "has_token_stats": False,
+            "printed": False,
+        }
+        for project in selected_projects
+    ]
+
+
+def _print_project_summary(state: dict[str, Any]) -> None:
+    elapsed = time.perf_counter() - state["start_time"]
+    token_summary = ""
+    if state["has_token_stats"]:
+        token_summary = (
+            f" ({_format_token_count(state['input_tokens'])} input / "
+            f"{_format_token_count(state['output_tokens'])} output tokens)"
+        )
+    print(
+        f"  Parsing {state['display_name']}... {state['sessions']} sessions in {_format_elapsed_seconds(elapsed)}{token_summary}"
+    )
+
+
+def _export_to_jsonl_serial(
     selected_projects: list[dict],
-    output_path: Path,
+    fh,
     anonymizer: Anonymizer,
     parse_project_sessions_fn,
     default_source: str,
-    include_thinking: bool = True,
-    custom_strings: list[str] | None = None,
+    include_thinking: bool,
+    custom_strings: list[str] | None,
 ) -> dict:
     total = 0
     skipped = 0
@@ -151,75 +264,68 @@ def export_to_jsonl(
     total_output_tokens = 0
     seen_fingerprints: set[str] = set()
 
-    try:
-        fh = open(output_path, "wb")
-    except OSError as e:
-        print(f"Error: cannot write to {output_path}: {e}", file=sys.stderr)
-        sys.exit(1)
+    for project in selected_projects:
+        print(f"  Parsing {project['display_name']}...", end="", flush=True)
+        project_start_time = time.perf_counter()
+        sessions = parse_project_sessions_fn(
+            project["dir_name"],
+            anonymizer=anonymizer,
+            include_thinking=include_thinking,
+            source=project.get("source", default_source),
+        )
+        proj_count = 0
+        project_input_tokens = 0
+        project_output_tokens = 0
+        project_has_token_stats = False
+        for session in sessions:
+            source = session.get("source") or project.get("source", default_source)
+            model = session.get("model")
+            if not model or model == "<synthetic>":
+                skipped += 1
+                continue
 
-    with fh as f:
-        for project in selected_projects:
-            print(f"  Parsing {project['display_name']}...", end="", flush=True)
-            project_start_time = time.perf_counter()
-            sessions = parse_project_sessions_fn(
-                project["dir_name"],
-                anonymizer=anonymizer,
-                include_thinking=include_thinking,
-                source=project.get("source", default_source),
+            fingerprint = _gemini_dedupe_fingerprint(session, source)
+            if fingerprint is not None and fingerprint in seen_fingerprints:
+                continue
+
+            session, n_redacted = redact_session(session, custom_strings=custom_strings)
+            total_redactions += n_redacted
+
+            if fingerprint is not None:
+                seen_fingerprints.add(fingerprint)
+
+            fh.write(json.dumps_bytes(session))
+            fh.write(b"\n")
+            total += 1
+            proj_count += 1
+            stats = session.get("stats", {})
+            input_tokens, output_tokens = _token_totals(stats)
+            if isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats):
+                project_has_token_stats = True
+            project_input_tokens += input_tokens
+            project_output_tokens += output_tokens
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            _add_breakdown_row(
+                model_breakdown,
+                _normalize_model_stats_key(model),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
-            proj_count = 0
-            project_input_tokens = 0
-            project_output_tokens = 0
-            project_has_token_stats = False
-            for session in sessions:
-                source = session.get("source") or project.get("source", default_source)
-                model = session.get("model")
-                if not model or model == "<synthetic>":
-                    skipped += 1
-                    continue
-
-                fingerprint = _gemini_dedupe_fingerprint(session, source)
-                if fingerprint is not None and fingerprint in seen_fingerprints:
-                    continue
-
-                session, n_redacted = redact_session(session, custom_strings=custom_strings)
-                total_redactions += n_redacted
-
-                if fingerprint is not None:
-                    seen_fingerprints.add(fingerprint)
-
-                f.write(json.dumps_bytes(session))
-                f.write(b"\n")
-                total += 1
-                proj_count += 1
-                stats = session.get("stats", {})
-                input_tokens, output_tokens = _token_totals(stats)
-                if isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats):
-                    project_has_token_stats = True
-                project_input_tokens += input_tokens
-                project_output_tokens += output_tokens
-                total_input_tokens += input_tokens
-                total_output_tokens += output_tokens
-                _add_breakdown_row(
-                    model_breakdown,
-                    _normalize_model_stats_key(model),
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                )
-                _add_breakdown_row(
-                    project_breakdown,
-                    _normalize_project_stats_key(session.get("project") or project["display_name"]),
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                )
-            project_elapsed = time.perf_counter() - project_start_time
-            token_summary = ""
-            if project_has_token_stats:
-                token_summary = (
-                    f" ({_format_token_count(project_input_tokens)} input / "
-                    f"{_format_token_count(project_output_tokens)} output tokens)"
-                )
-            print(f" {proj_count} sessions in {_format_elapsed_seconds(project_elapsed)}{token_summary}")
+            _add_breakdown_row(
+                project_breakdown,
+                _normalize_project_stats_key(session.get("project") or project["display_name"]),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        project_elapsed = time.perf_counter() - project_start_time
+        token_summary = ""
+        if project_has_token_stats:
+            token_summary = (
+                f" ({_format_token_count(project_input_tokens)} input / "
+                f"{_format_token_count(project_output_tokens)} output tokens)"
+            )
+        print(f" {proj_count} sessions in {_format_elapsed_seconds(project_elapsed)}{token_summary}")
 
     return {
         "sessions": total,
@@ -231,6 +337,125 @@ def export_to_jsonl(
         "total_output_tokens": total_output_tokens,
         "exported_at": datetime.now(tz=timezone.utc).isoformat(),
     }
+
+
+def _export_to_jsonl_parallel(
+    selected_projects: list[dict],
+    fh,
+    include_thinking: bool,
+    custom_strings: list[str] | None,
+    tasks: list[ExportSessionTask],
+    workers: int,
+    anonymizer: Anonymizer,
+) -> dict:
+    total = 0
+    skipped = 0
+    total_redactions = 0
+    model_breakdown: dict[str, dict[str, int]] = {}
+    project_breakdown: dict[str, dict[str, int]] = {}
+    total_input_tokens = 0
+    total_output_tokens = 0
+    seen_fingerprints: set[str] = set()
+    project_state = _build_project_state(selected_projects)
+
+    for task in tasks:
+        project_state[task.project_index]["remaining"] += 1
+
+    ordered_tasks = sorted(tasks, key=lambda task: (-task.estimated_bytes, task.project_index, task.task_index))
+    extra_usernames = _export_extra_usernames(anonymizer)
+    payloads = [(task, include_thinking, custom_strings, extra_usernames) for task in ordered_tasks]
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        for result in executor.map(_export_session_task_worker, payloads, chunksize=1):
+            state = project_state[result.project_index]
+            state["remaining"] -= 1
+
+            if result.skipped_model:
+                skipped += 1
+            elif result.row_bytes is not None:
+                if result.fingerprint is not None and result.fingerprint in seen_fingerprints:
+                    pass
+                else:
+                    if result.fingerprint is not None:
+                        seen_fingerprints.add(result.fingerprint)
+                    fh.write(result.row_bytes)
+                    fh.write(b"\n")
+                    total += 1
+                    total_redactions += result.redactions
+                    state["sessions"] += 1
+                    state["input_tokens"] += result.input_tokens
+                    state["output_tokens"] += result.output_tokens
+                    state["has_token_stats"] = state["has_token_stats"] or result.has_token_stats
+                    total_input_tokens += result.input_tokens
+                    total_output_tokens += result.output_tokens
+                    _add_breakdown_row(
+                        model_breakdown,
+                        _normalize_model_stats_key(result.model),
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                    )
+                    _add_breakdown_row(
+                        project_breakdown,
+                        _normalize_project_stats_key(state["display_name"]),
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                    )
+
+            if state["remaining"] == 0 and not state["printed"]:
+                state["printed"] = True
+                _print_project_summary(state)
+
+    return {
+        "sessions": total,
+        "skipped": skipped,
+        "redactions": total_redactions,
+        "model_breakdown": model_breakdown,
+        "project_breakdown": project_breakdown,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "exported_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+def export_to_jsonl(
+    selected_projects: list[dict],
+    output_path: Path,
+    anonymizer: Anonymizer,
+    parse_project_sessions_fn,
+    default_source: str,
+    include_thinking: bool = True,
+    custom_strings: list[str] | None = None,
+    workers: int | None = None,
+) -> dict:
+    try:
+        fh = open(output_path, "wb")
+    except OSError as e:
+        print(f"Error: cannot write to {output_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    with fh as f:
+        if parse_project_sessions_fn is iter_project_sessions:
+            tasks = build_export_session_tasks(selected_projects, default_source)
+            resolved_workers = _resolve_export_workers(len(tasks), workers)
+            if _can_parallelize_export(parse_project_sessions_fn, len(tasks), resolved_workers):
+                return _export_to_jsonl_parallel(
+                    selected_projects,
+                    f,
+                    include_thinking,
+                    custom_strings,
+                    tasks,
+                    resolved_workers,
+                    anonymizer,
+                )
+        return _export_to_jsonl_serial(
+            selected_projects,
+            f,
+            anonymizer,
+            parse_project_sessions_fn,
+            default_source,
+            include_thinking,
+            custom_strings,
+        )
 
 
 def summarize_export_jsonl(jsonl_path: Path) -> dict:

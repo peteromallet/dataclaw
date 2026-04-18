@@ -6,6 +6,7 @@ from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from ..secrets import redact_text
 from .common import (
     build_prefixed_project_name,
@@ -32,6 +33,7 @@ else:
 UNKNOWN_CURSOR_CWD = "<unknown-cwd>"
 
 _PROJECT_INDEX: dict[str, list[str]] = {}
+_SESSION_SIZE_MAP: dict[str, int] = {}
 
 
 def _try_parse_json(s: Any) -> Any:
@@ -176,6 +178,71 @@ def parse_project_sessions(
             )
     except sqlite3.Error:
         return
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    size_map = build_session_size_map()
+    tasks: list[ExportSessionTask] = []
+    for task_index, composer_id in enumerate(get_project_index().get(project["dir_name"], [])):
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=size_map.get(composer_id, 0),
+                kind="cursor",
+                item_id=composer_id,
+            )
+        )
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    if not task.item_id or not CURSOR_DB.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
+            return parse_session(task.item_id, conn, anonymizer, include_thinking)
+    except sqlite3.Error:
+        return None
+
+
+def build_session_size_map() -> dict[str, int]:
+    global _SESSION_SIZE_MAP
+    if _SESSION_SIZE_MAP:
+        return _SESSION_SIZE_MAP
+    if not CURSOR_DB.exists():
+        return {}
+
+    sizes: dict[str, int] = {}
+    try:
+        with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT key, LENGTH(value) FROM cursorDiskKV WHERE key LIKE 'composerData:%' OR key LIKE 'bubbleId:%'"
+            )
+            for key, value_len in rows:
+                if not isinstance(key, str):
+                    continue
+                if key.startswith("composerData:"):
+                    composer_id = key.split(":", 1)[1]
+                elif key.startswith("bubbleId:"):
+                    parts = key.split(":", 2)
+                    composer_id = parts[1] if len(parts) >= 3 else ""
+                else:
+                    continue
+                if composer_id:
+                    sizes[composer_id] = sizes.get(composer_id, 0) + int(value_len or 0)
+    except sqlite3.Error:
+        return {}
+
+    _SESSION_SIZE_MAP = sizes
+    return _SESSION_SIZE_MAP
 
 
 def parse_session(

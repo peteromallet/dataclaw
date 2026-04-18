@@ -6,6 +6,7 @@ from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from .common import (
     build_prefixed_project_name,
     collect_project_sessions,
@@ -132,6 +133,47 @@ def parse_project_sessions(
         SOURCE,
         default_model="kimi-k2",
     )
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    project_hash = get_project_hash(project["dir_name"])
+    project_path = KIMI_SESSIONS_DIR / project_hash
+    if not project_path.exists():
+        return []
+
+    tasks: list[ExportSessionTask] = []
+    task_index = 0
+    for session_dir in sorted(project_path.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        context_file = session_dir / "context.jsonl"
+        if not context_file.exists():
+            continue
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=context_file.stat().st_size,
+                kind="kimi",
+                file_path=str(context_file),
+                default_model="kimi-k2",
+            )
+        )
+        task_index += 1
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    if not task.file_path:
+        return None
+    return parse_session_file(Path(task.file_path), anonymizer, include_thinking)
 
 
 def parse_session_file(

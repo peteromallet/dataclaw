@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from ..secrets import redact_text
 
 logger = logging.getLogger(__name__)
@@ -60,50 +61,62 @@ def parse_project_sessions(
     if not project_path.exists():
         return
 
-    required_fields = {"session_id", "model", "messages"}
     for jsonl_file in sorted(project_path.glob("*.jsonl")):
         try:
-            for line_num, line in enumerate(jsonl_file.open(), 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    session = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "custom:%s: %s line %d: invalid JSON, skipping",
-                        project_dir_name,
-                        jsonl_file.name,
-                        line_num,
-                    )
-                    continue
-                if not isinstance(session, dict):
-                    logger.warning(
-                        "custom:%s: %s line %d: not a JSON object, skipping",
-                        project_dir_name,
-                        jsonl_file.name,
-                        line_num,
-                    )
-                    continue
-                missing = required_fields - session.keys()
-                if missing:
-                    logger.warning(
-                        "custom:%s: %s line %d: missing required fields %s, skipping",
-                        project_dir_name,
-                        jsonl_file.name,
-                        line_num,
-                        sorted(missing),
-                    )
-                    continue
-                session["project"] = f"custom:{project_dir_name}"
-                session["source"] = SOURCE
-                for msg in session.get("messages", []):
-                    if "content" in msg and isinstance(msg["content"], str):
-                        redacted, _ = redact_text(msg["content"])
-                        msg["content"] = anonymizer.text(redacted)
-                yield session
+            for line in jsonl_file.open():
+                session = parse_session_bytes(project_dir_name, line, anonymizer)
+                if session is not None:
+                    yield session
         except OSError:
             logger.warning("custom:%s: failed to read %s", project_dir_name, jsonl_file.name)
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    project_path = CUSTOM_DIR / project["dir_name"]
+    if not project_path.exists():
+        return []
+
+    tasks: list[ExportSessionTask] = []
+    task_index = 0
+    for jsonl_file in sorted(project_path.glob("*.jsonl")):
+        with open(jsonl_file, "rb") as fh:
+            while True:
+                offset = fh.tell()
+                line = fh.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                tasks.append(
+                    ExportSessionTask(
+                        source=SOURCE,
+                        project_index=project_index,
+                        task_index=task_index,
+                        project_dir_name=project["dir_name"],
+                        project_display_name=project["display_name"],
+                        estimated_bytes=len(line),
+                        kind="custom-line",
+                        file_path=str(jsonl_file),
+                        offset=offset,
+                        length=len(line),
+                    )
+                )
+                task_index += 1
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    del include_thinking
+    if not task.file_path or task.length <= 0:
+        return None
+    with open(task.file_path, "rb") as fh:
+        fh.seek(task.offset)
+        line = fh.read(task.length)
+    return parse_session_bytes(task.project_dir_name, line, anonymizer)
 
 
 def parse_sessions(project_dir_name: str, custom_dir: Path, anonymizer: Anonymizer) -> list[dict]:
@@ -115,3 +128,34 @@ def parse_sessions(project_dir_name: str, custom_dir: Path, anonymizer: Anonymiz
             custom_dir=custom_dir,
         )
     )
+
+
+def parse_session_bytes(project_dir_name: str, raw_line: bytes | str, anonymizer: Anonymizer) -> dict | None:
+    required_fields = {"session_id", "model", "messages"}
+
+    if isinstance(raw_line, bytes):
+        raw_line = raw_line.decode("utf-8", errors="replace")
+
+    line = raw_line.strip()
+    if not line:
+        return None
+
+    try:
+        session = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(session, dict):
+        return None
+
+    missing = required_fields - session.keys()
+    if missing:
+        return None
+
+    session["project"] = f"custom:{project_dir_name}"
+    session["source"] = SOURCE
+    for msg in session.get("messages", []):
+        if "content" in msg and isinstance(msg["content"], str):
+            redacted, _ = redact_text(msg["content"])
+            msg["content"] = anonymizer.text(redacted)
+    return session

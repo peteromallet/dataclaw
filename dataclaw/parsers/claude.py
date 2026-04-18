@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..anonymizer import Anonymizer
+from ..export_tasks import ExportSessionTask
 from ..secrets import should_skip_large_binary_string
 from .common import (
     anonymize_value,
@@ -94,6 +95,60 @@ def parse_project_sessions(
         project_name,
         SOURCE,
     )
+
+
+def build_export_session_tasks(project_index: int, project: dict) -> list[ExportSessionTask]:
+    project_path = PROJECTS_DIR / project["dir_name"]
+    if not project_path.exists():
+        return []
+
+    tasks: list[ExportSessionTask] = []
+    task_index = 0
+    for session_file in sorted(project_path.glob("*.jsonl")):
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=session_file.stat().st_size,
+                kind="claude-root",
+                file_path=str(session_file),
+            )
+        )
+        task_index += 1
+
+    for session_dir in find_subagent_sessions(project_path):
+        subagent_dir = session_dir / "subagents"
+        estimated_bytes = sum(path.stat().st_size for path in subagent_dir.glob("agent-*.jsonl") if path.exists())
+        tasks.append(
+            ExportSessionTask(
+                source=SOURCE,
+                project_index=project_index,
+                task_index=task_index,
+                project_dir_name=project["dir_name"],
+                project_display_name=project["display_name"],
+                estimated_bytes=estimated_bytes,
+                kind="claude-subagent",
+                file_path=str(session_dir),
+            )
+        )
+        task_index += 1
+
+    return tasks
+
+
+def parse_export_session_task(
+    task: ExportSessionTask,
+    anonymizer: Anonymizer,
+    include_thinking: bool,
+) -> dict | None:
+    if task.kind == "claude-root" and task.file_path:
+        return parse_session_file(Path(task.file_path), anonymizer, include_thinking)
+    if task.kind == "claude-subagent" and task.file_path:
+        return parse_subagent_session(Path(task.file_path), anonymizer, include_thinking)
+    return None
 
 
 def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
