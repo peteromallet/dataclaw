@@ -55,7 +55,8 @@ def extract_project_path_from_sessions(project_hash: str, gemini_dir: Path) -> s
 
     for session_file in sorted(chats_dir.glob("session-*.json"), reverse=True):
         try:
-            data = json.loads(session_file.read_text())
+            with open(session_file, "rb") as f:
+                data = json.load(f)
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse JSON in %s: %s", session_file, e)
             continue
@@ -437,7 +438,7 @@ def parse_session_file(
     include_thinking: bool = True,
 ) -> dict | None:
     try:
-        with open(filepath) as f:
+        with open(filepath, "rb") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         logger.warning("Failed to parse JSON in %s: %s", filepath, e)

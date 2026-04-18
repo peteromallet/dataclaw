@@ -177,6 +177,11 @@ class TestScanHighEntropyStrings:
         results = _scan_high_entropy_strings(content)
         assert not any("node_modules" in result["match"] for result in results)
 
+    def test_filters_very_large_base64_like_blob(self):
+        blob = "AbC123+/" * 700
+        results = _scan_high_entropy_strings(f"payload={blob}")
+        assert not any(result["match"] == blob for result in results)
+
 
 class TestScanPiiHighEntropy:
     def test_includes_high_entropy_when_present(self, tmp_path):

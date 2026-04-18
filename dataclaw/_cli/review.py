@@ -115,6 +115,8 @@ def _scan_high_entropy_strings(content: str, max_results: int = 15) -> list[dict
 
     results = []
     for token, positions in unique_candidates.items():
+        if len(token) > 512:
+            continue
         if any(token.startswith(prefix) for prefix in known_prefixes):
             continue
         if hex_re.match(token) or uuid_re.match(token):
@@ -145,22 +147,31 @@ def _scan_high_entropy_strings(content: str, max_results: int = 15) -> list[dict
 
 def _scan_pii(file_path: Path) -> dict:
     scans = {
-        "emails": r"[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}",
-        "jwt_tokens": r"eyJ[A-Za-z0-9_-]{20,}",
-        "api_keys": r"(ghp_|sk-|hf_)[A-Za-z0-9_-]{10,}",
-        "ip_addresses": r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
+        "emails": re.compile(r"[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}"),
+        "jwt_tokens": re.compile(r"eyJ[A-Za-z0-9_-]{20,}"),
+        "api_keys": re.compile(r"(ghp_|sk-|hf_)[A-Za-z0-9_-]{10,}"),
+        "ip_addresses": re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"),
     }
     fp_emails = {"noreply", "pytest.fixture", "mcp.tool", "mcp.resource", "server.tool", "tasks.loop", "github.com"}
     fp_keys = {"sk-notification"}
+    matches_by_scan: dict[str, set[str]] = {name: set() for name in scans}
+    high_entropy_matches: dict[str, dict] = {}
 
     try:
-        content = file_path.read_text(errors="replace")
+        with open(file_path) as f:
+            for line in f:
+                for name, pattern in scans.items():
+                    matches_by_scan[name].update(pattern.findall(line))
+
+                for result in _scan_high_entropy_strings(line, max_results=50):
+                    existing = high_entropy_matches.get(result["match"])
+                    if existing is None or result["entropy"] > existing["entropy"]:
+                        high_entropy_matches[result["match"]] = result
     except OSError:
         return {}
 
     results = {}
-    for name, pattern in scans.items():
-        matches = set(re.findall(pattern, content))
+    for name, matches in matches_by_scan.items():
         if name == "emails":
             matches = {match for match in matches if not any(fp in match for fp in fp_emails)}
         if name == "api_keys":
@@ -168,7 +179,7 @@ def _scan_pii(file_path: Path) -> dict:
         if matches:
             results[name] = sorted(matches)[:20]
 
-    high_entropy = _scan_high_entropy_strings(content)
+    high_entropy = sorted(high_entropy_matches.values(), key=lambda result: result["entropy"], reverse=True)[:15]
     if high_entropy:
         results["high_entropy_strings"] = high_entropy
 
@@ -193,7 +204,7 @@ def _scan_for_text_occurrences(file_path: Path, query: str, max_examples: int = 
     matches = 0
     examples: list[dict[str, object]] = []
     try:
-        with open(file_path, errors="replace") as f:
+        with open(file_path) as f:
             for line_no, line in enumerate(f, start=1):
                 if pattern.search(line):
                     matches += 1

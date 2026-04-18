@@ -29,7 +29,8 @@ def load_work_dirs(config_path: Path) -> dict[str, str]:
     if not config_path.exists():
         return {}
     try:
-        data = json.loads(config_path.read_text())
+        with open(config_path, "rb") as f:
+            data = json.load(f)
         work_dirs = data.get("work_dirs", [])
         return {entry.get("path", ""): entry.get("path", "") for entry in work_dirs if entry.get("path")}
     except (json.JSONDecodeError, OSError) as e:

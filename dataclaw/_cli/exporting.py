@@ -477,18 +477,18 @@ def update_skill(target: str) -> None:
     print(f"Downloading skill from {SKILL_URL}...")
     try:
         with urllib.request.urlopen(SKILL_URL, timeout=15) as resp:
-            content = resp.read().decode()
+            content = resp.read()
     except (OSError, urllib.error.URLError) as e:
         print(f"Error downloading skill: {e}", file=sys.stderr)
         bundled = Path(__file__).resolve().parent.parent.parent / ".claude" / "skills" / "dataclaw" / "SKILL.md"
         if bundled.exists():
             print(f"Using bundled copy from {bundled}")
-            content = bundled.read_text()
+            content = bundled.read_bytes()
         else:
             print("No bundled copy available either.", file=sys.stderr)
             sys.exit(1)
 
-    dest.write_text(content)
+    dest.write_bytes(content)
     print(f"Skill installed to {dest}")
     print(
         json.dumps(
