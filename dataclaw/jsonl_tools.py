@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import itertools
 import re
 import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,7 +95,7 @@ def default_diff_output_path(new_path: Path) -> Path:
     return new_path.with_name(f"{new_path.stem}{DEFAULT_DIFF_SUFFIX}")
 
 
-def yaml_dump_documents(documents: list[dict[str, Any]], output_path: Path) -> Path:
+def yaml_dump_documents(documents: Iterable[dict[str, Any]], output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         decoded_handle = DecodeStream(handle)
@@ -115,15 +117,15 @@ def jsonl_to_yaml_file(input_path: Path, output_path: Path | None = None) -> Pat
     if output_path is None:
         output_path = default_yaml_output_path(input_path)
 
-    documents = []
-    with input_path.open("rb") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            documents.append(orjson.loads(line))
+    def iter_documents() -> Iterable[dict[str, Any]]:
+        with input_path.open("rb") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                yield orjson.loads(line)
 
-    return yaml_dump_documents(documents, output_path)
+    return yaml_dump_documents(iter_documents(), output_path)
 
 
 def canonical_record_bytes(obj: Any) -> bytes:
@@ -519,5 +521,5 @@ def diff_jsonl_files(
         "identity_fields": list(IDENTITY_FIELDS),
         "summary": summary,
     }
-    yaml_dump_documents([header, *events], output_path)
+    yaml_dump_documents(itertools.chain([header], events), output_path)
     return DiffResult(output_path=output_path, event_count=len(events), summary=summary)
