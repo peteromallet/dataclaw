@@ -1,12 +1,12 @@
 """Export and publish helpers for the DataClaw CLI."""
 
 import hashlib
-import json as std_json
 import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
@@ -67,15 +67,65 @@ def _add_breakdown_row(
     row["output_tokens"] += output_tokens
 
 
+def _update_hash_bytes(hasher, marker: bytes, data: bytes) -> None:
+    hasher.update(marker)
+    hasher.update(str(len(data)).encode("ascii"))
+    hasher.update(b":")
+    hasher.update(data)
+    hasher.update(b";")
+
+
+def _update_hash_value(hasher, value: Any) -> None:
+    if value is None:
+        hasher.update(b"n;")
+        return
+    if value is True:
+        hasher.update(b"t;")
+        return
+    if value is False:
+        hasher.update(b"f;")
+        return
+    if isinstance(value, str):
+        _update_hash_bytes(hasher, b"s", value.encode("utf-8"))
+        return
+    if isinstance(value, int):
+        _update_hash_bytes(hasher, b"i", str(value).encode("ascii"))
+        return
+    if isinstance(value, float):
+        _update_hash_bytes(hasher, b"f", json.dumps_bytes(value))
+        return
+    if isinstance(value, list):
+        hasher.update(b"[")
+        for item in value:
+            _update_hash_value(hasher, item)
+        hasher.update(b"]")
+        return
+    if isinstance(value, dict):
+        hasher.update(b"{")
+        for key in sorted(value, key=str):
+            _update_hash_bytes(hasher, b"k", str(key).encode("utf-8"))
+            _update_hash_value(hasher, value[key])
+        hasher.update(b"}")
+        return
+    _update_hash_bytes(hasher, b"j", json.dumps_bytes(value))
+
+
 def _gemini_dedupe_fingerprint(session: dict, source: str) -> str | None:
     if source != "gemini":
         return None
 
-    canonical = dict(session)
-    canonical["source"] = source
-    canonical.pop("project", None)
-    payload = std_json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()
+    hasher = hashlib.sha256()
+    hasher.update(b"gemini-dedupe:v1;")
+    hasher.update(b"{")
+    for key in sorted(session, key=str):
+        if key == "project":
+            continue
+        _update_hash_bytes(hasher, b"k", str(key).encode("utf-8"))
+        _update_hash_value(hasher, session[key])
+    _update_hash_bytes(hasher, b"k", b"source")
+    _update_hash_value(hasher, source)
+    hasher.update(b"}")
+    return hasher.hexdigest()
 
 
 def export_to_jsonl(

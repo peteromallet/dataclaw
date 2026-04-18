@@ -331,6 +331,44 @@ class TestExportToJsonl:
         assert len(lines) == 2
         assert meta["sessions"] == 2
 
+    def test_dedupes_gemini_sessions_with_different_dict_insertion_order(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        session_a = {
+            "session_id": "g1",
+            "model": "gemini-2.5-pro",
+            "git_branch": None,
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T00:01:00Z",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stats": {"input_tokens": 1, "output_tokens": 2},
+            "project": "gemini:ComfyUI",
+            "source": "gemini",
+        }
+        session_b = {
+            "source": "gemini",
+            "project": "gemini:comfyui",
+            "stats": {"output_tokens": 2, "input_tokens": 1},
+            "messages": [{"content": "hi", "role": "user"}],
+            "end_time": "2026-01-01T00:01:00Z",
+            "start_time": "2026-01-01T00:00:00Z",
+            "git_branch": None,
+            "model": "gemini-2.5-pro",
+            "session_id": "g1",
+        }
+        projects = [{"dir_name": "proj", "display_name": "gemini:comfyui", "source": "gemini"}]
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: [session_a, session_b],
+            default_source="gemini",
+        )
+
+        lines = output.read_text().strip().split("\n")
+        assert len(lines) == 1
+        assert meta["sessions"] == 1
+
 
 class TestPushToHuggingface:
     def test_missing_huggingface_hub(self, tmp_path, monkeypatch):
