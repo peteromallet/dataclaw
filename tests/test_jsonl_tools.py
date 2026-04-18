@@ -1,5 +1,7 @@
 """Tests for JSONL formatting and diff helpers."""
 
+from pathlib import Path
+
 import yaml
 
 from dataclaw import jsonl_tools
@@ -118,3 +120,60 @@ class TestDiffJsonlFiles:
         assert patch[0]["op"] == "replace_large_blob"
         assert patch[0]["old"]["messages"][0]["content_parts"][0]["source"]["data"]["type"] == "large_blob"
         assert patch[0]["new"]["messages"][0]["content_parts"][0]["source"]["data"]["length"] == len(new_blob)
+
+    def test_handles_duplicate_identity_records_with_multiple_modifications(self, tmp_path, monkeypatch):
+        old_path = tmp_path / "old.jsonl"
+        new_path = tmp_path / "new.jsonl"
+        output_path = tmp_path / "diff.yaml"
+
+        old_path.write_text(
+            '{"source":"claude","project":"proj","session_id":"dup","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content":"old-a"}]}\n'
+            '{"source":"claude","project":"proj","session_id":"dup","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content":"old-b"}]}\n',
+            encoding="utf-8",
+        )
+        new_path.write_text(
+            '{"source":"claude","project":"proj","session_id":"dup","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content":"new-a"}]}\n'
+            '{"source":"claude","project":"proj","session_id":"dup","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content":"new-b"}]}\n',
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "dataclaw.jsonl_tools.run_jd_patch",
+            lambda _old, _new: [{"op": "replace", "path": "/messages/0/content", "old": "x", "new": "y"}],
+        )
+
+        result = jsonl_tools.diff_jsonl_files(old_path, new_path, output_path)
+
+        assert result.event_count == 2
+        docs = list(yaml.safe_load_all(output_path.read_text(encoding="utf-8")))
+        assert docs[0]["summary"]["modified_records"] == 2
+        assert docs[1]["old_line"] == 1
+        assert docs[2]["old_line"] == 2
+
+    def test_identical_files_do_not_reload_records(self, tmp_path, monkeypatch):
+        old_path = tmp_path / "old.jsonl"
+        new_path = tmp_path / "new.jsonl"
+        output_path = tmp_path / "diff.yaml"
+        payload = (
+            '{"source":"claude","project":"proj","session_id":"same","start_time":"2026-01-01T00:00:00Z","messages":[]}'
+            + "\n"
+        )
+        old_path.write_text(payload, encoding="utf-8")
+        new_path.write_text(payload, encoding="utf-8")
+
+        open_counts = {str(old_path): 0, str(new_path): 0}
+        real_path_open = Path.open
+
+        def counting_open(self, *args, **kwargs):
+            key = str(self)
+            if key in open_counts:
+                open_counts[key] += 1
+            return real_path_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", counting_open)
+
+        result = jsonl_tools.diff_jsonl_files(old_path, new_path, output_path)
+
+        assert result.event_count == 0
+        assert open_counts[str(old_path)] == 1
+        assert open_counts[str(new_path)] == 1

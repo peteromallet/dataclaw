@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -173,10 +173,9 @@ def index_jsonl(path: Path) -> FileIndex:
             digest = record_hash(obj)
             group = groups.get(key)
             if group is None:
-                group = {"first_line": line_number, "counts": Counter(), "hash_first_line": {}}
+                group = {"first_line": line_number, "counts": Counter()}
                 groups[key] = group
             group["counts"][digest] += 1
-            group["hash_first_line"].setdefault(digest, line_number)
     return FileIndex(path=path, total_records=total_records, groups=groups)
 
 
@@ -202,6 +201,9 @@ def collect_changed_keys(old_index: FileIndex, new_index: FileIndex) -> list[tup
 
 
 def load_records_for_keys(path: Path, keys: set[tuple[Any, ...]]) -> dict[tuple[Any, ...], dict[str, Any]]:
+    if not keys:
+        return {}
+
     records: dict[tuple[Any, ...], dict[str, Any]] = {}
     with path.open("rb") as handle:
         for line_number, line in enumerate(handle, 1):
@@ -216,17 +218,24 @@ def load_records_for_keys(path: Path, keys: set[tuple[Any, ...]]) -> dict[tuple[
             group = records.setdefault(key, {})
             entry = group.get(digest)
             if entry is None:
-                entry = {"obj": obj, "line_numbers": []}
+                entry = {"obj": obj, "line_numbers": deque()}
                 group[digest] = entry
             entry["line_numbers"].append(line_number)
     return records
 
 
-def expand_hashes(counter: Counter[str]) -> list[str]:
-    expanded = []
+def iter_expanded_hashes(counter: Counter[str]) -> Iterable[str]:
     for digest in sorted(counter):
-        expanded.extend([digest] * counter[digest])
-    return expanded
+        for _ in range(counter[digest]):
+            yield digest
+
+
+def _pop_line_number(entry: dict[str, Any]) -> int:
+    return entry["line_numbers"].popleft()
+
+
+def _take_line_numbers(entry: dict[str, Any], count: int) -> list[int]:
+    return [_pop_line_number(entry) for _ in range(count)]
 
 
 def join_json_pointer(path_prefix: str, child_path: str) -> str:
@@ -444,19 +453,19 @@ def build_events(
 
         old_only = old_counts - new_counts
         new_only = new_counts - old_counts
-        old_unmatched = expand_hashes(old_only)
-        new_unmatched = expand_hashes(new_only)
+        paired_old = Counter()
+        paired_new = Counter()
 
-        while old_unmatched and new_unmatched:
-            old_hash = old_unmatched.pop(0)
-            new_hash = new_unmatched.pop(0)
+        for old_hash, new_hash in zip(iter_expanded_hashes(old_only), iter_expanded_hashes(new_only)):
+            paired_old[old_hash] += 1
+            paired_new[new_hash] += 1
             old_entry = old_records[key][old_hash]
             new_entry = new_records[key][new_hash]
             event = {
                 "change_type": "modified",
                 "identity": identity_dict(key),
-                "old_line": old_entry["line_numbers"].pop(0),
-                "new_line": new_entry["line_numbers"].pop(0),
+                "old_line": _pop_line_number(old_entry),
+                "new_line": _pop_line_number(new_entry),
                 "patch": build_record_patch(old_entry["obj"], new_entry["obj"]),
             }
             if include_records_for_modified:
@@ -466,15 +475,15 @@ def build_events(
             event_count += 1
             summary["modified_records"] += 1
 
-        old_leftovers = Counter(old_unmatched)
-        new_leftovers = Counter(new_unmatched)
+        old_leftovers = old_only - paired_old
+        new_leftovers = new_only - paired_new
 
-        for digest, count in old_leftovers.items():
+        for digest in sorted(old_leftovers):
+            count = old_leftovers[digest]
             if count <= 0:
                 continue
             entry = old_records[key][digest]
-            lines = entry["line_numbers"][:count]
-            del entry["line_numbers"][:count]
+            lines = _take_line_numbers(entry, count)
             emit_event(
                 {
                     "change_type": "removed",
@@ -487,12 +496,12 @@ def build_events(
             event_count += 1
             summary["removed_records"] += count
 
-        for digest, count in new_leftovers.items():
+        for digest in sorted(new_leftovers):
+            count = new_leftovers[digest]
             if count <= 0:
                 continue
             entry = new_records[key][digest]
-            lines = entry["line_numbers"][:count]
-            del entry["line_numbers"][:count]
+            lines = _take_line_numbers(entry, count)
             emit_event(
                 {
                     "change_type": "added",
