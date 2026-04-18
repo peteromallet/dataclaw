@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dataclaw import _json as json
 from dataclaw._cli.exporting import _build_dataset_card, export_to_jsonl, push_to_huggingface, summarize_export_jsonl
 
 
@@ -368,6 +369,45 @@ class TestExportToJsonl:
         lines = output.read_text().strip().split("\n")
         assert len(lines) == 1
         assert meta["sessions"] == 1
+
+    def test_writes_multi_mb_blob_verbatim(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        blob = "A" * (2 * 1024 * 1024)
+        session_data = [
+            {
+                "session_id": "g-large",
+                "model": "gemini-2.5-pro",
+                "git_branch": None,
+                "start_time": "2026-01-01T00:00:00Z",
+                "end_time": "2026-01-01T00:01:00Z",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content_parts": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": blob},
+                            }
+                        ],
+                    }
+                ],
+                "stats": {"input_tokens": 1, "output_tokens": 2},
+                "project": "gemini:proj",
+                "source": "gemini",
+            }
+        ]
+
+        meta = export_to_jsonl(
+            [{"dir_name": "proj", "display_name": "gemini:proj", "source": "gemini"}],
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: session_data,
+            default_source="gemini",
+        )
+
+        rows = [json.loads(line) for line in output.read_bytes().splitlines() if line.strip()]
+        assert meta["sessions"] == 1
+        assert rows[0]["messages"][0]["content_parts"][0]["source"]["data"] == blob
 
 
 class TestPushToHuggingface:

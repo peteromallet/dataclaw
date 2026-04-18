@@ -88,8 +88,8 @@ class TestDiffJsonlFiles:
         new_path = tmp_path / "new.jsonl"
         output_path = tmp_path / "diff.yaml"
 
-        old_blob = "A" * 5000
-        new_blob = "B" * 5000
+        old_blob = "AbC123+/" * (2 * 1024 * 1024 // 8)
+        new_blob = "XyZ987+/" * (2 * 1024 * 1024 // 8)
         old_path.write_text(
             '{"source":"gemini","project":"proj","session_id":"s1","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content_parts":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"'
             + old_blob

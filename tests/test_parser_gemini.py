@@ -208,3 +208,32 @@ class TestParseGeminiUserContentParts:
         assert "content" not in message
         assert message["content_parts"] == [{"type": "text", "text": blob}]
         assert result["stats"]["user_messages"] == 1
+
+    def test_multi_mb_inline_data_preserved_verbatim(self, tmp_path, mock_anonymizer):
+        blob = "A" * (2 * 1024 * 1024)
+        session_file = tmp_path / "session-gemini.json"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "sessionId": "gemini-session-inline-large",
+                    "startTime": "2026-03-24T12:00:00Z",
+                    "lastUpdated": "2026-03-24T12:00:01Z",
+                    "messages": [
+                        {
+                            "type": "user",
+                            "timestamp": "2026-03-24T12:00:00Z",
+                            "content": [
+                                {"inlineData": {"mimeType": "image/png", "data": blob}},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = parse_session_file(session_file, mock_anonymizer)
+
+        assert result is not None
+        message = result["messages"][0]
+        assert message["content_parts"][0]["source"]["data"] == blob

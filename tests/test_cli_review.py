@@ -197,3 +197,21 @@ class TestScanPiiHighEntropy:
         f.write_text('{"message": "nothing suspicious here at all"}\n')
         results = _scan_pii(f)
         assert "high_entropy_strings" not in results
+
+    def test_streams_blob_heavy_exports_without_read_text(self, tmp_path, monkeypatch):
+        blob = "AbC123+/" * (2 * 1024 * 1024 // 8)
+        f = tmp_path / "export.jsonl"
+        f.write_text(
+            f'{{"message": "{blob}"}}\n{{"message": "contact jane@example.com"}}\n',
+            encoding="utf-8",
+        )
+
+        def fail_read_text(*args, **kwargs):
+            raise AssertionError("Path.read_text should not be called")
+
+        monkeypatch.setattr("pathlib.Path.read_text", fail_read_text)
+
+        results = _scan_pii(f)
+
+        assert results["emails"] == ["jane@example.com"]
+        assert "high_entropy_strings" not in results
