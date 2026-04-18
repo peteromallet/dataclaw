@@ -664,12 +664,13 @@ class TestRedactSession:
 
     def test_redacts_content_parts_and_preserves_blob_payloads(self):
         blob = "data:image/png;base64," + ("A" * 5000)
+        blob_part = {"type": "image", "source": {"type": "base64", "data": blob}}
         session = {
             "messages": [
                 {
                     "content_parts": [
                         {"type": "tool_result", "content": "Key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz"},
-                        {"type": "image", "source": {"type": "base64", "data": blob}},
+                        blob_part,
                     ]
                 }
             ]
@@ -677,6 +678,7 @@ class TestRedactSession:
         result, count = redact_session(session)
         assert REDACTED in result["messages"][0]["content_parts"][0]["content"]
         assert result["messages"][0]["content_parts"][1]["source"]["data"] == blob
+        assert result["messages"][0]["content_parts"][1] is blob_part
         assert count >= 1
 
 
@@ -706,19 +708,10 @@ class TestLargeBinarySkipping:
 
     def test_redact_session_skips_large_base64_in_tool_output(self):
         blob = "A" * 5000
-        session = {
-            "messages": [
-                {
-                    "tool_uses": [
-                        {
-                            "output": {
-                                "raw": {"content": [{"type": "image", "source": {"type": "base64", "data": blob}}]}
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
+        raw_output = {"content": [{"type": "image", "source": {"type": "base64", "data": blob}}]}
+        output = {"raw": raw_output}
+        session = {"messages": [{"tool_uses": [{"output": output}]}]}
         result, count = redact_session(session)
         assert result["messages"][0]["tool_uses"][0]["output"]["raw"]["content"][0]["source"]["data"] == blob
+        assert result["messages"][0]["tool_uses"][0]["output"] is output
         assert count == 0

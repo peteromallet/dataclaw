@@ -278,6 +278,7 @@ def redact_custom_strings(text: str, strings: list[str]) -> tuple[str, int]:
     if not text or not strings:
         return text, 0
 
+    original_text = text
     count = 0
     for target in strings:
         if not target or len(target) < 3:
@@ -287,6 +288,8 @@ def redact_custom_strings(text: str, strings: list[str]) -> tuple[str, int]:
         text, replacements = re.subn(pattern, REDACTED, text)
         count += replacements
 
+    if count == 0:
+        return original_text, 0
     return text, count
 
 
@@ -302,18 +305,31 @@ def _redact_value(value: Any, custom_strings: list[str] | None = None) -> tuple[
         return result, count
     if isinstance(value, dict):
         total = 0
-        out = {}
+        out: dict[Any, Any] | None = None
         for k, v in value.items():
-            out[k], n = _redact_value(v, custom_strings)
+            redacted, n = _redact_value(v, custom_strings)
             total += n
+            if out is None:
+                if n == 0 and redacted is v:
+                    continue
+                out = dict(value)
+            out[k] = redacted
+        if out is None:
+            return value, 0
         return out, total
     if isinstance(value, list):
         total = 0
-        out_list = []
-        for item in value:
+        out_list: list[Any] | None = None
+        for idx, item in enumerate(value):
             redacted, n = _redact_value(item, custom_strings)
-            out_list.append(redacted)
             total += n
+            if out_list is None:
+                if n == 0 and redacted is item:
+                    continue
+                out_list = list(value[:idx])
+            out_list.append(redacted)
+        if out_list is None:
+            return value, 0
         return out_list, total
     return value, 0
 
