@@ -67,6 +67,22 @@ class TestSimplifyPatchOps:
         assert result == [{"op": "add", "path": "/messages/0/tool_uses/0/output/raw", "value": {"type": "text"}}]
 
 
+class TestBuildTextReplaceDiff:
+    def test_limits_context_to_three_surrounding_lines(self):
+        old = "\n".join(f"line {idx}" for idx in range(1, 11))
+        new = old.replace("line 6", "updated line 6")
+
+        diff = jsonl_tools.build_text_replace_diff(old, new)
+
+        assert diff is not None
+        assert "line 3" in diff
+        assert "line 9" in diff
+        assert "line 2" not in diff
+        assert "line 10" not in diff
+        assert "-line 6" in diff
+        assert "+updated line 6" in diff
+
+
 class TestDiffJsonlFiles:
     def test_writes_yaml_summary_and_patch(self, tmp_path, monkeypatch):
         old_path = tmp_path / "old.jsonl"
@@ -120,7 +136,7 @@ class TestDiffJsonlFiles:
         assert b"\r\n" not in raw
         assert b"\n" in raw
 
-    def test_skips_jd_for_large_blob_replacements(self, tmp_path, monkeypatch):
+    def test_localizes_large_blob_replacements(self, tmp_path, monkeypatch):
         old_path = tmp_path / "old.jsonl"
         new_path = tmp_path / "new.jsonl"
         output_path = tmp_path / "diff.yaml"
@@ -142,10 +158,21 @@ class TestDiffJsonlFiles:
             encoding="utf-8",
         )
 
-        def fail_run_jd_patch(_old, _new):
-            raise AssertionError("run_jd_patch should not be called for large blob diffs")
+        captured = {}
 
-        monkeypatch.setattr("dataclaw.jsonl_tools.run_jd_patch", fail_run_jd_patch)
+        def fake_run_jd_patch(old_obj, new_obj):
+            captured["old_obj"] = old_obj
+            captured["new_obj"] = new_obj
+            return [
+                {
+                    "op": "replace",
+                    "path": "/messages/0/content_parts/0/source/data",
+                    "old": old_obj["messages"][0]["content_parts"][0]["source"]["data"],
+                    "new": new_obj["messages"][0]["content_parts"][0]["source"]["data"],
+                }
+            ]
+
+        monkeypatch.setattr("dataclaw.jsonl_tools.run_jd_patch", fake_run_jd_patch)
 
         result = jsonl_tools.diff_jsonl_files(old_path, new_path, output_path)
 
@@ -153,8 +180,15 @@ class TestDiffJsonlFiles:
         docs = list(yaml.safe_load_all(output_path.read_text(encoding="utf-8")))
         patch = docs[1]["patch"]
         assert patch[0]["op"] == "replace_large_blob"
-        assert patch[0]["old"]["messages"][0]["content_parts"][0]["source"]["data"]["type"] == "large_blob"
-        assert patch[0]["new"]["messages"][0]["content_parts"][0]["source"]["data"]["length"] == len(new_blob)
+        assert patch[0]["path"] == "/messages/0/content_parts/0/source/data"
+        assert patch[0]["old"] == {"type": "large_blob", "length": len(old_blob)}
+        assert patch[0]["new"] == {"type": "large_blob", "length": len(new_blob)}
+        assert captured["old_obj"]["messages"][0]["content_parts"][0]["source"]["data"].startswith(
+            "__DATACLAW_LARGE_BLOB__:"
+        )
+        assert captured["new_obj"]["messages"][0]["content_parts"][0]["source"]["data"].startswith(
+            "__DATACLAW_LARGE_BLOB__:"
+        )
 
     def test_handles_duplicate_identity_records_with_multiple_modifications(self, tmp_path, monkeypatch):
         old_path = tmp_path / "old.jsonl"

@@ -18,13 +18,14 @@ from typing import Any
 import orjson
 import yaml
 
-from .secrets import contains_large_binary_value, summarize_large_binary_value
+from .secrets import contains_large_binary_value, should_skip_large_binary_string
 
 IDENTITY_FIELDS = ("source", "project", "session_id", "start_time")
 OMITTED_ORIGINAL_FILE = "<omitted originalFile content>"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 DEFAULT_YAML_SUFFIX = "_formatted.yaml"
 DEFAULT_DIFF_SUFFIX = "_diff.yaml"
+_LARGE_BLOB_MARKER_RE = re.compile(r"^__DATACLAW_LARGE_BLOB__:(\d+):[0-9a-f]{16}$")
 _YAML_WIDTH = 2147483647
 _BaseDumper = getattr(yaml, "CDumper", yaml.SafeDumper)
 
@@ -44,6 +45,62 @@ Dumper.add_representer(str, _str_representer)
 
 def encode_emojis(text: str) -> str:
     return "".join(f"__EMOJI_{ord(char):x}__" if ord(char) > 0xFFFF else char for char in text)
+
+
+def _large_blob_marker(text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"__DATACLAW_LARGE_BLOB__:{len(text)}:{digest}"
+
+
+def _large_blob_summary_from_marker(text: str) -> dict[str, Any] | None:
+    match = _LARGE_BLOB_MARKER_RE.fullmatch(text)
+    if match is None:
+        return None
+    return {"type": "large_blob", "length": int(match.group(1))}
+
+
+def prepare_large_binary_diff_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _large_blob_marker(value) if should_skip_large_binary_string(value) else value
+    if isinstance(value, dict):
+        return {key: prepare_large_binary_diff_value(child_value) for key, child_value in value.items()}
+    if isinstance(value, list):
+        return [prepare_large_binary_diff_value(item) for item in value]
+    return value
+
+
+def contains_large_binary_marker(value: Any) -> bool:
+    if isinstance(value, str):
+        return _large_blob_summary_from_marker(value) is not None
+    if isinstance(value, dict):
+        return any(contains_large_binary_marker(child_value) for child_value in value.values())
+    if isinstance(value, list):
+        return any(contains_large_binary_marker(item) for item in value)
+    return False
+
+
+def summarize_large_binary_markers(value: Any) -> Any:
+    if isinstance(value, str):
+        summary = _large_blob_summary_from_marker(value)
+        return summary if summary is not None else value
+    if isinstance(value, dict):
+        return {key: summarize_large_binary_markers(child_value) for key, child_value in value.items()}
+    if isinstance(value, list):
+        return [summarize_large_binary_markers(item) for item in value]
+    return value
+
+
+def summarize_large_binary_patch_ops(patch_ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summarized = []
+    for op in patch_ops:
+        had_large_blob_marker = any(
+            contains_large_binary_marker(op.get(field)) for field in ("value", "old", "new") if field in op
+        )
+        summarized_op = summarize_large_binary_markers(op)
+        if summarized_op.get("op") == "replace" and had_large_blob_marker:
+            summarized_op["op"] = "replace_large_blob"
+        summarized.append(summarized_op)
+    return summarized
 
 
 class DecodeStream:
@@ -344,7 +401,7 @@ def build_text_replace_diff(old: str, new: str) -> str | None:
     if old == new or ("\n" not in old and "\n" not in new):
         return None
     diff_lines = list(
-        difflib.unified_diff(old.splitlines(), new.splitlines(), fromfile="old", tofile="new", lineterm="", n=2)
+        difflib.unified_diff(old.splitlines(), new.splitlines(), fromfile="old", tofile="new", lineterm="", n=3)
     )
     if not diff_lines:
         return None
@@ -353,7 +410,9 @@ def build_text_replace_diff(old: str, new: str) -> str | None:
 
 def build_record_patch(old: Any, new: Any) -> list[dict[str, Any]]:
     if contains_large_binary_value(old) or contains_large_binary_value(new):
-        return expand_replace_op("", old, new)
+        return summarize_large_binary_patch_ops(
+            run_jd_patch(prepare_large_binary_diff_value(old), prepare_large_binary_diff_value(new))
+        )
     return run_jd_patch(old, new)
 
 
@@ -362,14 +421,9 @@ def expand_replace_op(path: str, old: Any, new: Any) -> list[dict[str, Any]]:
         return []
 
     if contains_large_binary_value(old) or contains_large_binary_value(new):
-        return [
-            {
-                "op": "replace_large_blob",
-                "path": path,
-                "old": summarize_large_binary_value(old),
-                "new": summarize_large_binary_value(new),
-            }
-        ]
+        return summarize_large_binary_patch_ops(
+            expand_replace_op(path, prepare_large_binary_diff_value(old), prepare_large_binary_diff_value(new))
+        )
 
     if isinstance(old, (dict, list)) and isinstance(new, type(old)):
         nested_patch = run_jd_patch(old, new)
