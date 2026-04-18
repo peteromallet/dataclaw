@@ -1,12 +1,13 @@
 """Export and publish helpers for the DataClaw CLI."""
 
 import hashlib
+import heapq
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -217,11 +218,10 @@ def _export_session_task_worker(payload) -> _WorkerSessionResult:
 
 
 def _build_project_state(selected_projects: list[dict]) -> list[dict[str, Any]]:
-    start_time = time.perf_counter()
     return [
         {
             "display_name": project["display_name"],
-            "start_time": start_time,
+            "start_time": None,
             "remaining": 0,
             "sessions": 0,
             "input_tokens": 0,
@@ -234,7 +234,9 @@ def _build_project_state(selected_projects: list[dict]) -> list[dict[str, Any]]:
 
 
 def _print_project_summary(state: dict[str, Any]) -> None:
-    elapsed = time.perf_counter() - state["start_time"]
+    start_time = state["start_time"]
+    end_time = time.perf_counter()
+    elapsed = 0.0 if start_time is None else end_time - start_time
     token_summary = ""
     if state["has_token_stats"]:
         token_summary = (
@@ -358,24 +360,52 @@ def _export_to_jsonl_parallel(
     seen_fingerprints: set[str] = set()
     project_state = _build_project_state(selected_projects)
 
-    for task in tasks:
+    ordered_tasks = sorted(tasks, key=lambda task: (task.project_index, task.task_index))
+    completed: dict[int, _WorkerSessionResult] = {}
+    pending: dict[object, int] = {}
+    candidate_heap: list[tuple[int, int]] = []
+    next_write_index = 0
+    frontier_limit = 0
+    max_pending = workers
+    reorder_window = workers * 2
+
+    for task in ordered_tasks:
         project_state[task.project_index]["remaining"] += 1
 
-    ordered_tasks = sorted(tasks, key=lambda task: (-task.estimated_bytes, task.project_index, task.task_index))
     extra_usernames = _export_extra_usernames(anonymizer)
-    payloads = [(task, include_thinking, custom_strings, extra_usernames) for task in ordered_tasks]
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        for result in executor.map(_export_session_task_worker, payloads, chunksize=1):
-            state = project_state[result.project_index]
+    def extend_frontier() -> None:
+        nonlocal frontier_limit
+        target_limit = min(len(ordered_tasks), next_write_index + reorder_window)
+        while frontier_limit < target_limit:
+            task = ordered_tasks[frontier_limit]
+            heapq.heappush(candidate_heap, (-task.estimated_bytes, frontier_limit))
+            frontier_limit += 1
+
+    def submit_ready(executor: ProcessPoolExecutor) -> None:
+        while len(pending) < max_pending and candidate_heap:
+            _neg_size, order_index = heapq.heappop(candidate_heap)
+            task = ordered_tasks[order_index]
+            state = project_state[task.project_index]
+            if state["start_time"] is None:
+                state["start_time"] = time.perf_counter()
+            payload = (task, include_thinking, custom_strings, extra_usernames)
+            future = executor.submit(_export_session_task_worker, payload)
+            pending[future] = order_index
+
+    def flush_ready_results() -> None:
+        nonlocal next_write_index, total, skipped, total_redactions, total_input_tokens, total_output_tokens
+
+        while next_write_index in completed:
+            result = completed.pop(next_write_index)
+            task = ordered_tasks[next_write_index]
+            state = project_state[task.project_index]
             state["remaining"] -= 1
 
             if result.skipped_model:
                 skipped += 1
             elif result.row_bytes is not None:
-                if result.fingerprint is not None and result.fingerprint in seen_fingerprints:
-                    pass
-                else:
+                if result.fingerprint is None or result.fingerprint not in seen_fingerprints:
                     if result.fingerprint is not None:
                         seen_fingerprints.add(result.fingerprint)
                     fh.write(result.row_bytes)
@@ -404,6 +434,30 @@ def _export_to_jsonl_parallel(
             if state["remaining"] == 0 and not state["printed"]:
                 state["printed"] = True
                 _print_project_summary(state)
+
+            next_write_index += 1
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        extend_frontier()
+        submit_ready(executor)
+
+        while pending or candidate_heap or frontier_limit < len(ordered_tasks):
+            if not pending:
+                extend_frontier()
+                submit_ready(executor)
+                if not pending:
+                    break
+
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in done:
+                order_index = pending.pop(future)
+                completed[order_index] = future.result()
+
+            flush_ready_results()
+            extend_frontier()
+            submit_ready(executor)
+
+    flush_ready_results()
 
     return {
         "sessions": total,

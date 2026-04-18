@@ -1,10 +1,14 @@
 """Tests for CLI export and publish helpers."""
 
+from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from dataclaw import _json as json
+from dataclaw import export_tasks
+from dataclaw import parser as parser_mod
+from dataclaw._cli import exporting as exporting_mod
 from dataclaw._cli.exporting import _build_dataset_card, export_to_jsonl, push_to_huggingface, summarize_export_jsonl
 
 
@@ -177,6 +181,157 @@ class TestExportToJsonl:
         )
 
         assert "Parsing test... 1 sessions in 1.25s (12 input / 34 output tokens)" in capsys.readouterr().out
+
+    def test_parallel_export_preserves_serial_order_and_project_summary_order(
+        self, tmp_path, mock_anonymizer, monkeypatch, capsys
+    ):
+        output = tmp_path / "out.jsonl"
+        projects = [
+            {"dir_name": "p1", "display_name": "proj1", "source": "claude"},
+            {"dir_name": "p2", "display_name": "proj2", "source": "claude"},
+        ]
+        tasks = [
+            export_tasks.ExportSessionTask("claude", 0, 0, "p1", "proj1", 10, "fake", item_id="p1-a"),
+            export_tasks.ExportSessionTask("claude", 0, 1, "p1", "proj1", 1, "fake", item_id="p1-b"),
+            export_tasks.ExportSessionTask("claude", 1, 0, "p2", "proj2", 9, "fake", item_id="p2-a"),
+            export_tasks.ExportSessionTask("claude", 1, 1, "p2", "proj2", 2, "fake", item_id="p2-b"),
+        ]
+        completion_order = ["p1-b", "p2-a", "p1-a", "p2-b"]
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, payload):
+                future = Future()
+                future._label = payload[0].item_id
+                future.set_result(fn(payload))
+                return future
+
+        def fake_wait(futures, return_when=None):
+            del return_when
+            futures = set(futures)
+            label = completion_order.pop(0)
+            chosen = next(future for future in futures if getattr(future, "_label", None) == label)
+            return {chosen}, futures - {chosen}
+
+        def fake_worker(payload):
+            task = payload[0]
+            row = {
+                "session_id": task.item_id,
+                "model": f"model-{task.item_id}",
+                "project": task.project_display_name,
+                "messages": [{"role": "user", "content": task.item_id}],
+                "stats": {"input_tokens": 1, "output_tokens": 2},
+            }
+            return exporting_mod._WorkerSessionResult(
+                project_index=task.project_index,
+                model=row["model"],
+                row_bytes=json.dumps_bytes(row),
+                input_tokens=1,
+                output_tokens=2,
+                has_token_stats=True,
+            )
+
+        monkeypatch.setattr("dataclaw._cli.exporting.build_export_session_tasks", lambda *_args, **_kwargs: tasks)
+        monkeypatch.setattr("dataclaw._cli.exporting.ProcessPoolExecutor", FakeExecutor)
+        monkeypatch.setattr("dataclaw._cli.exporting.wait", fake_wait)
+        monkeypatch.setattr("dataclaw._cli.exporting._export_session_task_worker", fake_worker)
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=parser_mod.iter_project_sessions,
+            default_source="claude",
+            workers=4,
+        )
+
+        rows = [json.loads(line) for line in output.read_bytes().splitlines() if line.strip()]
+        assert [row["session_id"] for row in rows] == ["p1-a", "p1-b", "p2-a", "p2-b"]
+        assert meta["sessions"] == 4
+
+        printed = [line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert printed[0].startswith("Parsing proj1... 2 sessions in ")
+        assert printed[1].startswith("Parsing proj2... 2 sessions in ")
+
+    def test_parallel_gemini_dedupe_respects_serial_order(self, tmp_path, mock_anonymizer, monkeypatch):
+        output = tmp_path / "out.jsonl"
+        projects = [
+            {"dir_name": "upper", "display_name": "gemini:ComfyUI", "source": "gemini"},
+            {"dir_name": "lower", "display_name": "gemini:comfyui", "source": "gemini"},
+        ]
+        tasks = [
+            export_tasks.ExportSessionTask("gemini", 0, 0, "upper", "gemini:ComfyUI", 1, "fake", item_id="first"),
+            export_tasks.ExportSessionTask("gemini", 1, 0, "lower", "gemini:comfyui", 10, "fake", item_id="second"),
+        ]
+        completion_order = ["second", "first"]
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, payload):
+                future = Future()
+                future._label = payload[0].item_id
+                future.set_result(fn(payload))
+                return future
+
+        def fake_wait(futures, return_when=None):
+            del return_when
+            futures = set(futures)
+            label = completion_order.pop(0)
+            chosen = next(future for future in futures if getattr(future, "_label", None) == label)
+            return {chosen}, futures - {chosen}
+
+        def fake_worker(payload):
+            task = payload[0]
+            row = {
+                "session_id": task.item_id,
+                "model": "gemini-2.5-pro",
+                "project": task.project_display_name,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {"input_tokens": 1, "output_tokens": 2},
+            }
+            return exporting_mod._WorkerSessionResult(
+                project_index=task.project_index,
+                model=row["model"],
+                row_bytes=json.dumps_bytes(row),
+                fingerprint="dup",
+                input_tokens=1,
+                output_tokens=2,
+                has_token_stats=True,
+            )
+
+        monkeypatch.setattr("dataclaw._cli.exporting.build_export_session_tasks", lambda *_args, **_kwargs: tasks)
+        monkeypatch.setattr("dataclaw._cli.exporting.ProcessPoolExecutor", FakeExecutor)
+        monkeypatch.setattr("dataclaw._cli.exporting.wait", fake_wait)
+        monkeypatch.setattr("dataclaw._cli.exporting._export_session_task_worker", fake_worker)
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=parser_mod.iter_project_sessions,
+            default_source="gemini",
+            workers=2,
+        )
+
+        rows = [json.loads(line) for line in output.read_bytes().splitlines() if line.strip()]
+        assert [row["session_id"] for row in rows] == ["first"]
+        assert meta["sessions"] == 1
 
     def test_normalizes_stats_without_changing_dataset_rows(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
