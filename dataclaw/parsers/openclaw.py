@@ -115,8 +115,8 @@ def parse_session_file(
 ) -> dict | None:
     """Parse an OpenClaw session JSONL file into a structured conversation."""
     try:
-        header_entries = iter_jsonl(filepath)
-        header = next(header_entries, None)
+        entries = iter_jsonl(filepath)
+        header = next(entries, None)
     except OSError as e:
         logger.warning("Failed to read OpenClaw session file %s: %s", filepath, e)
         return None
@@ -145,7 +145,7 @@ def parse_session_file(
     pending_tool_uses: dict[str, list[dict[str, Any]]] = {}
 
     try:
-        for entry in iter_entries_after_header(filepath):
+        for entry in entries:
             entry_type = entry.get("type")
             timestamp = entry.get("timestamp")
 
@@ -305,12 +305,6 @@ def parse_session_file(
         metadata["model"] = "openclaw-unknown"
 
     return make_session_result(metadata, messages, stats)
-
-
-def iter_entries_after_header(filepath: Path):
-    entries = iter_jsonl(filepath)
-    next(entries, None)
-    yield from entries
 
 
 def _build_openclaw_tool_result(msg_data: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any]:

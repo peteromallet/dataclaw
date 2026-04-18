@@ -1,5 +1,8 @@
 """Tests for OpenCode parser behavior."""
 
+import sqlite3
+from pathlib import Path
+
 from dataclaw import _json as json
 from dataclaw.parser import discover_projects, parse_project_sessions
 from tests.parser_helpers import disable_other_providers, write_opencode_db
@@ -247,3 +250,52 @@ class TestOpenCodeProjects:
                 },
             }
         ]
+
+    def test_parse_project_sessions_reuses_single_db_connection(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"opencode"})
+        db_path = tmp_path / "opencode.db"
+        conn = write_opencode_db(db_path)
+
+        cwd = "/Users/testuser/work/repo"
+        for index in range(2):
+            session_id = f"ses_{index}"
+            message_id = f"msg_{index}"
+            part_id = f"prt_{index}"
+            conn.execute(
+                "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+                (session_id, cwd, 1706000000000 + index, 1706000005000 + index),
+            )
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+                (
+                    message_id,
+                    session_id,
+                    1706000001000 + index,
+                    json.dumps({"role": "user", "model": {"providerID": "openai", "modelID": "gpt-5.3-codex"}}),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+                (part_id, message_id, 1706000001001 + index, json.dumps({"type": "text", "text": f"Hello {index}"})),
+            )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", db_path)
+        monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
+
+        connect_calls = 0
+        real_connect = sqlite3.connect
+
+        def counting_connect(*args, **kwargs):
+            nonlocal connect_calls
+            if args and Path(args[0]) == db_path:
+                connect_calls += 1
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr("dataclaw.parsers.opencode.sqlite3.connect", counting_connect)
+
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="opencode")
+
+        assert len(sessions) == 2
+        assert connect_calls == 2

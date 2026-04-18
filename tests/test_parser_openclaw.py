@@ -156,6 +156,33 @@ class TestParseOpenclawSessionFile:
         assert result["stats"]["input_tokens"] == 300
         assert result["stats"]["output_tokens"] == 50
 
+    def test_reads_session_file_once(self, tmp_path, monkeypatch, mock_anonymizer):
+        session_file = _write_openclaw_session(
+            tmp_path,
+            "single-pass.jsonl",
+            [
+                make_openclaw_session_header(),
+                make_openclaw_user_message("Hello"),
+                make_openclaw_assistant_message("Hi there!"),
+            ],
+        )
+
+        open_calls = 0
+        real_open = open
+
+        def counting_open(file, *args, **kwargs):
+            nonlocal open_calls
+            if str(file) == str(session_file):
+                open_calls += 1
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", counting_open)
+
+        result = parse_session_file(session_file, mock_anonymizer)
+
+        assert result is not None
+        assert open_calls == 1
+
 
 class TestDiscoverOpenclawProjects:
     def test_discover_openclaw_projects(self, tmp_path, monkeypatch):
