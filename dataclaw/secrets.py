@@ -6,6 +6,19 @@ from typing import Any
 
 REDACTED = "[REDACTED]"
 
+_GENERIC_SECRET_SUFFIXES = (
+    "auth",
+    "key",
+    "secret",
+    "token",
+    "password",
+)
+_GENERIC_SECRET_SUFFIX_RE = "|".join(re.escape(name) for name in _GENERIC_SECRET_SUFFIXES)
+_GENERIC_SECRET_NAME_PATTERN = rf"[A-Za-z0-9_-]*?(?:{_GENERIC_SECRET_SUFFIX_RE})"
+_GENERIC_SECRET_MARKERS = tuple(
+    f"{suffix}{delimiter}" for suffix in _GENERIC_SECRET_SUFFIXES for delimiter in ("=", ":", '"', "'", " ")
+)
+
 # Ordered from most specific to least specific
 SECRET_PATTERNS = [
     # JWT tokens - full 3-segment form
@@ -60,34 +73,20 @@ SECRET_PATTERNS = [
             r"-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
         ),
     ),
-    # CLI flags that pass tokens/secrets: --token VALUE, --access-token VALUE, etc.
-    (
-        "cli_token_flag",
-        re.compile(
-            r"(?:--|-)(?:access[_-]?token|auth[_-]?token|api[_-]?key|secret|password|token)"
-            r"[\s=]+([A-Za-z0-9_/+=.-]{8,})",
-            re.IGNORECASE,
-        ),
-    ),
-    # Environment variable assignments with secret-like names (with or without quotes)
-    (
-        "env_secret",
-        re.compile(
-            r"(?:SECRET|PASSWORD|TOKEN|API_KEY|AUTH_KEY|ACCESS_KEY|SERVICE_KEY|DB_PASSWORD"
-            r"|SUPABASE_KEY|SUPABASE_SERVICE|ANON_KEY|SERVICE_ROLE|PRIVATE_KEY)"
-            r"\s*[=]\s*['\"]?([^\s'\"]{6,})['\"]?",
-            re.IGNORECASE,
-        ),
-    ),
-    # Generic secret assignments: SECRET_KEY = "value", "api_key": "value", etc.
-    # The ['"]? after the key name handles JSON-quoted keys like "apiKey": "value"
+    # Generic secret references across CLI flags, URL params, JSON, and assignments
     (
         "generic_secret",
         re.compile(
-            r"""(?:secret[_-]?key|api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token"""
-            r"""|service[_-]?role[_-]?key|private[_-]?key|\btoken)"""
-            r"""['"]?\s*[=:]\s*['"]([A-Za-z0-9_/+=.-]{16,})['"]""",
-            re.IGNORECASE,
+            rf"""
+            (?<![A-Za-z0-9])
+            {_GENERIC_SECRET_NAME_PATTERN}
+            ['"]?
+            (?:\s*[=:]\s*|\s+)
+            ['"]?
+            [A-Za-z0-9_/+=.-]{{8,}}
+            ['"]?
+            """,
+            re.IGNORECASE | re.VERBOSE,
         ),
     ),
     # Bearer tokens in headers (JWT and non-JWT)
@@ -101,20 +100,11 @@ SECRET_PATTERNS = [
             r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"
         ),
     ),
-    # URL query params with secrets: ?key=VALUE, &api-key=VALUE, etc.
-    (
-        "url_token",
-        re.compile(
-            r"[?&](?:key|token|secret|password|apikey|api[_-]key|access[_-]token|auth)"
-            r"=([A-Za-z0-9_/+=.-]{8,})",
-            re.IGNORECASE,
-        ),
-    ),
     # Passwords pasted after a keyword (English/Chinese), on same or next line
     (
         "password_value",
         re.compile(
-            r"(?:password|passwd|密码)\s*[=:]?\s*\n?\s*([A-Za-z0-9_/+=.-]{16,})\b",
+            r"(?:password|passwd|密码)\s*[=:]?\s*\n?\s*([A-Za-z0-9_/+=.-]{8,})\b",
             re.IGNORECASE,
         ),
     ),
@@ -151,6 +141,8 @@ ALLOWLIST = [
 
 _BASE64_BLOB_RE = re.compile(r"(?:[A-Za-z0-9+/]{4}){1024,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_BINARY_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0E-\x1F]")
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def should_skip_large_binary_string(text: str) -> bool:
@@ -164,11 +156,15 @@ def should_skip_large_binary_string(text: str) -> bool:
 
     # ANSI color/control sequences are common in long terminal output and should
     # still be treated as text, not binary blobs.
-    sample_without_ansi = _ANSI_ESCAPE_RE.sub("", sample)
-    if any(ord(char) < 9 or (13 < ord(char) < 32) for char in sample_without_ansi):
+    sample_without_ansi = sample if "\x1b" not in sample else _ANSI_ESCAPE_RE.sub("", sample)
+    if _BINARY_CONTROL_CHAR_RE.search(sample_without_ansi):
         return True
 
-    compact = re.sub(r"\s+", "", sample_without_ansi)
+    compact = (
+        sample_without_ansi
+        if _WHITESPACE_RE.search(sample_without_ansi) is None
+        else _WHITESPACE_RE.sub("", sample_without_ansi)
+    )
     if len(compact) < 4096:
         return False
     return _BASE64_BLOB_RE.fullmatch(compact) is not None
@@ -213,12 +209,97 @@ def _has_mixed_char_types(s: str) -> bool:
     return has_upper and has_lower and has_digit
 
 
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _contains_general_secret_marker(text: str, lower_text: str | None, markers: tuple[str, ...]) -> tuple[bool, str]:
+    if lower_text is None:
+        lower_text = text.lower()
+    return _contains_any(lower_text, markers), lower_text
+
+
+def _pattern_may_match(name: str, text: str, lower_text: str | None) -> tuple[bool, str | None]:
+    if name in ("jwt", "jwt_partial"):
+        return "eyJ" in text, lower_text
+    if name == "db_url":
+        if lower_text is None:
+            lower_text = text.lower()
+        return "postgres" in lower_text, lower_text
+    if name == "anthropic_key":
+        return "sk-ant-" in text, lower_text
+    if name == "openai_key":
+        return "sk-" in text, lower_text
+    if name == "google_api_key":
+        return "AIzaSy" in text, lower_text
+    if name == "groq_key":
+        return "gsk_" in text, lower_text
+    if name == "telegram_token":
+        return ":" in text, lower_text
+    if name == "flyio_token":
+        return "fm1_" in text or "fm2_" in text, lower_text
+    if name == "eth_private_key":
+        return "0x" in text, lower_text
+    if name == "hf_token":
+        return "hf_" in text, lower_text
+    if name == "github_token":
+        return _contains_any(text, ("ghp_", "gho_", "ghs_", "ghr_")), lower_text
+    if name == "github_pat_token":
+        return "github_pat_" in text, lower_text
+    if name == "pypi_token":
+        return "pypi-" in text, lower_text
+    if name == "npm_token":
+        return "npm_" in text, lower_text
+    if name == "aws_key":
+        return "AKIA" in text, lower_text
+    if name == "aws_secret":
+        if "=" not in text and ":" not in text:
+            return False, lower_text
+        if lower_text is None:
+            lower_text = text.lower()
+        return _contains_any(lower_text, ("secret_key", "aws_secret_access_key")), lower_text
+    if name == "slack_token":
+        return "xox" in text, lower_text
+    if name == "discord_webhook":
+        return "discord" in text, lower_text
+    if name == "private_key":
+        return "PRIVATE KEY" in text, lower_text
+    if name == "generic_secret":
+        if (
+            "-" not in text
+            and "=" not in text
+            and ":" not in text
+            and "?" not in text
+            and "&" not in text
+            and " " not in text
+        ):
+            return False, lower_text
+        return _contains_general_secret_marker(text, lower_text, _GENERIC_SECRET_MARKERS)
+    if name == "bearer":
+        return "Bearer" in text, lower_text
+    if name == "ip_address":
+        return "." in text, lower_text
+    if name == "password_value":
+        if lower_text is None:
+            lower_text = text.lower()
+        return "password" in lower_text or "passwd" in lower_text or "密码" in text, lower_text
+    if name == "email":
+        return "@" in text, lower_text
+    if name == "high_entropy":
+        return '"' in text or "'" in text, lower_text
+    return True, lower_text
+
+
 def scan_text(text: str) -> list[dict]:
     if not text:
         return []
 
     findings = []
+    lower_text: str | None = None
     for name, pattern in SECRET_PATTERNS:
+        may_match, lower_text = _pattern_may_match(name, text, lower_text)
+        if not may_match:
+            continue
         for match in pattern.finditer(text):
             matched_text = match.group(0)
 

@@ -156,15 +156,20 @@ class TestScanText:
     def test_cli_token_flag(self):
         text = "mycli --token abcdefghijklmnop"
         findings = scan_text(text)
-        assert any(f["type"] == "cli_token_flag" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
+
+    def test_cli_client_secret_flag(self):
+        text = "mycli --client-secret abcdefghijklmnop"
+        findings = scan_text(text)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_env_secret(self):
         text = 'SECRET="my_very_secret_value_here"'
         findings = scan_text(text)
-        assert any(f["type"] == "env_secret" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_generic_secret(self):
-        text = 'api_key = "aB3xZ9qR2mK7pL4wN8yJ5tF"'
+        text = 'key = "aB3xZ9qR2mK7pL4wN8yJ5tF"'
         findings = scan_text(text)
         assert any(f["type"] == "generic_secret" for f in findings)
 
@@ -180,9 +185,14 @@ class TestScanText:
         assert any(f["type"] == "ip_address" for f in findings)
 
     def test_url_token(self):
-        text = "https://api.example.com?key=aB3xZ9qR2mK7"
+        text = "https://api.example.com?apiKey=aB3xZ9qR2mK7"
         findings = scan_text(text)
-        assert any(f["type"] == "url_token" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
+
+    def test_url_refresh_token(self):
+        text = "https://api.example.com?refresh_token=aB3xZ9qR2mK7pL4w"
+        findings = scan_text(text)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_email(self):
         text = "Contact support@company.com for help"
@@ -311,7 +321,7 @@ class TestScanText:
         assert any(f["type"] == "password_value" for f in findings)
 
     def test_password_value_too_short(self):
-        text = "password=abc123"  # only 6 chars, below 16 min
+        text = "password=abc123"  # only 6 chars, below 8-char min
         findings = scan_text(text)
         assert not any(f["type"] == "password_value" for f in findings)
 
@@ -332,17 +342,17 @@ class TestScanText:
         findings = scan_text(text)
         assert any(f["type"] == "aws_secret" for f in findings)
 
-    # -- url_token (hyphenated param fix) --
+    # -- generic_secret (hyphenated param / flag forms) --
 
     def test_url_token_api_hyphen_key(self):
         text = "https://api.example.com?api-key=aB3xZ9qR2mK7pL4w"
         findings = scan_text(text)
-        assert any(f["type"] == "url_token" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_url_token_access_hyphen_token(self):
         text = "https://api.example.com?access-token=aB3xZ9qR2mK7pL4w"
         findings = scan_text(text)
-        assert any(f["type"] == "url_token" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
     # -- bearer (non-JWT token fix) --
 
@@ -357,19 +367,24 @@ class TestScanText:
         findings = scan_text(text)
         assert any(f["type"] == "bearer" for f in findings)
 
-    # -- env_secret (PRIVATE_KEY fix) --
+    # -- generic_secret (assignment forms) --
 
     def test_env_secret_private_key(self):
         text = "PRIVATE_KEY=mySuperSecretKeyValue123"
         findings = scan_text(text)
-        assert any(f["type"] == "env_secret" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_env_secret_supabase_key(self):
         text = "SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
         findings = scan_text(text)
-        assert any(f["type"] == "env_secret" for f in findings)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
-    # -- generic_secret (JSON-quoted keys, token key name, min length fix) --
+    def test_env_secret_client_secret(self):
+        text = "CLIENT_SECRET=mySuperSecretKeyValue123"
+        findings = scan_text(text)
+        assert any(f["type"] == "generic_secret" for f in findings)
+
+    # -- generic_secret (shared across assignment, JSON, CLI, and URL forms) --
 
     def test_generic_secret_json_quoted_key(self):
         text = '"apiKey": "aB3xZ9qR2mK7pL4w"'
@@ -387,15 +402,20 @@ class TestScanText:
         assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_generic_secret_16_char_value(self):
-        # min length was lowered from 20 to 16
-        text = 'api_key = "aB3xZ9qR2mK7pL4w"'  # exactly 16 chars
+        # generic_secret currently accepts quoted values with 8+ chars
+        text = 'key = "aB3xZ9qR2mK7pL4w"'  # exactly 16 chars
         findings = scan_text(text)
         assert any(f["type"] == "generic_secret" for f in findings)
 
-    def test_generic_secret_15_char_rejected(self):
-        text = 'api_key = "aB3xZ9qR2mK7pL4"'  # 15 chars - too short
+    def test_generic_secret_7_char_rejected(self):
+        text = 'key = "aB3xZ9q"'  # 7 chars - too short
         findings = scan_text(text)
         assert not any(f["type"] == "generic_secret" for f in findings)
+
+    def test_generic_secret_refresh_token(self):
+        text = 'refreshToken = "aB3xZ9qR2mK7pL4w"'
+        findings = scan_text(text)
+        assert any(f["type"] == "generic_secret" for f in findings)
 
 
 # --- Allowlist ---
