@@ -18,6 +18,17 @@ from .common import (
     _format_size,
 )
 
+_PII_SCANS = {
+    "emails": re.compile(r"[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}"),
+    "jwt_tokens": re.compile(r"eyJ[A-Za-z0-9_-]{20,}"),
+    "api_keys": re.compile(r"(ghp_|sk-|hf_)[A-Za-z0-9_-]{10,}"),
+    "ip_addresses": re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"),
+}
+_PII_FALSE_POSITIVE_EMAIL_SUBSTRINGS = frozenset(
+    {"noreply", "pytest.fixture", "mcp.tool", "mcp.resource", "server.tool", "tasks.loop", "github.com"}
+)
+_PII_FALSE_POSITIVE_API_KEYS = frozenset({"sk-notification"})
+
 
 def _find_export_file(file_path: Path | None) -> Path:
     if file_path and file_path.exists():
@@ -146,36 +157,42 @@ def _scan_high_entropy_strings(content: str, max_results: int = 15) -> list[dict
 
 
 def _scan_pii(file_path: Path) -> dict:
-    scans = {
-        "emails": re.compile(r"[a-zA-Z0-9.+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}"),
-        "jwt_tokens": re.compile(r"eyJ[A-Za-z0-9_-]{20,}"),
-        "api_keys": re.compile(r"(ghp_|sk-|hf_)[A-Za-z0-9_-]{10,}"),
-        "ip_addresses": re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}"),
-    }
-    fp_emails = {"noreply", "pytest.fixture", "mcp.tool", "mcp.resource", "server.tool", "tasks.loop", "github.com"}
-    fp_keys = {"sk-notification"}
-    matches_by_scan: dict[str, set[str]] = {name: set() for name in scans}
+    matches_by_scan: dict[str, set[str]] = {name: set() for name in _PII_SCANS}
     high_entropy_matches: dict[str, dict] = {}
 
     try:
         with open(file_path) as f:
             for line in f:
-                for name, pattern in scans.items():
-                    matches_by_scan[name].update(pattern.findall(line))
-
-                for result in _scan_high_entropy_strings(line, max_results=50):
-                    existing = high_entropy_matches.get(result["match"])
-                    if existing is None or result["entropy"] > existing["entropy"]:
-                        high_entropy_matches[result["match"]] = result
+                _update_pii_matches(line, matches_by_scan, high_entropy_matches)
     except OSError:
         return {}
 
+    return _finalize_pii_results(matches_by_scan, high_entropy_matches)
+
+
+def _update_pii_matches(
+    line: str,
+    matches_by_scan: dict[str, set[str]],
+    high_entropy_matches: dict[str, dict],
+) -> None:
+    for name, pattern in _PII_SCANS.items():
+        matches_by_scan[name].update(pattern.findall(line))
+
+    for result in _scan_high_entropy_strings(line, max_results=50):
+        existing = high_entropy_matches.get(result["match"])
+        if existing is None or result["entropy"] > existing["entropy"]:
+            high_entropy_matches[result["match"]] = result
+
+
+def _finalize_pii_results(matches_by_scan: dict[str, set[str]], high_entropy_matches: dict[str, dict]) -> dict:
     results = {}
     for name, matches in matches_by_scan.items():
         if name == "emails":
-            matches = {match for match in matches if not any(fp in match for fp in fp_emails)}
+            matches = {
+                match for match in matches if not any(fp in match for fp in _PII_FALSE_POSITIVE_EMAIL_SUBSTRINGS)
+            }
         if name == "api_keys":
-            matches = {match for match in matches if match not in fp_keys}
+            matches = {match for match in matches if match not in _PII_FALSE_POSITIVE_API_KEYS}
         if matches:
             results[name] = sorted(matches)[:20]
 
@@ -184,6 +201,81 @@ def _scan_pii(file_path: Path) -> dict:
         results["high_entropy_strings"] = high_entropy
 
     return results
+
+
+def _format_occurrence_excerpt(line: str, max_len: int = 220) -> str:
+    excerpt = line.strip()
+    if len(excerpt) > max_len:
+        return f"{excerpt[:max_len]}..."
+    return excerpt
+
+
+def _record_text_occurrence(
+    line_no: int,
+    line: str,
+    pattern: re.Pattern[str],
+    examples: list[dict[str, object]],
+    *,
+    max_examples: int,
+) -> int:
+    if not pattern.search(line):
+        return 0
+
+    if len(examples) < max_examples:
+        examples.append({"line": line_no, "excerpt": _format_occurrence_excerpt(line)})
+    return 1
+
+
+def _scan_export_review(file_path: Path, full_name_query: str | None = None, max_examples: int = 5) -> dict:
+    full_name_pattern = None
+    if full_name_query:
+        full_name_pattern = re.compile(re.escape(full_name_query), re.IGNORECASE)
+
+    matches_by_scan: dict[str, set[str]] = {name: set() for name in _PII_SCANS}
+    high_entropy_matches: dict[str, dict] = {}
+    full_name_matches = 0
+    full_name_examples: list[dict[str, object]] = []
+    projects: dict[str, int] = {}
+    models: dict[str, int] = {}
+    total = 0
+
+    with open(file_path) as f:
+        for line_no, line in enumerate(f, start=1):
+            if full_name_pattern is not None:
+                full_name_matches += _record_text_occurrence(
+                    line_no,
+                    line,
+                    full_name_pattern,
+                    full_name_examples,
+                    max_examples=max_examples,
+                )
+
+            _update_pii_matches(line, matches_by_scan, high_entropy_matches)
+
+            line = line.strip()
+            if not line:
+                continue
+
+            row = json.loads(line)
+            total += 1
+            project = row.get("project", "<unknown>")
+            projects[project] = projects.get(project, 0) + 1
+            model = row.get("model", "<unknown>")
+            models[model] = models.get(model, 0) + 1
+
+    result = {
+        "total_sessions": total,
+        "projects": projects,
+        "models": models,
+        "pii_scan": _finalize_pii_results(matches_by_scan, high_entropy_matches),
+    }
+    if full_name_pattern is not None:
+        result["full_name_scan"] = {
+            "query": full_name_query,
+            "match_count": full_name_matches,
+            "examples": full_name_examples,
+        }
+    return result
 
 
 def _normalize_attestation_text(value: object) -> str:
@@ -206,13 +298,13 @@ def _scan_for_text_occurrences(file_path: Path, query: str, max_examples: int = 
     try:
         with open(file_path) as f:
             for line_no, line in enumerate(f, start=1):
-                if pattern.search(line):
-                    matches += 1
-                    if len(examples) < max_examples:
-                        excerpt = line.strip()
-                        if len(excerpt) > 220:
-                            excerpt = f"{excerpt[:220]}..."
-                        examples.append({"line": line_no, "excerpt": excerpt})
+                matches += _record_text_occurrence(
+                    line_no,
+                    line,
+                    pattern,
+                    examples,
+                    max_examples=max_examples,
+                )
     except OSError as e:
         return {"query": query, "match_count": 0, "examples": [], "error": str(e)}
     return {"query": query, "match_count": matches, "examples": examples}
@@ -369,6 +461,15 @@ def confirm(
         )
         sys.exit(1)
 
+    try:
+        review_scan = _scan_export_review(
+            file_path,
+            None if skip_full_name_scan else normalized_full_name,
+        )
+    except (OSError, json.JSONDecodeError) as e:
+        print(json.dumps({"error": f"Cannot read {file_path}: {e}"}))
+        sys.exit(1)
+
     if skip_full_name_scan:
         full_name_scan = {
             "query": None,
@@ -378,30 +479,14 @@ def confirm(
             "reason": "User declined sharing full name; exact-name scan skipped.",
         }
     else:
-        full_name_scan = _scan_for_text_occurrences(file_path, normalized_full_name)
-
-    projects: dict[str, int] = {}
-    models: dict[str, int] = {}
-    total = 0
-    try:
-        with open(file_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                row = json.loads(line)
-                total += 1
-                project = row.get("project", "<unknown>")
-                projects[project] = projects.get(project, 0) + 1
-                model = row.get("model", "<unknown>")
-                models[model] = models.get(model, 0) + 1
-    except (OSError, json.JSONDecodeError) as e:
-        print(json.dumps({"error": f"Cannot read {file_path}: {e}"}))
-        sys.exit(1)
+        full_name_scan = review_scan["full_name_scan"]
 
     file_size = file_path.stat().st_size
     repo_id = config.get("repo")
-    pii_findings = _scan_pii(file_path)
+    pii_findings = review_scan["pii_scan"]
+    projects = review_scan["projects"]
+    models = review_scan["models"]
+    total = review_scan["total_sessions"]
 
     config["stage"] = "confirmed"
     config["review_attestations"] = attestations
