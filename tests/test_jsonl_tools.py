@@ -82,3 +82,39 @@ class TestDiffJsonlFiles:
         docs = list(yaml.safe_load_all(output_path.read_text(encoding="utf-8")))
         assert docs[0]["summary"]["modified_records"] == 1
         assert docs[1]["patch"][0]["path"] == "/messages/0/tool_uses/0/output/raw"
+
+    def test_skips_jd_for_large_blob_replacements(self, tmp_path, monkeypatch):
+        old_path = tmp_path / "old.jsonl"
+        new_path = tmp_path / "new.jsonl"
+        output_path = tmp_path / "diff.yaml"
+
+        old_blob = "A" * 5000
+        new_blob = "B" * 5000
+        old_path.write_text(
+            '{"source":"gemini","project":"proj","session_id":"s1","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content_parts":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"'
+            + old_blob
+            + '"}}]}]}'
+            + "\n",
+            encoding="utf-8",
+        )
+        new_path.write_text(
+            '{"source":"gemini","project":"proj","session_id":"s1","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content_parts":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"'
+            + new_blob
+            + '"}}]}]}'
+            + "\n",
+            encoding="utf-8",
+        )
+
+        def fail_run_jd_patch(_old, _new):
+            raise AssertionError("run_jd_patch should not be called for large blob diffs")
+
+        monkeypatch.setattr("dataclaw.jsonl_tools.run_jd_patch", fail_run_jd_patch)
+
+        result = jsonl_tools.diff_jsonl_files(old_path, new_path, output_path)
+
+        assert result.event_count == 1
+        docs = list(yaml.safe_load_all(output_path.read_text(encoding="utf-8")))
+        patch = docs[1]["patch"]
+        assert patch[0]["op"] == "replace_large_blob"
+        assert patch[0]["old"]["messages"][0]["content_parts"][0]["source"]["data"]["type"] == "large_blob"
+        assert patch[0]["new"]["messages"][0]["content_parts"][0]["source"]["data"]["length"] == len(new_blob)

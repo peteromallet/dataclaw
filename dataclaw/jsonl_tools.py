@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import itertools
 import re
 import shutil
 import subprocess
@@ -18,6 +17,8 @@ from typing import Any
 
 import orjson
 import yaml
+
+from .secrets import contains_large_binary_value, summarize_large_binary_value
 
 IDENTITY_FIELDS = ("source", "project", "session_id", "start_time")
 OMITTED_ORIGINAL_FILE = "<omitted originalFile content>"
@@ -337,9 +338,25 @@ def build_text_replace_diff(old: str, new: str) -> str | None:
     return "\n".join(diff_lines)
 
 
+def build_record_patch(old: Any, new: Any) -> list[dict[str, Any]]:
+    if contains_large_binary_value(old) or contains_large_binary_value(new):
+        return expand_replace_op("", old, new)
+    return run_jd_patch(old, new)
+
+
 def expand_replace_op(path: str, old: Any, new: Any) -> list[dict[str, Any]]:
     if old == new:
         return []
+
+    if contains_large_binary_value(old) or contains_large_binary_value(new):
+        return [
+            {
+                "op": "replace_large_blob",
+                "path": path,
+                "old": summarize_large_binary_value(old),
+                "new": summarize_large_binary_value(new),
+            }
+        ]
 
     if isinstance(old, (dict, list)) and isinstance(new, type(old)):
         nested_patch = run_jd_patch(old, new)
@@ -440,7 +457,7 @@ def build_events(
                 "identity": identity_dict(key),
                 "old_line": old_entry["line_numbers"].pop(0),
                 "new_line": new_entry["line_numbers"].pop(0),
-                "patch": run_jd_patch(old_entry["obj"], new_entry["obj"]),
+                "patch": build_record_patch(old_entry["obj"], new_entry["obj"]),
             }
             if include_records_for_modified:
                 event["old_record"] = old_entry["obj"]

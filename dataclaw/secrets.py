@@ -174,6 +174,26 @@ def should_skip_large_binary_string(text: str) -> bool:
     return _BASE64_BLOB_RE.fullmatch(compact) is not None
 
 
+def contains_large_binary_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return should_skip_large_binary_string(value)
+    if isinstance(value, dict):
+        return any(contains_large_binary_value(child_value) for child_value in value.values())
+    if isinstance(value, list):
+        return any(contains_large_binary_value(item) for item in value)
+    return False
+
+
+def summarize_large_binary_value(value: Any) -> Any:
+    if isinstance(value, str) and should_skip_large_binary_string(value):
+        return {"type": "large_blob", "length": len(value)}
+    if isinstance(value, dict):
+        return {key: summarize_large_binary_value(child_value) for key, child_value in value.items()}
+    if isinstance(value, list):
+        return [summarize_large_binary_value(item) for item in value]
+    return value
+
+
 def _shannon_entropy(s: str) -> float:
     """Higher values indicate more random-looking strings."""
     if not s:
