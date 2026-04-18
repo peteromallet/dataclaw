@@ -83,7 +83,7 @@ SECRET_PATTERNS = [
             ['"]?
             (?:\s*[=:]\s*|\s+)
             ['"]?
-            [A-Za-z0-9_/+=.-]{{8,}}
+            [A-Za-z0-9_/+=.-]{{16,}}
             ['"]?
             """,
             re.IGNORECASE | re.VERBOSE,

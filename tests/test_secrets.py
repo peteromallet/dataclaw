@@ -185,7 +185,7 @@ class TestScanText:
         assert any(f["type"] == "ip_address" for f in findings)
 
     def test_url_token(self):
-        text = "https://api.example.com?apiKey=aB3xZ9qR2mK7"
+        text = "https://api.example.com?apiKey=aB3xZ9qR2mK7pL4w"
         findings = scan_text(text)
         assert any(f["type"] == "generic_secret" for f in findings)
 
@@ -402,7 +402,7 @@ class TestScanText:
         assert any(f["type"] == "generic_secret" for f in findings)
 
     def test_generic_secret_16_char_value(self):
-        # generic_secret currently accepts quoted values with 8+ chars
+        # generic_secret currently accepts quoted values with 16+ chars
         text = 'key = "aB3xZ9qR2mK7pL4w"'  # exactly 16 chars
         findings = scan_text(text)
         assert any(f["type"] == "generic_secret" for f in findings)
