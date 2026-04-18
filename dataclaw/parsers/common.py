@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -182,8 +182,7 @@ def collect_project_sessions(
     project_name: str,
     source: str,
     default_model: str | None = None,
-) -> list[dict]:
-    sessions = []
+) -> Iterator[dict]:
     for item in items:
         parsed = parse_item(item)
         if not parsed or not parsed.get("messages"):
@@ -192,5 +191,4 @@ def collect_project_sessions(
         parsed["source"] = source
         if default_model and not parsed.get("model"):
             parsed["model"] = default_model
-        sessions.append(parsed)
-    return sessions
+        yield parsed

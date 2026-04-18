@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,7 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     session_files = get_project_index().get(project_dir_name, [])
     return collect_project_sessions(
         session_files,
@@ -114,15 +115,15 @@ def parse_session_file(
 ) -> dict | None:
     """Parse an OpenClaw session JSONL file into a structured conversation."""
     try:
-        entries = list(iter_jsonl(filepath))
+        header_entries = iter_jsonl(filepath)
+        header = next(header_entries, None)
     except OSError as e:
         logger.warning("Failed to read OpenClaw session file %s: %s", filepath, e)
         return None
 
-    if not entries:
+    if header is None:
         return None
 
-    header = entries[0]
     if header.get("type") != "session":
         return None
 
@@ -141,8 +142,168 @@ def parse_session_file(
     messages: list[dict[str, Any]] = []
     stats = make_stats()
 
-    tool_result_map: dict[str, dict] = {}
-    for entry in entries[1:]:
+    try:
+        tool_result_map = build_tool_result_map(filepath, anonymizer)
+
+        for entry in iter_entries_after_header(filepath):
+            entry_type = entry.get("type")
+            timestamp = entry.get("timestamp")
+
+            if entry_type == "model_change":
+                provider = entry.get("provider", "")
+                model_id = entry.get("modelId", "")
+                if model_id:
+                    metadata["model"] = f"{provider}/{model_id}" if provider else model_id
+
+            if entry_type != "message":
+                continue
+
+            msg_data = entry.get("message", {})
+            role = msg_data.get("role")
+            msg_ts = msg_data.get("timestamp")
+            if isinstance(msg_ts, (int, float)):
+                msg_ts = normalize_timestamp(msg_ts)
+            effective_ts = msg_ts or timestamp
+
+            if role == "user":
+                content = msg_data.get("content")
+                if isinstance(content, list):
+                    text_parts = [
+                        block.get("text", "")
+                        for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    ]
+                    text = "\n".join(text_parts)
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    continue
+                if not text.strip():
+                    continue
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": anonymizer.text(text.strip()),
+                        "timestamp": effective_ts,
+                    }
+                )
+                stats["user_messages"] += 1
+                update_time_bounds(metadata, effective_ts)
+
+            elif role == "assistant":
+                model = msg_data.get("model")
+                if model and metadata["model"] is None:
+                    provider = msg_data.get("provider", "")
+                    metadata["model"] = f"{provider}/{model}" if provider else model
+
+                usage = msg_data.get("usage", {})
+                if isinstance(usage, dict):
+                    stats["input_tokens"] += safe_int(usage.get("input")) + safe_int(usage.get("cacheRead"))
+                    stats["output_tokens"] += safe_int(usage.get("output"))
+
+                content = msg_data.get("content", [])
+                if not isinstance(content, list):
+                    continue
+
+                text_parts: list[str] = []
+                thinking_parts: list[str] = []
+                tool_uses: list[dict[str, Any]] = []
+
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+
+                    if block_type == "text":
+                        text = block.get("text", "")
+                        if isinstance(text, str) and text.strip():
+                            text_parts.append(anonymizer.text(text.strip()))
+
+                    elif block_type == "thinking" and include_thinking:
+                        thinking = block.get("thinking", "")
+                        if isinstance(thinking, str) and thinking.strip():
+                            thinking_parts.append(anonymizer.text(thinking.strip()))
+
+                    elif block_type == "toolCall":
+                        tool_name = block.get("name")
+                        args = block.get("arguments", {})
+                        tool_entry: dict[str, Any] = {
+                            "tool": tool_name,
+                            "input": parse_tool_input(tool_name, args, anonymizer),
+                        }
+                        tool_call_id = block.get("id")
+                        if tool_call_id and tool_call_id in tool_result_map:
+                            result = tool_result_map[tool_call_id]
+                            if result.get("output"):
+                                tool_entry["output"] = result["output"]
+                            if result.get("status"):
+                                tool_entry["status"] = result["status"]
+                        tool_uses.append(tool_entry)
+
+                if not text_parts and not thinking_parts and not tool_uses:
+                    continue
+
+                msg: dict[str, Any] = {"role": "assistant"}
+                if effective_ts:
+                    msg["timestamp"] = effective_ts
+                if text_parts:
+                    msg["content"] = "\n\n".join(text_parts)
+                if thinking_parts:
+                    msg["thinking"] = "\n\n".join(thinking_parts)
+                if tool_uses:
+                    msg["tool_uses"] = tool_uses
+                    stats["tool_uses"] += len(tool_uses)
+
+                messages.append(msg)
+                stats["assistant_messages"] += 1
+                update_time_bounds(metadata, effective_ts)
+
+            elif role == "bashExecution":
+                command = msg_data.get("command", "")
+                output = msg_data.get("output", "")
+                exit_code = msg_data.get("exitCode")
+                is_error = exit_code is not None and exit_code != 0
+                tool_entry: dict[str, Any] = {
+                    "tool": "bash",
+                    "input": {"command": anonymizer.text(command)} if command else {},
+                }
+                out_dict: dict[str, Any] = {}
+                if output:
+                    out_dict["text"] = anonymizer.text(output.strip())
+                if exit_code is not None:
+                    out_dict["exit_code"] = exit_code
+                if out_dict:
+                    tool_entry["output"] = out_dict
+                tool_entry["status"] = "error" if is_error else "success"
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_uses": [tool_entry],
+                        "timestamp": effective_ts,
+                    }
+                )
+                stats["assistant_messages"] += 1
+                stats["tool_uses"] += 1
+                update_time_bounds(metadata, effective_ts)
+    except OSError as e:
+        logger.warning("Failed to read OpenClaw session file %s: %s", filepath, e)
+        return None
+
+    if metadata["model"] is None:
+        metadata["model"] = "openclaw-unknown"
+
+    return make_session_result(metadata, messages, stats)
+
+
+def iter_entries_after_header(filepath: Path):
+    entries = iter_jsonl(filepath)
+    next(entries, None)
+    yield from entries
+
+
+def build_tool_result_map(filepath: Path, anonymizer: Anonymizer) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for entry in iter_entries_after_header(filepath):
         if entry.get("type") != "message":
             continue
         msg_data = entry.get("message", {})
@@ -162,153 +323,8 @@ def parse_session_file(
             output_text = content.strip()
         else:
             output_text = ""
-        tool_result_map[tool_call_id] = {
+        result[tool_call_id] = {
             "output": {"text": anonymizer.text(output_text)} if output_text else {},
             "status": "error" if is_error else "success",
         }
-
-    for entry in entries[1:]:
-        entry_type = entry.get("type")
-        timestamp = entry.get("timestamp")
-
-        if entry_type == "model_change":
-            provider = entry.get("provider", "")
-            model_id = entry.get("modelId", "")
-            if model_id:
-                metadata["model"] = f"{provider}/{model_id}" if provider else model_id
-
-        if entry_type != "message":
-            continue
-
-        msg_data = entry.get("message", {})
-        role = msg_data.get("role")
-        msg_ts = msg_data.get("timestamp")
-        if isinstance(msg_ts, (int, float)):
-            msg_ts = normalize_timestamp(msg_ts)
-        effective_ts = msg_ts or timestamp
-
-        if role == "user":
-            content = msg_data.get("content")
-            if isinstance(content, list):
-                text_parts = [
-                    block.get("text", "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                text = "\n".join(text_parts)
-            elif isinstance(content, str):
-                text = content
-            else:
-                continue
-            if not text.strip():
-                continue
-            messages.append(
-                {
-                    "role": "user",
-                    "content": anonymizer.text(text.strip()),
-                    "timestamp": effective_ts,
-                }
-            )
-            stats["user_messages"] += 1
-            update_time_bounds(metadata, effective_ts)
-
-        elif role == "assistant":
-            model = msg_data.get("model")
-            if model and metadata["model"] is None:
-                provider = msg_data.get("provider", "")
-                metadata["model"] = f"{provider}/{model}" if provider else model
-
-            usage = msg_data.get("usage", {})
-            if isinstance(usage, dict):
-                stats["input_tokens"] += safe_int(usage.get("input")) + safe_int(usage.get("cacheRead"))
-                stats["output_tokens"] += safe_int(usage.get("output"))
-
-            content = msg_data.get("content", [])
-            if not isinstance(content, list):
-                continue
-
-            text_parts: list[str] = []
-            thinking_parts: list[str] = []
-            tool_uses: list[dict[str, Any]] = []
-
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-
-                if block_type == "text":
-                    text = block.get("text", "")
-                    if isinstance(text, str) and text.strip():
-                        text_parts.append(anonymizer.text(text.strip()))
-
-                elif block_type == "thinking" and include_thinking:
-                    thinking = block.get("thinking", "")
-                    if isinstance(thinking, str) and thinking.strip():
-                        thinking_parts.append(anonymizer.text(thinking.strip()))
-
-                elif block_type == "toolCall":
-                    tool_name = block.get("name")
-                    args = block.get("arguments", {})
-                    tool_entry: dict[str, Any] = {
-                        "tool": tool_name,
-                        "input": parse_tool_input(tool_name, args, anonymizer),
-                    }
-                    tool_call_id = block.get("id")
-                    if tool_call_id and tool_call_id in tool_result_map:
-                        result = tool_result_map[tool_call_id]
-                        if result.get("output"):
-                            tool_entry["output"] = result["output"]
-                        if result.get("status"):
-                            tool_entry["status"] = result["status"]
-                    tool_uses.append(tool_entry)
-
-            if not text_parts and not thinking_parts and not tool_uses:
-                continue
-
-            msg: dict[str, Any] = {"role": "assistant"}
-            if effective_ts:
-                msg["timestamp"] = effective_ts
-            if text_parts:
-                msg["content"] = "\n\n".join(text_parts)
-            if thinking_parts:
-                msg["thinking"] = "\n\n".join(thinking_parts)
-            if tool_uses:
-                msg["tool_uses"] = tool_uses
-                stats["tool_uses"] += len(tool_uses)
-
-            messages.append(msg)
-            stats["assistant_messages"] += 1
-            update_time_bounds(metadata, effective_ts)
-
-        elif role == "bashExecution":
-            command = msg_data.get("command", "")
-            output = msg_data.get("output", "")
-            exit_code = msg_data.get("exitCode")
-            is_error = exit_code is not None and exit_code != 0
-            tool_entry: dict[str, Any] = {
-                "tool": "bash",
-                "input": {"command": anonymizer.text(command)} if command else {},
-            }
-            out_dict: dict[str, Any] = {}
-            if output:
-                out_dict["text"] = anonymizer.text(output.strip())
-            if exit_code is not None:
-                out_dict["exit_code"] = exit_code
-            if out_dict:
-                tool_entry["output"] = out_dict
-            tool_entry["status"] = "error" if is_error else "success"
-            messages.append(
-                {
-                    "role": "assistant",
-                    "tool_uses": [tool_entry],
-                    "timestamp": effective_ts,
-                }
-            )
-            stats["assistant_messages"] += 1
-            stats["tool_uses"] += 1
-            update_time_bounds(metadata, effective_ts)
-
-    if metadata["model"] is None:
-        metadata["model"] = "openclaw-unknown"
-
-    return make_session_result(metadata, messages, stats)
+    return result

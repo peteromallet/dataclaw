@@ -11,7 +11,7 @@ from ._cli.exporting import push_to_huggingface, summarize_export_jsonl, update_
 from .anonymizer import Anonymizer
 from .config import CONFIG_FILE, load_config, save_config
 from .jsonl_tools import diff_jsonl_files, jsonl_to_yaml_file
-from .parser import discover_projects, parse_project_sessions
+from .parser import discover_projects, iter_project_sessions
 
 
 def list_projects(source_filter: str = "auto") -> None:
@@ -54,7 +54,7 @@ def export_to_jsonl(
         selected_projects,
         output_path,
         anonymizer,
-        parse_project_sessions_fn=parse_project_sessions,
+        parse_project_sessions_fn=iter_project_sessions,
         default_source=DEFAULT_SOURCE,
         include_thinking=include_thinking,
         custom_strings=custom_strings,

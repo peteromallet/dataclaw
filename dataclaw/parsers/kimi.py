@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -105,11 +106,11 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     project_hash = get_project_hash(project_dir_name)
     project_path = KIMI_SESSIONS_DIR / project_hash
     if not project_path.exists():
-        return []
+        return ()
 
     context_files = []
     for session_dir in sorted(project_path.iterdir()):

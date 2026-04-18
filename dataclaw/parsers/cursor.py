@@ -1,5 +1,6 @@
 import platform
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -153,13 +154,13 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     composer_ids = get_project_index().get(project_dir_name, [])
     if not composer_ids:
-        return []
+        return
     try:
         with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
-            return collect_project_sessions(
+            yield from collect_project_sessions(
                 composer_ids,
                 lambda cid: parse_session(
                     cid,
@@ -171,7 +172,7 @@ def parse_project_sessions(
                 CURSOR_SOURCE,
             )
     except sqlite3.Error:
-        return []
+        return
 
 
 def parse_session(

@@ -1,5 +1,6 @@
 import dataclasses
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,7 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     session_files = get_project_index().get(project_dir_name, [])
     return collect_project_sessions(
         session_files,
@@ -121,7 +122,7 @@ class CodexParseState:
     pending_user_timestamp: str | None = None
 
 
-def build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
     """Pre-pass: build call_id -> {output, status} from tool outputs."""
     result: dict[str, dict] = {}
     for entry in entries:
@@ -195,43 +196,45 @@ def parse_session_file(
     )
 
     try:
-        entries = list(iter_jsonl(filepath))
+        state.tool_result_map = build_tool_result_map(iter_jsonl(filepath), anonymizer)
     except OSError as e:
         logger.warning("Failed to read Codex session file %s: %s", filepath, e)
         return None
 
-    state.tool_result_map = build_tool_result_map(entries, anonymizer)
-
     last_timestamp: str | None = None
-    for entry in entries:
-        timestamp = normalize_timestamp(entry.get("timestamp"))
-        if state.pending_user_content_parts and not _is_user_content_entry(entry):
-            _flush_pending_user_message(state, state.pending_user_timestamp or last_timestamp or timestamp)
-        last_timestamp = timestamp
-        entry_type = entry.get("type")
+    try:
+        for entry in iter_jsonl(filepath):
+            timestamp = normalize_timestamp(entry.get("timestamp"))
+            if state.pending_user_content_parts and not _is_user_content_entry(entry):
+                _flush_pending_user_message(state, state.pending_user_timestamp or last_timestamp or timestamp)
+            last_timestamp = timestamp
+            entry_type = entry.get("type")
 
-        if entry_type == "session_meta":
-            handle_session_meta(state, entry, filepath, anonymizer)
-        elif entry_type == "turn_context":
-            handle_turn_context(state, entry, anonymizer)
-        elif entry_type == "response_item":
-            handle_response_item(state, entry, anonymizer, include_thinking)
-        elif entry_type == "event_msg":
-            payload = entry.get("payload", {})
-            event_type = payload.get("type")
-            if event_type == "token_count":
-                handle_token_count(state, payload)
-            elif event_type == "agent_reasoning" and include_thinking:
-                thinking = payload.get("text")
-                if isinstance(thinking, str) and thinking.strip():
-                    cleaned = anonymizer.text(thinking.strip())
-                    if cleaned not in state._pending_thinking_seen:
-                        state._pending_thinking_seen.add(cleaned)
-                        state.pending_thinking.append(cleaned)
-            elif event_type == "user_message":
-                handle_user_message(state, payload, timestamp, anonymizer)
-            elif event_type == "agent_message":
-                handle_agent_message(state, payload, timestamp, anonymizer, include_thinking)
+            if entry_type == "session_meta":
+                handle_session_meta(state, entry, filepath, anonymizer)
+            elif entry_type == "turn_context":
+                handle_turn_context(state, entry, anonymizer)
+            elif entry_type == "response_item":
+                handle_response_item(state, entry, anonymizer, include_thinking)
+            elif entry_type == "event_msg":
+                payload = entry.get("payload", {})
+                event_type = payload.get("type")
+                if event_type == "token_count":
+                    handle_token_count(state, payload)
+                elif event_type == "agent_reasoning" and include_thinking:
+                    thinking = payload.get("text")
+                    if isinstance(thinking, str) and thinking.strip():
+                        cleaned = anonymizer.text(thinking.strip())
+                        if cleaned not in state._pending_thinking_seen:
+                            state._pending_thinking_seen.add(cleaned)
+                            state.pending_thinking.append(cleaned)
+                elif event_type == "user_message":
+                    handle_user_message(state, payload, timestamp, anonymizer)
+                elif event_type == "agent_message":
+                    handle_agent_message(state, payload, timestamp, anonymizer, include_thinking)
+    except OSError as e:
+        logger.warning("Failed to read Codex session file %s: %s", filepath, e)
+        return None
 
     state.stats["input_tokens"] = state.max_input_tokens
     state.stats["output_tokens"] = state.max_output_tokens

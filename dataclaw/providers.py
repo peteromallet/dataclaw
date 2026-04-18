@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,7 +20,7 @@ class Provider:
     hf_metadata_tag: str
     source_path: Path
     discover_projects: Callable[[], list[dict]]
-    parse_project_sessions: Callable[[str, Anonymizer, bool], list[dict]]
+    parse_project_sessions: Callable[[str, Anonymizer, bool], Iterable[dict]]
 
     def has_session_source(self) -> bool:
         return self.source_path.exists()

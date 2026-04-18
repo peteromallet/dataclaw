@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 from .. import _json as json
@@ -51,15 +52,14 @@ def parse_project_sessions(
     anonymizer: Anonymizer,
     include_thinking: bool = True,
     custom_dir: Path | None = None,
-) -> list[dict]:
+) -> Iterable[dict]:
     if custom_dir is None:
         custom_dir = CUSTOM_DIR
     project_path = custom_dir / project_dir_name
     if not project_path.exists():
-        return []
+        return
 
     required_fields = {"session_id", "model", "messages"}
-    sessions = []
     for jsonl_file in sorted(project_path.glob("*.jsonl")):
         try:
             for line_num, line in enumerate(jsonl_file.open(), 1):
@@ -100,16 +100,17 @@ def parse_project_sessions(
                     if "content" in msg and isinstance(msg["content"], str):
                         redacted, _ = redact_text(msg["content"])
                         msg["content"] = anonymizer.text(redacted)
-                sessions.append(session)
+                yield session
         except OSError:
             logger.warning("custom:%s: failed to read %s", project_dir_name, jsonl_file.name)
-    return sessions
 
 
 def parse_sessions(project_dir_name: str, custom_dir: Path, anonymizer: Anonymizer) -> list[dict]:
-    return parse_project_sessions(
-        project_dir_name,
-        anonymizer,
-        include_thinking=True,
-        custom_dir=custom_dir,
+    return list(
+        parse_project_sessions(
+            project_dir_name,
+            anonymizer,
+            include_thinking=True,
+            custom_dir=custom_dir,
+        )
     )

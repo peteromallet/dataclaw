@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable
 
@@ -155,10 +156,10 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     project_path = GEMINI_DIR / project_dir_name / "chats"
     if not project_path.exists():
-        return []
+        return ()
 
     return collect_project_sessions(
         sorted(project_path.glob("session-*.json")),

@@ -222,6 +222,32 @@ class TestExportToJsonl:
         )
         assert meta["redactions"] >= 1
 
+    def test_accepts_session_iterators(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        projects = [{"dir_name": "test", "display_name": "test"}]
+
+        def iter_sessions(*args, **kwargs):
+            del args, kwargs
+            yield {
+                "session_id": "s1",
+                "model": "claude-sonnet-4-20250514",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {"input_tokens": 10, "output_tokens": 5},
+                "project": "test",
+            }
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=iter_sessions,
+            default_source="claude",
+        )
+
+        assert output.exists()
+        assert output.read_text().count("\n") == 1
+        assert meta["sessions"] == 1
+
     def test_skips_none_model(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
         session_data = [

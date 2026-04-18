@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +65,7 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     session_ids = get_project_index().get(project_dir_name, [])
     return collect_project_sessions(
         session_ids,
@@ -87,7 +88,7 @@ def build_project_index(db_path: Path) -> dict[str, list[str]]:
     index: dict[str, list[str]] = {}
     try:
         with sqlite3.connect(db_path) as conn:
-            rows = conn.execute("SELECT id, directory FROM session ORDER BY time_updated DESC, id DESC").fetchall()
+            rows = conn.execute("SELECT id, directory FROM session ORDER BY time_updated DESC, id DESC")
     except sqlite3.Error as e:
         logger.warning("Failed to query OpenCode database %s: %s", db_path, e)
         return {}
@@ -145,7 +146,7 @@ def parse_session(
             message_rows = conn.execute(
                 "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
                 (session_id,),
-            ).fetchall()
+            )
 
             for message_row in message_rows:
                 message_data = load_json_field(message_row["data"])
@@ -156,11 +157,7 @@ def parse_session(
                 if metadata["model"] is None and model:
                     metadata["model"] = model
 
-                part_rows = conn.execute(
-                    "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC",
-                    (message_row["id"],),
-                ).fetchall()
-                parts = [load_json_field(part_row["data"]) for part_row in part_rows]
+                parts = iter_message_parts(conn, message_row["id"])
 
                 if role == "user":
                     msg = extract_user_message(parts, anonymizer)
@@ -208,6 +205,15 @@ def extract_model(message_data: dict[str, Any]) -> str | None:
     return None
 
 
+def iter_message_parts(conn: sqlite3.Connection, message_id: str) -> Iterator[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC",
+        (message_id,),
+    )
+    for part_row in rows:
+        yield load_json_field(part_row["data"])
+
+
 def build_opencode_file_source(url: Any, mime: Any, anonymizer: Anonymizer) -> dict[str, Any] | None:
     if not isinstance(url, str) or not url:
         return None
@@ -245,7 +251,7 @@ def extract_opencode_file_part(part: dict[str, Any], anonymizer: Anonymizer) -> 
     return {"type": "document", "source": source}
 
 
-def extract_user_message(parts: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, Any] | None:
+def extract_user_message(parts: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, Any] | None:
     text_parts: list[str] = []
     content_parts: list[dict[str, Any]] = []
     for part in parts:
@@ -273,7 +279,7 @@ def extract_user_message(parts: list[dict[str, Any]], anonymizer: Anonymizer) ->
 
 
 def extract_assistant_content(
-    parts: list[dict[str, Any]],
+    parts: Iterable[dict[str, Any]],
     anonymizer: Anonymizer,
     include_thinking: bool,
 ) -> dict[str, Any] | None:

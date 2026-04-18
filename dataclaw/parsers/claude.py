@@ -1,4 +1,6 @@
+import heapq
 import re
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -57,33 +59,30 @@ def parse_project_sessions(
     anonymizer: Anonymizer,
     include_thinking: bool = True,
     projects_dir: Path | None = None,
-) -> list[dict]:
+) -> Iterable[dict]:
     if projects_dir is None:
         projects_dir = PROJECTS_DIR
 
     project_path = projects_dir / project_dir_name
     if not project_path.exists():
-        return []
+        return
 
     project_name = build_project_name(project_dir_name)
-    sessions = collect_project_sessions(
+    yield from collect_project_sessions(
         sorted(project_path.glob("*.jsonl")),
         lambda session_file: parse_session_file(session_file, anonymizer, include_thinking),
         project_name,
         SOURCE,
     )
-    sessions.extend(
-        collect_project_sessions(
-            find_subagent_sessions(project_path),
-            lambda session_dir: parse_subagent_session(session_dir, anonymizer, include_thinking),
-            project_name,
-            SOURCE,
-        )
+    yield from collect_project_sessions(
+        find_subagent_sessions(project_path),
+        lambda session_dir: parse_subagent_session(session_dir, anonymizer, include_thinking),
+        project_name,
+        SOURCE,
     )
-    return sessions
 
 
-def build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
     """Pre-pass: build a map of tool_use_id -> {output, status} from tool_result blocks."""
     result: dict[str, dict] = {}
     for entry in entries:
@@ -347,21 +346,19 @@ def parse_session_file(
     stats = make_stats()
 
     try:
-        entries = list(iter_jsonl(filepath))
+        tool_result_map = build_tool_result_map(iter_jsonl(filepath), anonymizer)
+        for entry in iter_jsonl(filepath):
+            process_entry(
+                entry,
+                messages,
+                metadata,
+                stats,
+                anonymizer,
+                include_thinking,
+                tool_result_map,
+            )
     except OSError:
         return None
-
-    tool_result_map = build_tool_result_map(entries, anonymizer)
-    for entry in entries:
-        process_entry(
-            entry,
-            messages,
-            metadata,
-            stats,
-            anonymizer,
-            include_thinking,
-            tool_result_map,
-        )
 
     return make_session_result(metadata, messages, stats)
 
@@ -394,16 +391,9 @@ def parse_subagent_session(
     if not subagent_dir.is_dir():
         return None
 
-    timed_entries: list[tuple[str, dict[str, Any]]] = []
-    for sa_file in sorted(subagent_dir.glob("agent-*.jsonl")):
-        for entry in iter_jsonl(sa_file):
-            ts = entry.get("timestamp", "")
-            timed_entries.append((ts if isinstance(ts, str) else "", entry))
-
-    if not timed_entries:
+    subagent_files = sorted(subagent_dir.glob("agent-*.jsonl"))
+    if not subagent_files:
         return None
-
-    timed_entries.sort(key=lambda pair: pair[0])
 
     messages: list[dict[str, Any]] = []
     metadata = {
@@ -417,18 +407,26 @@ def parse_subagent_session(
     }
     stats = make_stats()
 
-    entries = [entry for _ts, entry in timed_entries]
-    tool_result_map = build_tool_result_map(entries, anonymizer)
-    for entry in entries:
-        process_entry(
-            entry,
-            messages,
-            metadata,
-            stats,
-            anonymizer,
-            include_thinking,
-            tool_result_map,
-        )
+    try:
+        tool_result_map = build_tool_result_map(iter_sorted_subagent_entries(subagent_files), anonymizer)
+
+        saw_entry = False
+        for entry in iter_sorted_subagent_entries(subagent_files):
+            saw_entry = True
+            process_entry(
+                entry,
+                messages,
+                metadata,
+                stats,
+                anonymizer,
+                include_thinking,
+                tool_result_map,
+            )
+    except OSError:
+        return None
+
+    if not saw_entry:
+        return None
 
     metadata["session_id"] = resolve_subagent_session_id(session_dir, metadata["session_id"])
     return make_session_result(metadata, messages, stats)
@@ -439,6 +437,29 @@ def resolve_subagent_session_id(session_dir: Path, session_id: str) -> str:
     if root_session_file.exists():
         return f"{session_id}:subagents"
     return session_id
+
+
+def _entry_sort_timestamp(entry: dict[str, Any]) -> str:
+    timestamp = entry.get("timestamp", "")
+    return timestamp if isinstance(timestamp, str) else ""
+
+
+def iter_sorted_subagent_entries(subagent_files: list[Path]) -> Iterator[dict[str, Any]]:
+    heap: list[tuple[str, int, dict[str, Any], Iterator[dict[str, Any]]]] = []
+
+    for file_index, sa_file in enumerate(subagent_files):
+        entries = iter_jsonl(sa_file)
+        first_entry = next(entries, None)
+        if first_entry is None:
+            continue
+        heapq.heappush(heap, (_entry_sort_timestamp(first_entry), file_index, first_entry, entries))
+
+    while heap:
+        _timestamp, file_index, entry, entries = heapq.heappop(heap)
+        yield entry
+        next_entry = next(entries, None)
+        if next_entry is not None:
+            heapq.heappush(heap, (_entry_sort_timestamp(next_entry), file_index, next_entry, entries))
 
 
 def process_entry(
