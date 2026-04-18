@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,17 +100,21 @@ def yaml_dump_documents(documents: Iterable[dict[str, Any]], output_path: Path) 
     with output_path.open("w", encoding="utf-8") as handle:
         decoded_handle = DecodeStream(handle)
         for document in documents:
-            handle.write("---\n")
-            yaml.dump(
-                clean_strings(document),
-                decoded_handle,
-                Dumper=Dumper,
-                default_flow_style=False,
-                allow_unicode=True,
-                width=_YAML_WIDTH,
-                sort_keys=False,
-            )
+            _yaml_dump_document(document, handle, decoded_handle)
     return output_path
+
+
+def _yaml_dump_document(document: dict[str, Any], handle, decoded_handle: DecodeStream) -> None:
+    handle.write("---\n")
+    yaml.dump(
+        clean_strings(document),
+        decoded_handle,
+        Dumper=Dumper,
+        default_flow_style=False,
+        allow_unicode=True,
+        width=_YAML_WIDTH,
+        sort_keys=False,
+    )
 
 
 def jsonl_to_yaml_file(input_path: Path, output_path: Path | None = None) -> Path:
@@ -403,8 +407,9 @@ def build_events(
     old_records: dict[tuple[Any, ...], dict[str, Any]],
     new_records: dict[tuple[Any, ...], dict[str, Any]],
     include_records_for_modified: bool,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    events: list[dict[str, Any]] = []
+    emit_event: Callable[[dict[str, Any]], None],
+) -> tuple[int, dict[str, int]]:
+    event_count = 0
     summary = {
         "unchanged_records": 0,
         "modified_records": 0,
@@ -440,7 +445,8 @@ def build_events(
             if include_records_for_modified:
                 event["old_record"] = old_entry["obj"]
                 event["new_record"] = new_entry["obj"]
-            events.append(event)
+            emit_event(event)
+            event_count += 1
             summary["modified_records"] += 1
 
         old_leftovers = Counter(old_unmatched)
@@ -452,7 +458,7 @@ def build_events(
             entry = old_records[key][digest]
             lines = entry["line_numbers"][:count]
             del entry["line_numbers"][:count]
-            events.append(
+            emit_event(
                 {
                     "change_type": "removed",
                     "identity": identity_dict(key),
@@ -461,6 +467,7 @@ def build_events(
                     "record": entry["obj"],
                 }
             )
+            event_count += 1
             summary["removed_records"] += count
 
         for digest, count in new_leftovers.items():
@@ -469,7 +476,7 @@ def build_events(
             entry = new_records[key][digest]
             lines = entry["line_numbers"][:count]
             del entry["line_numbers"][:count]
-            events.append(
+            emit_event(
                 {
                     "change_type": "added",
                     "identity": identity_dict(key),
@@ -478,9 +485,10 @@ def build_events(
                     "record": entry["obj"],
                 }
             )
+            event_count += 1
             summary["added_records"] += count
 
-    return events, summary
+    return event_count, summary
 
 
 def diff_jsonl_files(
@@ -501,25 +509,38 @@ def diff_jsonl_files(
     old_records = load_records_for_keys(old_path, changed_key_set)
     new_records = load_records_for_keys(new_path, changed_key_set)
 
-    events, event_summary = build_events(
-        old_index,
-        new_index,
-        old_records,
-        new_records,
-        include_records_for_modified=include_records_for_modified,
-    )
-    summary = {
-        "old_records": old_index.total_records,
-        "new_records": new_index.total_records,
-        "changed_identity_keys": len(changed_keys),
-        **event_summary,
-    }
-    header = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "old_file": str(old_path),
-        "new_file": str(new_path),
-        "identity_fields": list(IDENTITY_FIELDS),
-        "summary": summary,
-    }
-    yaml_dump_documents(itertools.chain([header], events), output_path)
-    return DiffResult(output_path=output_path, event_count=len(events), summary=summary)
+    with tempfile.TemporaryDirectory(prefix="jsonl-diff-events-") as temp_dir:
+        events_path = Path(temp_dir) / "events.yaml"
+        with events_path.open("w", encoding="utf-8") as events_handle:
+            events_decoded_handle = DecodeStream(events_handle)
+            event_count, event_summary = build_events(
+                old_index,
+                new_index,
+                old_records,
+                new_records,
+                include_records_for_modified=include_records_for_modified,
+                emit_event=lambda event: _yaml_dump_document(event, events_handle, events_decoded_handle),
+            )
+
+        summary = {
+            "old_records": old_index.total_records,
+            "new_records": new_index.total_records,
+            "changed_identity_keys": len(changed_keys),
+            **event_summary,
+        }
+        header = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "old_file": str(old_path),
+            "new_file": str(new_path),
+            "identity_fields": list(IDENTITY_FIELDS),
+            "summary": summary,
+        }
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as output_handle:
+            output_decoded_handle = DecodeStream(output_handle)
+            _yaml_dump_document(header, output_handle, output_decoded_handle)
+            with events_path.open(encoding="utf-8") as events_handle:
+                shutil.copyfileobj(events_handle, output_handle)
+
+    return DiffResult(output_path=output_path, event_count=event_count, summary=summary)
