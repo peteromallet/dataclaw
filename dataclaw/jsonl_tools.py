@@ -325,7 +325,7 @@ def join_json_pointer(path_prefix: str, child_path: str) -> str:
     return f"{path_prefix}/{child_path}"
 
 
-def match_key_for_array_item(value: Any) -> tuple[Any, ...] | None:
+def exact_match_key_for_array_item(value: Any) -> tuple[Any, ...] | None:
     if not isinstance(value, dict):
         return None
 
@@ -343,6 +343,65 @@ def match_key_for_array_item(value: Any) -> tuple[Any, ...] | None:
     return None
 
 
+def loose_match_key_for_array_item(value: Any) -> tuple[Any, ...] | None:
+    if not isinstance(value, dict):
+        return None
+
+    if "role" in value and "timestamp" in value:
+        tools = []
+        for tool_use in value.get("tool_uses", []):
+            if isinstance(tool_use, dict):
+                tools.append(tool_use.get("tool"))
+        return (
+            "message",
+            value.get("role"),
+            value.get("timestamp"),
+            tuple(tools),
+            "thinking" in value,
+            "content_parts" in value,
+        )
+
+    if "tool" in value and isinstance(value.get("input"), dict):
+        return ("tool_use", value.get("tool"), tuple(sorted(value.get("input", {}))))
+
+    return None
+
+
+def _pair_array_item_ops(
+    remove_ops: list[dict[str, Any]],
+    add_ops: list[dict[str, Any]],
+    key_fn,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]], list[dict[str, Any]]] | None:
+    add_buckets: dict[tuple[Any, ...], deque[dict[str, Any]]] = {}
+    add_keys: list[tuple[Any, ...]] = []
+    for op in add_ops:
+        key = key_fn(op.get("value"))
+        if key is None:
+            return None
+        add_buckets.setdefault(key, deque()).append(op)
+        add_keys.append(key)
+
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    paired_remove_ids: set[int] = set()
+    paired_add_ids: set[int] = set()
+
+    for op in remove_ops:
+        key = key_fn(op.get("value"))
+        if key is None:
+            return None
+        add_queue = add_buckets.get(key)
+        if not add_queue:
+            continue
+        add_op = add_queue.popleft()
+        pairs.append((op, add_op))
+        paired_remove_ids.add(id(op))
+        paired_add_ids.add(id(add_op))
+
+    remaining_removes = [op for op in remove_ops if id(op) not in paired_remove_ids]
+    remaining_adds = [op for op in add_ops if id(op) not in paired_add_ids]
+    return pairs, remaining_removes, remaining_adds
+
+
 def expand_array_item_run(ops: list[dict[str, Any]], path_prefix: str) -> list[dict[str, Any]] | None:
     if not ops:
         return []
@@ -355,31 +414,28 @@ def expand_array_item_run(ops: list[dict[str, Any]], path_prefix: str) -> list[d
     if not removes or not adds:
         return None
 
-    remove_buckets: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    add_buckets: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    for op in removes:
-        key = match_key_for_array_item(op.get("value"))
-        if key is None:
-            return None
-        remove_buckets.setdefault(key, []).append(op)
-    for op in adds:
-        key = match_key_for_array_item(op.get("value"))
-        if key is None:
-            return None
-        add_buckets.setdefault(key, []).append(op)
-
-    if set(remove_buckets) != set(add_buckets):
+    exact_pairs_result = _pair_array_item_ops(removes, adds, exact_match_key_for_array_item)
+    if exact_pairs_result is None:
         return None
+
+    exact_pairs, remaining_removes, remaining_adds = exact_pairs_result
+    loose_pairs_result = _pair_array_item_ops(remaining_removes, remaining_adds, loose_match_key_for_array_item)
+    if loose_pairs_result is None:
+        return None
+
+    loose_pairs, final_removes, final_adds = loose_pairs_result
 
     expanded: list[dict[str, Any]] = []
     full_path = join_json_pointer(path_prefix, path)
-    for key in sorted(remove_buckets, key=str):
-        remove_items = remove_buckets[key]
-        add_items = add_buckets[key]
-        if len(remove_items) != len(add_items):
-            return None
-        for remove_op, add_op in zip(remove_items, add_items, strict=True):
-            expanded.extend(expand_replace_op(full_path, remove_op.get("value"), add_op.get("value")))
+
+    for remove_op, add_op in [*exact_pairs, *loose_pairs]:
+        expanded.extend(expand_replace_op(full_path, remove_op.get("value"), add_op.get("value")))
+
+    for remove_op in final_removes:
+        expanded.append({"op": "remove", "path": full_path, "value": remove_op.get("value")})
+    for add_op in final_adds:
+        expanded.append({"op": "add", "path": full_path, "value": add_op.get("value")})
+
     return expanded
 
 

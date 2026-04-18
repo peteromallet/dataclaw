@@ -72,6 +72,102 @@ class TestSimplifyPatchOps:
 
         assert result == [{"op": "add", "path": "/messages/0/tool_uses/0/output/raw", "value": {"type": "text"}}]
 
+    def test_matches_remove_add_messages_with_same_timestamp_and_diffs_content(self, monkeypatch):
+        old_message = {
+            "role": "user",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "content": "old request",
+        }
+        new_message = {
+            "role": "user",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "content": "new request",
+        }
+
+        def fake_run_jd_patch(old_obj, new_obj):
+            if old_obj == old_message and new_obj == new_message:
+                return [{"op": "replace", "path": "/content", "old": "old request", "new": "new request"}]
+            raise AssertionError("Unexpected jd patch request")
+
+        monkeypatch.setattr("dataclaw.jsonl_tools.run_jd_patch", fake_run_jd_patch)
+
+        result = jsonl_tools.simplify_patch_ops(
+            [
+                {"op": "remove", "path": "/messages/19", "value": old_message},
+                {"op": "add", "path": "/messages/19", "value": new_message},
+            ]
+        )
+
+        assert result == [{"op": "replace", "path": "/messages/19/content", "old": "old request", "new": "new request"}]
+
+    def test_matches_remove_add_tool_uses_by_tool_and_structure(self, monkeypatch):
+        old_tool_use = {
+            "tool": "shell_command",
+            "input": {
+                "command": "sed -n '1,5p' file.py",
+                "workdir": "/tmp/project",
+            },
+            "output": {
+                "output": "old output",
+                "exit_code": 0,
+            },
+            "status": "success",
+        }
+        new_tool_use = {
+            "tool": "shell_command",
+            "input": {
+                "command": "sed -n '6,10p' file.py",
+                "workdir": "/tmp/project",
+            },
+            "output": {
+                "output": "new output",
+                "exit_code": 0,
+            },
+            "status": "success",
+        }
+
+        def fake_run_jd_patch(old_obj, new_obj):
+            if old_obj == old_tool_use and new_obj == new_tool_use:
+                return [
+                    {
+                        "op": "replace",
+                        "path": "/input/command",
+                        "old": "sed -n '1,5p' file.py",
+                        "new": "sed -n '6,10p' file.py",
+                    },
+                    {
+                        "op": "replace",
+                        "path": "/output/output",
+                        "old": "old output",
+                        "new": "new output",
+                    },
+                ]
+            raise AssertionError("Unexpected jd patch request")
+
+        monkeypatch.setattr("dataclaw.jsonl_tools.run_jd_patch", fake_run_jd_patch)
+
+        result = jsonl_tools.simplify_patch_ops(
+            [
+                {"op": "remove", "path": "/messages/1/tool_uses/20", "value": old_tool_use},
+                {"op": "add", "path": "/messages/1/tool_uses/20", "value": new_tool_use},
+            ]
+        )
+
+        assert result == [
+            {
+                "op": "replace",
+                "path": "/messages/1/tool_uses/20/input/command",
+                "old": "sed -n '1,5p' file.py",
+                "new": "sed -n '6,10p' file.py",
+            },
+            {
+                "op": "replace",
+                "path": "/messages/1/tool_uses/20/output/output",
+                "old": "old output",
+                "new": "new output",
+            },
+        ]
+
 
 class TestBuildTextReplaceDiff:
     def test_limits_context_to_three_surrounding_lines(self):
