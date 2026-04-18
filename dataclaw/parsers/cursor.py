@@ -77,9 +77,8 @@ def _build_project_index() -> dict[str, list[str]]:
     index: dict[str, list[str]] = {}
     try:
         with sqlite3.connect(f"file:{CURSOR_DB}?mode=ro", uri=True) as conn:
-            rows = conn.execute("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'").fetchall()
-
             cid_to_first_bid: dict[str, str] = {}
+            rows = conn.execute("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
             for key, value in rows:
                 cid = key.replace("composerData:", "")
                 try:
@@ -96,32 +95,36 @@ def _build_project_index() -> dict[str, list[str]]:
             if not cid_to_first_bid:
                 return index
 
-            bubble_keys = [f"bubbleId:{cid}:{bid}" for cid, bid in cid_to_first_bid.items()]
             conn.execute("CREATE TEMP TABLE _dc_keys(k TEXT)")
-            conn.executemany("INSERT INTO _dc_keys VALUES(?)", [(k,) for k in bubble_keys])
-            bubble_rows = conn.execute(
-                "SELECT nk.k, kv.value FROM _dc_keys nk JOIN cursorDiskKV kv ON nk.k = kv.key"
-            ).fetchall()
-            conn.execute("DROP TABLE _dc_keys")
-
             found_cids: set[str] = set()
-            for key, val in bubble_rows:
-                parts = key.split(":")
-                cid = parts[1] if len(parts) >= 3 else ""
-                found_cids.add(cid)
-                try:
-                    bubble = json.loads(val) if isinstance(val, (str, bytes)) else {}
-                except (json.JSONDecodeError, TypeError):
-                    index.setdefault(UNKNOWN_CURSOR_CWD, []).append(cid)
-                    continue
-                wuris = bubble.get("workspaceUris", [])
-                if wuris and isinstance(wuris, list) and wuris[0]:
-                    uri = wuris[0]
-                    if uri.startswith("file://"):
-                        uri = uri[7:]
-                    index.setdefault(uri, []).append(cid)
-                else:
-                    index.setdefault(UNKNOWN_CURSOR_CWD, []).append(cid)
+            try:
+                conn.executemany(
+                    "INSERT INTO _dc_keys VALUES(?)",
+                    ((f"bubbleId:{cid}:{bid}",) for cid, bid in cid_to_first_bid.items()),
+                )
+                bubble_rows = conn.execute(
+                    "SELECT nk.k, kv.value FROM _dc_keys nk JOIN cursorDiskKV kv ON nk.k = kv.key"
+                )
+
+                for key, val in bubble_rows:
+                    parts = key.split(":")
+                    cid = parts[1] if len(parts) >= 3 else ""
+                    found_cids.add(cid)
+                    try:
+                        bubble = json.loads(val) if isinstance(val, (str, bytes)) else {}
+                    except (json.JSONDecodeError, TypeError):
+                        index.setdefault(UNKNOWN_CURSOR_CWD, []).append(cid)
+                        continue
+                    wuris = bubble.get("workspaceUris", [])
+                    if wuris and isinstance(wuris, list) and wuris[0]:
+                        uri = wuris[0]
+                        if uri.startswith("file://"):
+                            uri = uri[7:]
+                        index.setdefault(uri, []).append(cid)
+                    else:
+                        index.setdefault(UNKNOWN_CURSOR_CWD, []).append(cid)
+            finally:
+                conn.execute("DROP TABLE IF EXISTS _dc_keys")
 
             for cid in cid_to_first_bid:
                 if cid not in found_cids:

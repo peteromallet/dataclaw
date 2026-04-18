@@ -1,5 +1,7 @@
 """Tests for Cursor parser behavior."""
 
+import sqlite3
+
 from dataclaw import _json as json
 from dataclaw.parser import discover_projects, parse_project_sessions
 from tests.parser_helpers import disable_other_providers, insert_cursor_conversation, write_cursor_db
@@ -81,6 +83,73 @@ class TestCursorDiscoverProjects:
 
         monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
         assert discover_projects() == []
+
+    def test_discover_projects_does_not_use_fetchall(self, tmp_path, monkeypatch):
+        disable_other_providers(monkeypatch, tmp_path, keep={"cursor"})
+        db_path = tmp_path / "state.vscdb"
+        conn = write_cursor_db(db_path)
+        insert_cursor_conversation(
+            conn,
+            "conv-1",
+            [
+                {
+                    "id": "b1",
+                    "type": 1,
+                    "text": "Hello",
+                    "createdAt": 1706000000000,
+                    "workspaceUris": ["file:///Users/testuser/work/repo"],
+                },
+                {"id": "b2", "type": 2, "text": "Hi there!", "createdAt": 1706000001000},
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        class CursorWrapper:
+            def __init__(self, cursor):
+                self._cursor = cursor
+
+            def __iter__(self):
+                return iter(self._cursor)
+
+            def fetchall(self):
+                raise AssertionError("fetchall should not be called during Cursor discovery")
+
+            def __getattr__(self, name):
+                return getattr(self._cursor, name)
+
+        class ConnectionWrapper:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __enter__(self):
+                self._conn.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return self._conn.__exit__(exc_type, exc, tb)
+
+            def execute(self, *args, **kwargs):
+                return CursorWrapper(self._conn.execute(*args, **kwargs))
+
+            def executemany(self, *args, **kwargs):
+                return CursorWrapper(self._conn.executemany(*args, **kwargs))
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        real_connect = sqlite3.connect
+
+        def wrapped_connect(*args, **kwargs):
+            return ConnectionWrapper(real_connect(*args, **kwargs))
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        monkeypatch.setattr("dataclaw.parsers.cursor.sqlite3.connect", wrapped_connect)
+
+        projects = discover_projects()
+
+        assert len(projects) == 1
+        assert projects[0]["display_name"] == "cursor:repo"
 
 
 class TestCursorParseSessions:

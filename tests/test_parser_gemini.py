@@ -1,7 +1,24 @@
 """Tests for Gemini parser behavior."""
 
 from dataclaw import _json as json
-from dataclaw.parsers.gemini import parse_session_file
+from dataclaw.parsers.gemini import discover_projects, parse_session_file
+
+
+class TestDiscoverGeminiProjects:
+    def test_discovers_sessions_without_materializing_file_list(self, tmp_path, monkeypatch):
+        gemini_dir = tmp_path / "tmp"
+        chats_dir = gemini_dir / "project-hash" / "chats"
+        chats_dir.mkdir(parents=True)
+        (chats_dir / "session-1.json").write_text("{}", encoding="utf-8")
+        (chats_dir / "session-2.json").write_text("{}", encoding="utf-8")
+
+        monkeypatch.setattr("dataclaw.parsers.gemini.GEMINI_DIR", gemini_dir)
+
+        projects = discover_projects(resolve_hash_fn=lambda _hash: "resolved-project")
+
+        assert len(projects) == 1
+        assert projects[0]["display_name"] == "gemini:resolved-project"
+        assert projects[0]["session_count"] == 2
 
 
 class TestParseGeminiUserContentParts:

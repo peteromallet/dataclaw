@@ -9,12 +9,12 @@ from ..secrets import should_skip_large_binary_string
 from .common import (
     anonymize_value,
     collect_project_sessions,
+    count_existing_paths_and_sizes,
     iter_jsonl,
     make_session_result,
     make_stats,
     normalize_timestamp,
     parse_tool_input,
-    sum_existing_path_sizes,
     update_time_bounds,
 )
 
@@ -33,25 +33,38 @@ def discover_projects(projects_dir: Path | None = None) -> list[dict]:
     for project_dir in sorted(projects_dir.iterdir()):
         if not project_dir.is_dir():
             continue
-        root_sessions = list(project_dir.glob("*.jsonl"))
-        subagent_sessions = find_subagent_sessions(project_dir)
-        total_count = len(root_sessions) + len(subagent_sessions)
+        root_count, root_size = count_existing_paths_and_sizes(project_dir.glob("*.jsonl"))
+        subagent_count, subagent_size = _discover_subagent_stats(project_dir)
+        total_count = root_count + subagent_count
         if total_count == 0:
             continue
-        total_size = sum_existing_path_sizes(root_sessions)
-        for session_dir in subagent_sessions:
-            for sa_file in (session_dir / "subagents").glob("agent-*.jsonl"):
-                total_size += sa_file.stat().st_size
         projects.append(
             {
                 "dir_name": project_dir.name,
                 "display_name": build_project_name(project_dir.name),
                 "session_count": total_count,
-                "total_size_bytes": total_size,
+                "total_size_bytes": root_size + subagent_size,
                 "source": "claude",
             }
         )
     return projects
+
+
+def _discover_subagent_stats(project_dir: Path) -> tuple[int, int]:
+    session_count = 0
+    total_size = 0
+    for entry in sorted(project_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        subagent_dir = entry / "subagents"
+        if not subagent_dir.is_dir():
+            continue
+        agent_count, agent_size = count_existing_paths_and_sizes(subagent_dir.glob("agent-*.jsonl"))
+        if agent_count == 0:
+            continue
+        session_count += 1
+        total_size += agent_size
+    return session_count, total_size
 
 
 def parse_project_sessions(

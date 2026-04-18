@@ -176,6 +176,17 @@ def sum_existing_path_sizes(paths: Iterable[Path]) -> int:
     return sum(path.stat().st_size for path in paths if path.exists())
 
 
+def count_existing_paths_and_sizes(paths: Iterable[Path]) -> tuple[int, int]:
+    count = 0
+    total_size = 0
+    for path in paths:
+        if not path.exists():
+            continue
+        count += 1
+        total_size += path.stat().st_size
+    return count, total_size
+
+
 def collect_project_sessions(
     items: Iterable[Any],
     parse_item: Callable[[Any], dict | None],

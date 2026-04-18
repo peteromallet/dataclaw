@@ -12,6 +12,7 @@ from ..secrets import should_skip_large_binary_string
 from .common import (
     anonymize_value,
     collect_project_sessions,
+    count_existing_paths_and_sizes,
     make_session_result,
     make_stats,
     parse_tool_input,
@@ -138,15 +139,15 @@ def discover_projects(
         chats_dir = project_dir / "chats"
         if not chats_dir.exists():
             continue
-        sessions = list(chats_dir.glob("session-*.json"))
-        if not sessions:
+        session_count, total_size = count_existing_paths_and_sizes(chats_dir.glob("session-*.json"))
+        if session_count == 0:
             continue
         projects.append(
             {
                 "dir_name": project_dir.name,
                 "display_name": build_project_name(project_dir.name, resolve_hash_fn),
-                "session_count": len(sessions),
-                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+                "session_count": session_count,
+                "total_size_bytes": total_size,
                 "source": SOURCE,
             }
         )
