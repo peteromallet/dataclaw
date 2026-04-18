@@ -111,13 +111,14 @@ class CodexParseState:
     messages: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
     stats: dict[str, int] = dataclasses.field(default_factory=make_stats)
-    pending_tool_uses: list[dict[str, str | None]] = dataclasses.field(default_factory=list)
+    pending_tool_uses: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    pending_tool_uses_by_call_id: dict[str, list[dict[str, Any]]] = dataclasses.field(default_factory=dict)
+    pending_tool_results: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
     pending_thinking: list[str] = dataclasses.field(default_factory=list)
     _pending_thinking_seen: set[str] = dataclasses.field(default_factory=set)
     raw_cwd: str = UNKNOWN_CODEX_CWD
     max_input_tokens: int = 0
     max_output_tokens: int = 0
-    tool_result_map: dict[str, dict] = dataclasses.field(default_factory=dict)
     pending_user_content_parts: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     pending_user_timestamp: str | None = None
 
@@ -129,52 +130,60 @@ def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymi
         if entry.get("type") != "response_item":
             continue
         payload = entry.get("payload", {})
-        payload_type = payload.get("type")
         call_id = payload.get("call_id")
         if not call_id:
             continue
-
-        if payload_type == "function_call_output":
-            raw = payload.get("output", "")
-            out: dict[str, Any] = {}
-            lines = raw.splitlines()
-            output_lines: list[str] = []
-            in_output = False
-            for line in lines:
-                if line.startswith("Exit code: "):
-                    try:
-                        out["exit_code"] = int(line[len("Exit code: ") :].strip())
-                    except ValueError:
-                        out["exit_code"] = line[len("Exit code: ") :].strip()
-                elif line.startswith("Wall time: "):
-                    out["wall_time"] = line[len("Wall time: ") :].strip()
-                elif line == "Output:":
-                    in_output = True
-                elif in_output:
-                    output_lines.append(line)
-            if output_lines:
-                out["output"] = anonymizer.text("\n".join(output_lines).strip())
-            result[call_id] = {"output": out, "status": "success"}
-
-        elif payload_type == "custom_tool_call_output":
-            raw = payload.get("output", "")
-            out: dict[str, Any] = {}
-            try:
-                parsed = json.loads(raw)
-                text = parsed.get("output", "")
-                if text:
-                    out["output"] = anonymizer.text(str(text))
-                meta = parsed.get("metadata", {})
-                if "exit_code" in meta:
-                    out["exit_code"] = meta["exit_code"]
-                if "duration_seconds" in meta:
-                    out["duration_seconds"] = meta["duration_seconds"]
-            except (json.JSONDecodeError, AttributeError):
-                if raw:
-                    out["output"] = anonymizer.text(raw)
-            result[call_id] = {"output": out, "status": "success"}
+        built = _build_codex_tool_result(payload, anonymizer)
+        if built is not None:
+            result[call_id] = built
 
     return result
+
+
+def _build_codex_tool_result(payload: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any] | None:
+    payload_type = payload.get("type")
+
+    if payload_type == "function_call_output":
+        raw = payload.get("output", "")
+        out: dict[str, Any] = {}
+        lines = raw.splitlines()
+        output_lines: list[str] = []
+        in_output = False
+        for line in lines:
+            if line.startswith("Exit code: "):
+                try:
+                    out["exit_code"] = int(line[len("Exit code: ") :].strip())
+                except ValueError:
+                    out["exit_code"] = line[len("Exit code: ") :].strip()
+            elif line.startswith("Wall time: "):
+                out["wall_time"] = line[len("Wall time: ") :].strip()
+            elif line == "Output:":
+                in_output = True
+            elif in_output:
+                output_lines.append(line)
+        if output_lines:
+            out["output"] = anonymizer.text("\n".join(output_lines).strip())
+        return {"output": out, "status": "success"}
+
+    if payload_type == "custom_tool_call_output":
+        raw = payload.get("output", "")
+        out: dict[str, Any] = {}
+        try:
+            parsed = json.loads(raw)
+            text = parsed.get("output", "")
+            if text:
+                out["output"] = anonymizer.text(str(text))
+            meta = parsed.get("metadata", {})
+            if "exit_code" in meta:
+                out["exit_code"] = meta["exit_code"]
+            if "duration_seconds" in meta:
+                out["duration_seconds"] = meta["duration_seconds"]
+        except (json.JSONDecodeError, AttributeError):
+            if raw:
+                out["output"] = anonymizer.text(raw)
+        return {"output": out, "status": "success"}
+
+    return None
 
 
 def parse_session_file(
@@ -194,12 +203,6 @@ def parse_session_file(
             "model_provider": None,
         },
     )
-
-    try:
-        state.tool_result_map = build_tool_result_map(iter_jsonl(filepath), anonymizer)
-    except OSError as e:
-        logger.warning("Failed to read Codex session file %s: %s", filepath, e)
-        return None
 
     last_timestamp: str | None = None
     try:
@@ -377,6 +380,32 @@ def _clear_pending_user_content(state: CodexParseState) -> None:
     state.pending_user_timestamp = None
 
 
+def _apply_codex_tool_result(tool_use: dict[str, Any], result: dict[str, Any]) -> None:
+    if result.get("output"):
+        tool_use["output"] = result["output"]
+    if result.get("status"):
+        tool_use["status"] = result["status"]
+
+
+def _attach_codex_tool_result(state: CodexParseState, call_id: str, result: dict[str, Any]) -> None:
+    matched_tool_uses = state.pending_tool_uses_by_call_id.pop(call_id, [])
+    if matched_tool_uses:
+        for tool_use in matched_tool_uses:
+            _apply_codex_tool_result(tool_use, result)
+        return
+    state.pending_tool_results[call_id] = result
+
+
+def _register_codex_tool_use(state: CodexParseState, tool_use: dict[str, Any], call_id: str | None) -> None:
+    if not isinstance(call_id, str) or not call_id:
+        return
+    pending_result = state.pending_tool_results.pop(call_id, None)
+    if pending_result is not None:
+        _apply_codex_tool_result(tool_use, pending_result)
+        return
+    state.pending_tool_uses_by_call_id.setdefault(call_id, []).append(tool_use)
+
+
 def _flush_pending_user_message(state: CodexParseState, timestamp: str | None) -> None:
     if not state.pending_user_content_parts:
         return
@@ -421,13 +450,13 @@ def handle_response_item(
     if item_type == "function_call":
         tool_name = payload.get("name")
         args_data = parse_tool_arguments(payload.get("arguments"))
-        state.pending_tool_uses.append(
-            {
-                "tool": tool_name,
-                "input": parse_tool_input(tool_name, args_data, anonymizer),
-                "_call_id": payload.get("call_id"),
-            }
-        )
+        tool_use = {
+            "tool": tool_name,
+            "input": parse_tool_input(tool_name, args_data, anonymizer),
+            "_call_id": payload.get("call_id"),
+        }
+        _register_codex_tool_use(state, tool_use, payload.get("call_id"))
+        state.pending_tool_uses.append(tool_use)
     elif item_type == "custom_tool_call":
         tool_name = payload.get("name")
         raw_input = payload.get("input", "")
@@ -435,13 +464,19 @@ def handle_response_item(
             inp = {"patch": anonymizer.text(raw_input)}
         else:
             inp = parse_tool_input(tool_name, raw_input, anonymizer)
-        state.pending_tool_uses.append(
-            {
-                "tool": tool_name,
-                "input": inp,
-                "_call_id": payload.get("call_id"),
-            }
-        )
+        tool_use = {
+            "tool": tool_name,
+            "input": inp,
+            "_call_id": payload.get("call_id"),
+        }
+        _register_codex_tool_use(state, tool_use, payload.get("call_id"))
+        state.pending_tool_uses.append(tool_use)
+    elif item_type in {"function_call_output", "custom_tool_call_output"}:
+        call_id = payload.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            result = _build_codex_tool_result(payload, anonymizer)
+            if result is not None:
+                _attach_codex_tool_result(state, call_id, result)
     elif item_type == "reasoning" and include_thinking:
         for summary in payload.get("summary", []):
             if not isinstance(summary, dict):
@@ -493,14 +528,10 @@ def handle_user_message(
 
 
 def resolve_tool_uses(state: CodexParseState) -> list[dict]:
-    """Attach outputs from tool_result_map and strip internal _call_id field."""
+    """Strip internal `_call_id` field from pending tool uses."""
     resolved = []
     for tool_use in state.pending_tool_uses:
-        call_id = tool_use.pop("_call_id", None)
-        if call_id and call_id in state.tool_result_map:
-            result = state.tool_result_map[call_id]
-            tool_use["output"] = result["output"]
-            tool_use["status"] = result["status"]
+        tool_use.pop("_call_id", None)
         resolved.append(tool_use)
     return resolved
 

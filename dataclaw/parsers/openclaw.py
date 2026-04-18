@@ -141,10 +141,10 @@ def parse_session_file(
 
     messages: list[dict[str, Any]] = []
     stats = make_stats()
+    pending_tool_results: dict[str, dict[str, Any]] = {}
+    pending_tool_uses: dict[str, list[dict[str, Any]]] = {}
 
     try:
-        tool_result_map = build_tool_result_map(filepath, anonymizer)
-
         for entry in iter_entries_after_header(filepath):
             entry_type = entry.get("type")
             timestamp = entry.get("timestamp")
@@ -232,12 +232,12 @@ def parse_session_file(
                             "input": parse_tool_input(tool_name, args, anonymizer),
                         }
                         tool_call_id = block.get("id")
-                        if tool_call_id and tool_call_id in tool_result_map:
-                            result = tool_result_map[tool_call_id]
-                            if result.get("output"):
-                                tool_entry["output"] = result["output"]
-                            if result.get("status"):
-                                tool_entry["status"] = result["status"]
+                        if isinstance(tool_call_id, str) and tool_call_id:
+                            pending_result = pending_tool_results.pop(tool_call_id, None)
+                            if pending_result is not None:
+                                _apply_openclaw_tool_result(tool_entry, pending_result)
+                            else:
+                                pending_tool_uses.setdefault(tool_call_id, []).append(tool_entry)
                         tool_uses.append(tool_entry)
 
                 if not text_parts and not thinking_parts and not tool_uses:
@@ -257,6 +257,18 @@ def parse_session_file(
                 messages.append(msg)
                 stats["assistant_messages"] += 1
                 update_time_bounds(metadata, effective_ts)
+
+            elif role == "toolResult":
+                tool_call_id = msg_data.get("toolCallId")
+                if not isinstance(tool_call_id, str) or not tool_call_id:
+                    continue
+                result = _build_openclaw_tool_result(msg_data, anonymizer)
+                matched_tool_uses = pending_tool_uses.pop(tool_call_id, [])
+                if matched_tool_uses:
+                    for tool_use in matched_tool_uses:
+                        _apply_openclaw_tool_result(tool_use, result)
+                else:
+                    pending_tool_results[tool_call_id] = result
 
             elif role == "bashExecution":
                 command = msg_data.get("command", "")
@@ -301,30 +313,26 @@ def iter_entries_after_header(filepath: Path):
     yield from entries
 
 
-def build_tool_result_map(filepath: Path, anonymizer: Anonymizer) -> dict[str, dict]:
-    result: dict[str, dict] = {}
-    for entry in iter_entries_after_header(filepath):
-        if entry.get("type") != "message":
-            continue
-        msg_data = entry.get("message", {})
-        if msg_data.get("role") != "toolResult":
-            continue
-        tool_call_id = msg_data.get("toolCallId")
-        if not tool_call_id:
-            continue
-        is_error = bool(msg_data.get("isError"))
-        content = msg_data.get("content", [])
-        if isinstance(content, list):
-            text_parts = [
-                block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
-            ]
-            output_text = "\n".join(text_parts).strip()
-        elif isinstance(content, str):
-            output_text = content.strip()
-        else:
-            output_text = ""
-        result[tool_call_id] = {
-            "output": {"text": anonymizer.text(output_text)} if output_text else {},
-            "status": "error" if is_error else "success",
-        }
-    return result
+def _build_openclaw_tool_result(msg_data: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any]:
+    is_error = bool(msg_data.get("isError"))
+    content = msg_data.get("content", [])
+    if isinstance(content, list):
+        text_parts = [
+            block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        output_text = "\n".join(text_parts).strip()
+    elif isinstance(content, str):
+        output_text = content.strip()
+    else:
+        output_text = ""
+    return {
+        "output": {"text": anonymizer.text(output_text)} if output_text else {},
+        "status": "error" if is_error else "success",
+    }
+
+
+def _apply_openclaw_tool_result(tool_use: dict[str, Any], result: dict[str, Any]) -> None:
+    if result.get("output"):
+        tool_use["output"] = result["output"]
+    if result.get("status"):
+        tool_use["status"] = result["status"]

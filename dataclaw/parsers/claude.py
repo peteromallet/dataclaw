@@ -344,9 +344,10 @@ def parse_session_file(
         "end_time": None,
     }
     stats = make_stats()
+    pending_tool_results: dict[str, dict[str, Any]] = {}
+    pending_tool_uses: dict[str, list[dict[str, Any]]] = {}
 
     try:
-        tool_result_map = build_tool_result_map(iter_jsonl(filepath), anonymizer)
         for entry in iter_jsonl(filepath):
             process_entry(
                 entry,
@@ -355,7 +356,8 @@ def parse_session_file(
                 stats,
                 anonymizer,
                 include_thinking,
-                tool_result_map,
+                pending_tool_results=pending_tool_results,
+                pending_tool_uses=pending_tool_uses,
             )
     except OSError:
         return None
@@ -406,10 +408,10 @@ def parse_subagent_session(
         "end_time": None,
     }
     stats = make_stats()
+    pending_tool_results: dict[str, dict[str, Any]] = {}
+    pending_tool_uses: dict[str, list[dict[str, Any]]] = {}
 
     try:
-        tool_result_map = build_tool_result_map(iter_sorted_subagent_entries(subagent_files), anonymizer)
-
         saw_entry = False
         for entry in iter_sorted_subagent_entries(subagent_files):
             saw_entry = True
@@ -420,7 +422,8 @@ def parse_subagent_session(
                 stats,
                 anonymizer,
                 include_thinking,
-                tool_result_map,
+                pending_tool_results=pending_tool_results,
+                pending_tool_uses=pending_tool_uses,
             )
     except OSError:
         return None
@@ -470,6 +473,8 @@ def process_entry(
     anonymizer: Anonymizer,
     include_thinking: bool,
     tool_result_map: dict[str, dict] | None = None,
+    pending_tool_results: dict[str, dict[str, Any]] | None = None,
+    pending_tool_uses: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     entry_type = entry.get("type")
 
@@ -482,6 +487,7 @@ def process_entry(
     timestamp = normalize_timestamp(entry.get("timestamp"))
 
     if entry_type == "user":
+        _attach_claude_tool_results(entry, anonymizer, pending_tool_results, pending_tool_uses)
         content = extract_user_content(entry, anonymizer)
         if content is not None:
             messages.append({"role": "user", "content": content, "timestamp": timestamp})
@@ -489,7 +495,14 @@ def process_entry(
             update_time_bounds(metadata, timestamp)
 
     elif entry_type == "assistant":
-        msg = extract_assistant_content(entry, anonymizer, include_thinking, tool_result_map)
+        msg = extract_assistant_content(
+            entry,
+            anonymizer,
+            include_thinking,
+            tool_result_map,
+            pending_tool_results,
+            pending_tool_uses,
+        )
         if msg:
             if metadata["model"] is None:
                 metadata["model"] = entry.get("message", {}).get("model")
@@ -524,6 +537,8 @@ def extract_assistant_content(
     anonymizer: Anonymizer,
     include_thinking: bool,
     tool_result_map: dict[str, dict] | None = None,
+    pending_tool_results: dict[str, dict[str, Any]] | None = None,
+    pending_tool_uses: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     msg_data = entry.get("message", {})
     content_blocks = msg_data.get("content", [])
@@ -551,11 +566,17 @@ def extract_assistant_content(
                 "tool": block.get("name"),
                 "input": parse_tool_input(block.get("name"), block.get("input", {}), anonymizer),
             }
+            tool_use_id = block.get("id")
             if tool_result_map is not None:
-                result = tool_result_map.get(block.get("id", ""))
+                result = tool_result_map.get(tool_use_id or "")
                 if result:
-                    tu["output"] = result["output"]
-                    tu["status"] = result["status"]
+                    _apply_claude_tool_result(tu, result)
+            elif isinstance(tool_use_id, str) and tool_use_id:
+                pending_result = None if pending_tool_results is None else pending_tool_results.pop(tool_use_id, None)
+                if pending_result is not None:
+                    _apply_claude_tool_result(tu, pending_result)
+                elif pending_tool_uses is not None:
+                    pending_tool_uses.setdefault(tool_use_id, []).append(tu)
             tool_uses.append(tu)
 
     if not text_parts and not tool_uses and not thinking_parts:
@@ -569,6 +590,45 @@ def extract_assistant_content(
     if tool_uses:
         msg["tool_uses"] = tool_uses
     return msg
+
+
+def _apply_claude_tool_result(tool_use: dict[str, Any], result: dict[str, Any]) -> None:
+    if result.get("output"):
+        tool_use["output"] = result["output"]
+    if result.get("status"):
+        tool_use["status"] = result["status"]
+
+
+def _attach_claude_tool_results(
+    entry: dict[str, Any],
+    anonymizer: Anonymizer,
+    pending_tool_results: dict[str, dict[str, Any]] | None,
+    pending_tool_uses: dict[str, list[dict[str, Any]]] | None,
+) -> None:
+    if pending_tool_results is None and pending_tool_uses is None:
+        return
+
+    content_blocks = entry.get("message", {}).get("content", [])
+    if not isinstance(content_blocks, list):
+        return
+
+    for block in content_blocks:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool_use_id = block.get("tool_use_id")
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            continue
+
+        result = {
+            "output": build_tool_result_output(block, entry, anonymizer),
+            "status": "error" if block.get("is_error") else "success",
+        }
+        matched_tool_uses = [] if pending_tool_uses is None else pending_tool_uses.pop(tool_use_id, [])
+        if matched_tool_uses:
+            for tool_use in matched_tool_uses:
+                _apply_claude_tool_result(tool_use, result)
+        elif pending_tool_results is not None:
+            pending_tool_results[tool_use_id] = result
 
 
 def build_project_name(dir_name: str) -> str:
