@@ -1,5 +1,6 @@
 """Tests for JSONL formatting and diff helpers."""
 
+from concurrent.futures import Future
 from pathlib import Path
 
 import yaml
@@ -29,6 +30,11 @@ class TestJsonlToYamlFile:
         raw = output_path.read_bytes()
         assert b"\r\n" not in raw
         assert b"\n" in raw
+
+    def test_resolve_diff_workers_uses_shared_env(self, monkeypatch):
+        monkeypatch.setenv("DATACLAW_WORKERS", "3")
+
+        assert jsonl_tools._resolve_diff_workers(10) == 3
 
 
 class TestSimplifyPatchOps:
@@ -189,6 +195,70 @@ class TestDiffJsonlFiles:
         assert captured["new_obj"]["messages"][0]["content_parts"][0]["source"]["data"].startswith(
             "__DATACLAW_LARGE_BLOB__:"
         )
+
+    def test_parallel_patch_generation_preserves_event_order(self, tmp_path, monkeypatch):
+        old_path = tmp_path / "old.jsonl"
+        new_path = tmp_path / "new.jsonl"
+        output_path = tmp_path / "diff.yaml"
+
+        old_path.write_text(
+            '{"source":"claude","project":"proj","session_id":"s1","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content":"old-a"}]}\n'
+            '{"source":"claude","project":"proj","session_id":"s2","start_time":"2026-01-01T00:00:01Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:01Z","content":"old-b"}]}\n',
+            encoding="utf-8",
+        )
+        new_path.write_text(
+            '{"source":"claude","project":"proj","session_id":"s1","start_time":"2026-01-01T00:00:00Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:00Z","content":"new-a"}]}\n'
+            '{"source":"claude","project":"proj","session_id":"s2","start_time":"2026-01-01T00:00:01Z","messages":[{"role":"assistant","timestamp":"2026-01-01T00:00:01Z","content":"new-b"}]}\n',
+            encoding="utf-8",
+        )
+
+        captured = {}
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                captured["max_workers"] = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def map(self, fn, payloads):
+                payload_list = list(payloads)
+                captured["payloads"] = payload_list
+                futures = []
+                for payload in payload_list:
+                    future = Future()
+                    future.set_result(fn(payload))
+                    futures.append(future)
+                return [future.result() for future in reversed(futures)][::-1]
+
+        def fake_run_jd_patch(old_obj, new_obj):
+            return [
+                {
+                    "op": "replace",
+                    "path": "/messages/0/content",
+                    "old": old_obj["messages"][0]["content"],
+                    "new": new_obj["messages"][0]["content"],
+                }
+            ]
+
+        monkeypatch.setattr("dataclaw.jsonl_tools.ThreadPoolExecutor", FakeExecutor)
+        monkeypatch.setattr("dataclaw.jsonl_tools.run_jd_patch", fake_run_jd_patch)
+
+        result = jsonl_tools.diff_jsonl_files(old_path, new_path, output_path, workers=2)
+
+        assert result.event_count == 2
+        assert captured["max_workers"] == 2
+        assert len(captured["payloads"]) == 2
+        docs = list(yaml.safe_load_all(output_path.read_text(encoding="utf-8")))
+        assert docs[1]["identity"]["session_id"] == "s1"
+        assert docs[1]["patch"][0]["old"] == "old-a"
+        assert docs[1]["patch"][0]["new"] == "new-a"
+        assert docs[2]["identity"]["session_id"] == "s2"
+        assert docs[2]["patch"][0]["old"] == "old-b"
+        assert docs[2]["patch"][0]["new"] == "new-b"
 
     def test_handles_duplicate_identity_records_with_multiple_modifications(self, tmp_path, monkeypatch):
         old_path = tmp_path / "old.jsonl"

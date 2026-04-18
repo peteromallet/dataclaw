@@ -73,6 +73,13 @@ class TestBuildDatasetCard:
         card = _build_dataset_card("alice/my-dataset", meta)
         assert "alice/my-dataset" in card
 
+
+class TestWorkerResolution:
+    def test_resolve_export_workers_uses_shared_env(self, monkeypatch):
+        monkeypatch.setenv("DATACLAW_WORKERS", "3")
+
+        assert exporting_mod._resolve_export_workers(10) == 3
+
     def test_includes_model_and_project_tables_sorted_by_output_tokens(self):
         meta = {
             "model_breakdown": {

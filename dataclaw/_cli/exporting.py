@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import _json as json
+from .._workers import configured_workers
 from ..anonymizer import Anonymizer
 from ..parser import iter_project_sessions
 from ..secrets import redact_session
@@ -163,12 +164,8 @@ def _resolve_export_workers(task_count: int, workers: int | None = None) -> int:
     if task_count < 2:
         return 1
 
-    raw = os.environ.get("DATACLAW_EXPORT_WORKERS")
-    if workers is None and raw:
-        try:
-            workers = int(raw)
-        except ValueError:
-            workers = None
+    if workers is None:
+        workers = configured_workers()
 
     if workers is None:
         workers = os.cpu_count() or 1

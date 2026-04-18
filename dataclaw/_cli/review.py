@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import _json as json
+from .._workers import configured_workers
 from ..config import DataClawConfig
 from ..secrets import _has_mixed_char_types, _shannon_entropy
 from .common import (
@@ -253,12 +254,7 @@ def _resolve_review_workers(file_size: int, workers: int | None = None) -> int:
     if file_size < _REVIEW_MIN_PARALLEL_BYTES:
         return 1
 
-    raw = os.environ.get("DATACLAW_CONFIRM_WORKERS")
-    if raw:
-        try:
-            workers = int(raw)
-        except ValueError:
-            workers = None
+    workers = configured_workers()
 
     if workers is None:
         workers = os.cpu_count() or 1

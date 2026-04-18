@@ -140,6 +140,8 @@ Step 2 (INSTALL SKILL) is omitted in manual usage.
 | `dataclaw diff-jsonl --old old.jsonl --new new.jsonl` | Structurally diff two export JSONL files and write YAML |
 | `dataclaw update-skill claude` | Install/update the dataclaw skill for Claude Code |
 
+Set `DATACLAW_WORKERS` to control the worker count used by parallel operations such as `export`, `confirm`, and `diff-jsonl`.
+
 ## What gets exported
 
 - User messages - Including voice transcripts and images

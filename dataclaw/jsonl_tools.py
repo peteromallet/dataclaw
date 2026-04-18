@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ from typing import Any
 import orjson
 import yaml
 
+from ._workers import configured_workers
 from .secrets import contains_large_binary_value, should_skip_large_binary_string
 
 IDENTITY_FIELDS = ("source", "project", "session_id", "start_time")
@@ -155,6 +158,19 @@ def default_diff_output_path(new_path: Path) -> Path:
 
 def _open_text_output(path: Path):
     return path.open("w", encoding="utf-8", newline="\n")
+
+
+def _resolve_diff_workers(task_count: int, workers: int | None = None) -> int:
+    if task_count < 2:
+        return 1
+
+    if workers is None:
+        workers = configured_workers()
+
+    if workers is None:
+        workers = os.cpu_count() or 1
+
+    return max(1, min(workers, task_count))
 
 
 def yaml_dump_documents(documents: Iterable[dict[str, Any]], output_path: Path) -> Path:
@@ -416,6 +432,31 @@ def build_record_patch(old: Any, new: Any) -> list[dict[str, Any]]:
     return run_jd_patch(old, new)
 
 
+def _build_record_patch_worker(payload: tuple[Any, Any]) -> list[dict[str, Any]]:
+    old, new = payload
+    return build_record_patch(old, new)
+
+
+def _resolve_modified_event_patches(
+    modified_events: list[tuple[dict[str, Any], Any, Any]],
+    workers: int | None = None,
+) -> None:
+    if not modified_events:
+        return
+
+    payloads = [(old_obj, new_obj) for _event, old_obj, new_obj in modified_events]
+    resolved_workers = _resolve_diff_workers(len(payloads), workers)
+
+    if resolved_workers <= 1:
+        patches = [_build_record_patch_worker(payload) for payload in payloads]
+    else:
+        with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+            patches = list(executor.map(_build_record_patch_worker, payloads))
+
+    for (event, _old_obj, _new_obj), patch in zip(modified_events, patches, strict=True):
+        event["patch"] = patch
+
+
 def expand_replace_op(path: str, old: Any, new: Any) -> list[dict[str, Any]]:
     if old == new:
         return []
@@ -492,8 +533,11 @@ def build_events(
     new_records: dict[tuple[Any, ...], dict[str, Any]],
     include_records_for_modified: bool,
     emit_event: Callable[[dict[str, Any]], None],
+    workers: int | None = None,
 ) -> tuple[int, dict[str, int]]:
     event_count = 0
+    events: list[dict[str, Any]] = []
+    modified_events: list[tuple[dict[str, Any], Any, Any]] = []
     summary = {
         "unchanged_records": 0,
         "modified_records": 0,
@@ -524,12 +568,13 @@ def build_events(
                 "identity": identity_dict(key),
                 "old_line": _pop_line_number(old_entry),
                 "new_line": _pop_line_number(new_entry),
-                "patch": build_record_patch(old_entry["obj"], new_entry["obj"]),
+                "patch": [],
             }
             if include_records_for_modified:
                 event["old_record"] = old_entry["obj"]
                 event["new_record"] = new_entry["obj"]
-            emit_event(event)
+            events.append(event)
+            modified_events.append((event, old_entry["obj"], new_entry["obj"]))
             event_count += 1
             summary["modified_records"] += 1
 
@@ -542,7 +587,7 @@ def build_events(
                 continue
             entry = old_records[key][digest]
             lines = _take_line_numbers(entry, count)
-            emit_event(
+            events.append(
                 {
                     "change_type": "removed",
                     "identity": identity_dict(key),
@@ -560,7 +605,7 @@ def build_events(
                 continue
             entry = new_records[key][digest]
             lines = _take_line_numbers(entry, count)
-            emit_event(
+            events.append(
                 {
                     "change_type": "added",
                     "identity": identity_dict(key),
@@ -572,6 +617,11 @@ def build_events(
             event_count += 1
             summary["added_records"] += count
 
+    _resolve_modified_event_patches(modified_events, workers)
+
+    for event in events:
+        emit_event(event)
+
     return event_count, summary
 
 
@@ -581,6 +631,7 @@ def diff_jsonl_files(
     output_path: Path | None = None,
     *,
     include_records_for_modified: bool = False,
+    workers: int | None = None,
 ) -> DiffResult:
     if output_path is None:
         output_path = default_diff_output_path(new_path)
@@ -604,6 +655,7 @@ def diff_jsonl_files(
                 new_records,
                 include_records_for_modified=include_records_for_modified,
                 emit_event=lambda event: _yaml_dump_document(event, events_handle, events_decoded_handle),
+                workers=workers,
             )
 
         summary = {

@@ -2,6 +2,7 @@
 
 import json
 
+from dataclaw._cli import review as review_mod
 from dataclaw._cli.review import (
     _collect_review_attestations,
     _scan_export_review,
@@ -14,6 +15,11 @@ from dataclaw._cli.review import (
 
 
 class TestAttestationHelpers:
+    def test_resolve_review_workers_uses_shared_env(self, monkeypatch):
+        monkeypatch.setenv("DATACLAW_WORKERS", "3")
+
+        assert review_mod._resolve_review_workers(32 * 1024 * 1024) == 3
+
     def test_collect_review_attestations_valid(self):
         attestations, errors, manual_count = _collect_review_attestations(
             attest_asked_full_name="I asked Jane Doe for their full name and scanned the export for Jane Doe.",
