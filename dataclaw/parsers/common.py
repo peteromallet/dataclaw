@@ -6,33 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import _json as json
-from ..anonymizer import Anonymizer
-from ..secrets import should_skip_large_binary_string, should_skip_structured_string_transform
 
 logger = logging.getLogger(__name__)
-
-_NON_ANON_STRING_KEYS = frozenset(
-    {
-        "session_id",
-        "model",
-        "git_branch",
-        "start_time",
-        "end_time",
-        "role",
-        "timestamp",
-        "tool",
-        "status",
-        "type",
-        "media_type",
-        "mime_type",
-        "id",
-        "tool_use_id",
-        "sourceToolAssistantUUID",
-        "source",
-        "project",
-        "wall_time",
-    }
-)
 
 
 def iter_jsonl(filepath: Path):
@@ -63,11 +38,10 @@ def make_session_result(
     metadata: dict[str, Any],
     messages: list[dict[str, Any]],
     stats: dict[str, int],
-    anonymizer: Anonymizer | None = None,
 ) -> dict[str, Any] | None:
     if not messages:
         return None
-    session = {
+    return {
         "session_id": metadata["session_id"],
         "model": metadata["model"],
         "git_branch": metadata["git_branch"],
@@ -76,9 +50,6 @@ def make_session_result(
         "messages": messages,
         "stats": stats,
     }
-    if anonymizer is None:
-        return session
-    return anonymize_session(session, anonymizer)
 
 
 def update_time_bounds(metadata: dict[str, Any], timestamp: str | None) -> None:
@@ -146,62 +117,6 @@ def normalize_timestamp(value: Any) -> str | None:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
     return None
-
-
-def _should_skip_anonymizing_string(key: str | None, value: str, parent_dict: dict[str, Any] | None) -> bool:
-    if key in _NON_ANON_STRING_KEYS:
-        return True
-    return should_skip_structured_string_transform(key, value, parent_dict)
-
-
-def _anonymize_session_value(
-    key: str | None,
-    value: Any,
-    anonymizer: Anonymizer,
-    parent_dict: dict[str, Any] | None = None,
-) -> tuple[Any, bool]:
-    if isinstance(value, str):
-        if _should_skip_anonymizing_string(key, value, parent_dict):
-            return value, False
-        if should_skip_large_binary_string(value):
-            return value, False
-        anonymized = anonymizer.text(value)
-        return anonymized, anonymized != value
-
-    if isinstance(value, dict):
-        out: dict[str, Any] | None = None
-        for child_key, child_value in value.items():
-            anonymized_child, changed = _anonymize_session_value(child_key, child_value, anonymizer, value)
-            if not changed:
-                continue
-            if out is None:
-                out = dict(value)
-            out[child_key] = anonymized_child
-        if out is None:
-            return value, False
-        return out, True
-
-    if isinstance(value, list):
-        out_list: list[Any] | None = None
-        for idx, item in enumerate(value):
-            anonymized_item, changed = _anonymize_session_value(key, item, anonymizer, parent_dict)
-            if not changed:
-                continue
-            if out_list is None:
-                out_list = list(value)
-            out_list[idx] = anonymized_item
-        if out_list is None:
-            return value, False
-        return out_list, True
-
-    return value, False
-
-
-def anonymize_session(session: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any]:
-    anonymized, _changed = _anonymize_session_value(None, session, anonymizer)
-    if isinstance(anonymized, dict):
-        return anonymized
-    return session
 
 
 def parse_tool_input(input_data: Any) -> dict:

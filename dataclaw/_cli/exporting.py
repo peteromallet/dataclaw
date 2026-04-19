@@ -17,7 +17,7 @@ from .. import _json as json
 from .._workers import configured_workers
 from ..anonymizer import Anonymizer
 from ..parser import iter_project_sessions
-from ..secrets import redact_session
+from ..secrets import transform_session
 from ..session_tasks import ExportSessionTask, build_export_session_tasks, parse_export_session_task
 from .common import HF_TAG, REPO_URL, SKILL_URL, _format_token_count, _provider_dataset_tags
 
@@ -197,8 +197,8 @@ def _export_session_task_worker(payload) -> _WorkerSessionResult:
     if not model or model == "<synthetic>":
         return _WorkerSessionResult(project_index=task.project_index, skipped_model=True)
 
+    session, n_redacted = transform_session(session, anonymizer, custom_strings=custom_strings)
     fingerprint = _gemini_dedupe_fingerprint(session, task.source)
-    session, n_redacted = redact_session(session, custom_strings=custom_strings)
     stats = session.get("stats", {})
     input_tokens, output_tokens = _token_totals(stats)
     has_token_stats = isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats)
@@ -283,12 +283,12 @@ def _export_to_jsonl_serial(
                 skipped += 1
                 continue
 
+            session, n_redacted = transform_session(session, anonymizer, custom_strings=custom_strings)
+            total_redactions += n_redacted
+
             fingerprint = _gemini_dedupe_fingerprint(session, source)
             if fingerprint is not None and fingerprint in seen_fingerprints:
                 continue
-
-            session, n_redacted = redact_session(session, custom_strings=custom_strings)
-            total_redactions += n_redacted
 
             if fingerprint is not None:
                 seen_fingerprints.add(fingerprint)

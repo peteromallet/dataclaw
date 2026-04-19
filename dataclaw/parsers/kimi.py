@@ -277,4 +277,4 @@ def parse_session_file(
         logger.warning("Failed to read Kimi session file %s: %s", filepath, e)
         return None
 
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)

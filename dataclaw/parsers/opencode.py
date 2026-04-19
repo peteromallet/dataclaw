@@ -280,7 +280,7 @@ def _parse_session_with_connection(
     if metadata["model"] is None:
         metadata["model"] = "opencode-unknown"
 
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)
 
 
 def extract_model(message_data: dict[str, Any]) -> str | None:

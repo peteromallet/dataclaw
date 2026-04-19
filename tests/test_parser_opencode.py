@@ -189,8 +189,7 @@ class TestOpenCodeProjects:
         assert message["content_parts"][1]["type"] == "document"
         assert message["content_parts"][1]["source"]["type"] == "url"
         assert message["content_parts"][1]["source"]["media_type"] == "text/plain"
-        assert "testuser" not in message["content_parts"][1]["source"]["url"]
-        assert message["content_parts"][1]["source"]["url"].startswith("file:///Users/user_")
+        assert message["content_parts"][1]["source"]["url"].startswith("file:///Users/testuser")
         assert message["content_parts"][1]["source"]["url"].endswith("/work/repo/notes.txt")
 
     def test_parse_opencode_user_file_only_message(self, tmp_path, monkeypatch, mock_anonymizer):

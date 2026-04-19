@@ -283,7 +283,7 @@ def parse_session_file(
         else:
             state.metadata["model"] = "codex-unknown"
 
-    return make_session_result(state.metadata, state.messages, state.stats, anonymizer=anonymizer)
+    return make_session_result(state.metadata, state.messages, state.stats)
 
 
 def handle_session_meta(

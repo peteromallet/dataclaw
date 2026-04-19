@@ -190,7 +190,7 @@ class TestParseGeminiUserContentParts:
         tool_use, tool_result = message["content_parts"]
         assert tool_use["type"] == "tool_use"
         assert tool_use["name"] == "read_file"
-        assert "testuser" not in tool_use["input"]["file_path"]
+        assert tool_use["input"]["file_path"] == "/Users/testuser/Documents/myproject/src/app.py"
         assert tool_result == {
             "type": "tool_result",
             "tool_use_id": tool_use["id"],

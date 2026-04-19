@@ -329,7 +329,9 @@ class TestDiscoverCodexProjects:
         assert user_message["content"] == "Please inspect this image."
         assert user_message["content_parts"][0]["type"] == "image"
         assert user_message["content_parts"][0]["source"]["type"] == "url"
-        assert "testuser" not in user_message["content_parts"][0]["source"]["url"]
+        assert (
+            user_message["content_parts"][0]["source"]["url"] == "file:///Users/testuser/Documents/myrepo/tmp/image.png"
+        )
         assert (
             user_message["content_parts"][0]["source"]["url"]
             .replace("\\", "/")

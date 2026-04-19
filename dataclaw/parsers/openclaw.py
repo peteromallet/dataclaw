@@ -329,7 +329,7 @@ def parse_session_file(
     if metadata["model"] is None:
         metadata["model"] = "openclaw-unknown"
 
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)
 
 
 def _build_openclaw_tool_result(msg_data: dict[str, Any]) -> dict[str, Any]:

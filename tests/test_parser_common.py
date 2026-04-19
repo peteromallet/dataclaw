@@ -129,7 +129,7 @@ class TestLoadJsonField:
 
 
 class TestMakeSessionResult:
-    def test_centralized_anonymization_skips_base64_data(self, mock_anonymizer):
+    def test_make_session_result_leaves_content_raw(self, mock_anonymizer):
         session = make_session_result(
             {
                 "session_id": "s1",
@@ -155,9 +155,8 @@ class TestMakeSessionResult:
                 }
             ],
             {"user_messages": 1, "assistant_messages": 0, "tool_uses": 0, "input_tokens": 0, "output_tokens": 0},
-            anonymizer=mock_anonymizer,
         )
 
         assert session is not None
-        assert "testuser" not in session["messages"][0]["content"]
+        assert session["messages"][0]["content"] == "hello testuser at /Users/testuser/project"
         assert session["messages"][0]["content_parts"][0]["source"]["data"] == "testuserbase64payload"

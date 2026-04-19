@@ -422,7 +422,7 @@ def parse_session_file(
     except OSError:
         return None
 
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)
 
 
 def find_subagent_sessions(project_dir: Path) -> list[Path]:
@@ -490,7 +490,7 @@ def parse_subagent_session(
         return None
 
     metadata["session_id"] = resolve_subagent_session_id(session_dir, metadata["session_id"])
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)
 
 
 def resolve_subagent_session_id(session_dir: Path, session_id: str) -> str:

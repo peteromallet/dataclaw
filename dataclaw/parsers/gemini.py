@@ -532,4 +532,4 @@ def parse_session_file(
                 stats["assistant_messages"] += 1
                 update_time_bounds(metadata, timestamp)
 
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)

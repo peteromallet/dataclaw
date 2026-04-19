@@ -409,4 +409,4 @@ def parse_session(
     if metadata["model"] is None:
         metadata["model"] = "cursor-unknown"
 
-    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
+    return make_session_result(metadata, messages, stats)

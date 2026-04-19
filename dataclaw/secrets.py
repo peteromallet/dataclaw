@@ -6,6 +6,8 @@ from typing import Any
 
 import ahocorasick
 
+from .anonymizer import Anonymizer
+
 REDACTED = "[REDACTED]"
 
 _GENERIC_SECRET_SUFFIXES = (
@@ -46,6 +48,28 @@ _FAST_PATH_CASE_MARKERS = (
 )
 _FAST_PATH_LOWER_MARKERS = tuple(
     dict.fromkeys(("postgres", "secret_key", "aws_secret_access_key", "password", "passwd") + _GENERIC_SECRET_MARKERS)
+)
+_NON_ANON_STRING_KEYS = frozenset(
+    {
+        "session_id",
+        "model",
+        "git_branch",
+        "start_time",
+        "end_time",
+        "role",
+        "timestamp",
+        "tool",
+        "status",
+        "type",
+        "media_type",
+        "mime_type",
+        "id",
+        "tool_use_id",
+        "sourceToolAssistantUUID",
+        "source",
+        "project",
+        "wall_time",
+    }
 )
 
 # Ordered from most specific to least specific
@@ -459,52 +483,113 @@ def redact_custom_strings(text: str, strings: list[str]) -> tuple[str, int]:
     return text, count
 
 
-def _redact_value(
+def _transform_value(
     value: Any,
+    anonymizer: Anonymizer | None = None,
     custom_strings: list[str] | None = None,
     key: str | None = None,
     parent_dict: dict[str, Any] | None = None,
-) -> tuple[Any, int]:
-    """Recursively redact secrets from a string, list, or dict value."""
+) -> tuple[Any, int, bool]:
+    """Recursively anonymize and/or redact a string, list, or dict value."""
     if isinstance(value, str):
         if should_skip_structured_string_transform(key, value, parent_dict):
-            return value, 0
+            return value, 0, False
         if should_skip_large_binary_string(value):
-            return value, 0
-        result, count = redact_text(value)
+            return value, 0, False
+
+        result = value
+        count = 0
+        changed = False
+
+        if anonymizer is not None and key not in _NON_ANON_STRING_KEYS:
+            anonymized = anonymizer.text(result)
+            if anonymized != result:
+                result = anonymized
+                changed = True
+
+        result, count = redact_text(result)
+        if count > 0:
+            changed = True
         if custom_strings:
             result, n = redact_custom_strings(result, custom_strings)
             count += n
-        return result, count
+            if n > 0:
+                changed = True
+        return result, count, changed
+
     if isinstance(value, dict):
         total = 0
         out: dict[Any, Any] | None = None
         for k, v in value.items():
-            redacted, n = _redact_value(v, custom_strings, k, value)
+            transformed, n, changed = _transform_value(v, anonymizer, custom_strings, k, value)
             total += n
             if out is None:
-                if n == 0 and redacted is v:
+                if not changed:
                     continue
                 out = dict(value)
-            out[k] = redacted
+            out[k] = transformed
         if out is None:
-            return value, 0
-        return out, total
+            return value, 0, False
+        return out, total, True
+
     if isinstance(value, list):
         total = 0
         out_list: list[Any] | None = None
         for idx, item in enumerate(value):
-            redacted, n = _redact_value(item, custom_strings, key, parent_dict)
+            transformed, n, changed = _transform_value(item, anonymizer, custom_strings, key, parent_dict)
             total += n
             if out_list is None:
-                if n == 0 and redacted is item:
+                if not changed:
                     continue
                 out_list = list(value[:idx])
-            out_list.append(redacted)
+            out_list.append(transformed)
         if out_list is None:
-            return value, 0
-        return out_list, total
-    return value, 0
+            return value, 0, False
+        return out_list, total, True
+    return value, 0, False
+
+
+def transform_session(
+    session: dict,
+    anonymizer: Anonymizer,
+    custom_strings: list[str] | None = None,
+) -> tuple[dict, int]:
+    """Anonymize and redact all exported session content in one pass."""
+    total = 0
+
+    for msg in session.get("messages", []):
+        for field in ("content", "thinking"):
+            if msg.get(field):
+                msg[field], count, _changed = _transform_value(
+                    msg[field],
+                    anonymizer,
+                    custom_strings,
+                    field,
+                    msg,
+                )
+                total += count
+        if msg.get("content_parts"):
+            msg["content_parts"], count, _changed = _transform_value(
+                msg["content_parts"],
+                anonymizer,
+                custom_strings,
+                "content_parts",
+                msg,
+            )
+            total += count
+        for tool_use in msg.get("tool_uses", []):
+            for field in ("input", "output"):
+                if tool_use.get(field):
+                    tool_use[field], count, _changed = _transform_value(
+                        tool_use[field],
+                        anonymizer,
+                        custom_strings,
+                        field,
+                        tool_use,
+                    )
+                    total += count
+
+    return session, total
 
 
 def redact_session(session: dict, custom_strings: list[str] | None = None) -> tuple[dict, int]:
@@ -514,18 +599,27 @@ def redact_session(session: dict, custom_strings: list[str] | None = None) -> tu
     for msg in session.get("messages", []):
         for field in ("content", "thinking"):
             if msg.get(field):
-                msg[field], count = redact_text(msg[field])
+                msg[field], count, _changed = _transform_value(
+                    msg[field], custom_strings=custom_strings, key=field, parent_dict=msg
+                )
                 total += count
-                if custom_strings:
-                    msg[field], count = redact_custom_strings(msg[field], custom_strings)
-                    total += count
         if msg.get("content_parts"):
-            msg["content_parts"], count = _redact_value(msg["content_parts"], custom_strings)
+            msg["content_parts"], count, _changed = _transform_value(
+                msg["content_parts"],
+                custom_strings=custom_strings,
+                key="content_parts",
+                parent_dict=msg,
+            )
             total += count
         for tool_use in msg.get("tool_uses", []):
             for field in ("input", "output"):
                 if tool_use.get(field):
-                    tool_use[field], count = _redact_value(tool_use[field], custom_strings)
+                    tool_use[field], count, _changed = _transform_value(
+                        tool_use[field],
+                        custom_strings=custom_strings,
+                        key=field,
+                        parent_dict=tool_use,
+                    )
                     total += count
 
     return session, total
