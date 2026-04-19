@@ -4,6 +4,8 @@ import math
 import re
 from typing import Any
 
+import ahocorasick
+
 REDACTED = "[REDACTED]"
 
 _GENERIC_SECRET_SUFFIXES = (
@@ -17,6 +19,33 @@ _GENERIC_SECRET_SUFFIX_RE = "|".join(re.escape(name) for name in _GENERIC_SECRET
 _GENERIC_SECRET_NAME_PATTERN = rf"[A-Za-z0-9_-]*?(?:{_GENERIC_SECRET_SUFFIX_RE})"
 _GENERIC_SECRET_MARKERS = tuple(
     f"{suffix}{delimiter}" for suffix in _GENERIC_SECRET_SUFFIXES for delimiter in ("=", ":", '"', "'", " ")
+)
+_FAST_PATH_CASE_MARKERS = (
+    "eyJ",
+    "sk-ant-",
+    "sk-",
+    "AIzaSy",
+    "gsk_",
+    "fm1_",
+    "fm2_",
+    "0x",
+    "hf_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "pypi-",
+    "npm_",
+    "AKIA",
+    "xox",
+    "discord",
+    "PRIVATE KEY",
+    "Bearer",
+    "密码",
+)
+_FAST_PATH_LOWER_MARKERS = tuple(
+    dict.fromkeys(("postgres", "secret_key", "aws_secret_access_key", "password", "passwd") + _GENERIC_SECRET_MARKERS)
 )
 
 # Ordered from most specific to least specific
@@ -209,61 +238,84 @@ def _has_mixed_char_types(s: str) -> bool:
     return has_upper and has_lower and has_digit
 
 
-def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
-    return any(needle in text for needle in needles)
+def _build_marker_automaton(markers: tuple[str, ...]):
+    automaton = ahocorasick.Automaton()
+    for marker in markers:
+        automaton.add_word(marker, marker)
+    automaton.make_automaton()
+    return automaton
 
 
-def _contains_general_secret_marker(text: str, lower_text: str | None, markers: tuple[str, ...]) -> tuple[bool, str]:
-    if lower_text is None:
-        lower_text = text.lower()
-    return _contains_any(lower_text, markers), lower_text
+_FAST_PATH_CASE_AUTOMATON = _build_marker_automaton(_FAST_PATH_CASE_MARKERS)
+_FAST_PATH_LOWER_AUTOMATON = _build_marker_automaton(_FAST_PATH_LOWER_MARKERS)
 
 
-def _pattern_may_match(name: str, text: str, lower_text: str | None) -> tuple[bool, str | None]:
+class _FastPathState:
+    __slots__ = ("text", "_case_markers", "_lower_markers")
+
+    def __init__(self, text: str):
+        self.text = text
+        self._case_markers: set[str] | None = None
+        self._lower_markers: set[str] | None = None
+
+    def case_markers(self) -> set[str]:
+        if self._case_markers is None:
+            self._case_markers = {marker for _, marker in _FAST_PATH_CASE_AUTOMATON.iter(self.text)}
+        return self._case_markers
+
+    def lower_markers(self) -> set[str]:
+        if self._lower_markers is None:
+            self._lower_markers = {marker for _, marker in _FAST_PATH_LOWER_AUTOMATON.iter(self.text.lower())}
+        return self._lower_markers
+
+
+def _has_any_marker(found_markers: set[str], needles: tuple[str, ...]) -> bool:
+    return any(needle in found_markers for needle in needles)
+
+
+def _pattern_may_match(name: str, state: _FastPathState) -> bool:
+    text = state.text
     if name in ("jwt", "jwt_partial"):
-        return "eyJ" in text, lower_text
+        return "eyJ" in state.case_markers()
     if name == "db_url":
-        if lower_text is None:
-            lower_text = text.lower()
-        return "postgres" in lower_text, lower_text
+        return "postgres" in state.lower_markers()
     if name == "anthropic_key":
-        return "sk-ant-" in text, lower_text
+        return "sk-ant-" in state.case_markers()
     if name == "openai_key":
-        return "sk-" in text, lower_text
+        return "sk-" in state.case_markers()
     if name == "google_api_key":
-        return "AIzaSy" in text, lower_text
+        return "AIzaSy" in state.case_markers()
     if name == "groq_key":
-        return "gsk_" in text, lower_text
+        return "gsk_" in state.case_markers()
     if name == "telegram_token":
-        return ":" in text, lower_text
+        return ":" in text
     if name == "flyio_token":
-        return "fm1_" in text or "fm2_" in text, lower_text
+        case_markers = state.case_markers()
+        return "fm1_" in case_markers or "fm2_" in case_markers
     if name == "eth_private_key":
-        return "0x" in text, lower_text
+        return "0x" in state.case_markers()
     if name == "hf_token":
-        return "hf_" in text, lower_text
+        return "hf_" in state.case_markers()
     if name == "github_token":
-        return _contains_any(text, ("ghp_", "gho_", "ghs_", "ghr_")), lower_text
+        return _has_any_marker(state.case_markers(), ("ghp_", "gho_", "ghs_", "ghr_"))
     if name == "github_pat_token":
-        return "github_pat_" in text, lower_text
+        return "github_pat_" in state.case_markers()
     if name == "pypi_token":
-        return "pypi-" in text, lower_text
+        return "pypi-" in state.case_markers()
     if name == "npm_token":
-        return "npm_" in text, lower_text
+        return "npm_" in state.case_markers()
     if name == "aws_key":
-        return "AKIA" in text, lower_text
+        return "AKIA" in state.case_markers()
     if name == "aws_secret":
         if "=" not in text and ":" not in text:
-            return False, lower_text
-        if lower_text is None:
-            lower_text = text.lower()
-        return _contains_any(lower_text, ("secret_key", "aws_secret_access_key")), lower_text
+            return False
+        return _has_any_marker(state.lower_markers(), ("secret_key", "aws_secret_access_key"))
     if name == "slack_token":
-        return "xox" in text, lower_text
+        return "xox" in state.case_markers()
     if name == "discord_webhook":
-        return "discord" in text, lower_text
+        return "discord" in state.case_markers()
     if name == "private_key":
-        return "PRIVATE KEY" in text, lower_text
+        return "PRIVATE KEY" in state.case_markers()
     if name == "generic_secret":
         if (
             "-" not in text
@@ -273,21 +325,21 @@ def _pattern_may_match(name: str, text: str, lower_text: str | None) -> tuple[bo
             and "&" not in text
             and " " not in text
         ):
-            return False, lower_text
-        return _contains_general_secret_marker(text, lower_text, _GENERIC_SECRET_MARKERS)
+            return False
+        return _has_any_marker(state.lower_markers(), _GENERIC_SECRET_MARKERS)
     if name == "bearer":
-        return "Bearer" in text, lower_text
+        return "Bearer" in state.case_markers()
     if name == "ip_address":
-        return "." in text, lower_text
+        return "." in text
     if name == "password_value":
-        if lower_text is None:
-            lower_text = text.lower()
-        return "password" in lower_text or "passwd" in lower_text or "密码" in text, lower_text
+        case_markers = state.case_markers()
+        lower_markers = state.lower_markers()
+        return "password" in lower_markers or "passwd" in lower_markers or "密码" in case_markers
     if name == "email":
-        return "@" in text, lower_text
+        return "@" in text
     if name == "high_entropy":
-        return '"' in text or "'" in text, lower_text
-    return True, lower_text
+        return '"' in text or "'" in text
+    return True
 
 
 def scan_text(text: str) -> list[dict]:
@@ -295,10 +347,9 @@ def scan_text(text: str) -> list[dict]:
         return []
 
     findings = []
-    lower_text: str | None = None
+    fast_path_state = _FastPathState(text)
     for name, pattern in SECRET_PATTERNS:
-        may_match, lower_text = _pattern_may_match(name, text, lower_text)
-        if not may_match:
+        if not _pattern_may_match(name, fast_path_state):
             continue
         for match in pattern.finditer(text):
             matched_text = match.group(0)
