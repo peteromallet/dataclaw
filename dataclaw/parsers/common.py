@@ -7,7 +7,7 @@ from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
-from ..secrets import should_skip_large_binary_string
+from ..secrets import should_skip_large_binary_string, should_skip_structured_string_transform
 
 logger = logging.getLogger(__name__)
 
@@ -151,11 +151,7 @@ def normalize_timestamp(value: Any) -> str | None:
 def _should_skip_anonymizing_string(key: str | None, value: str, parent_dict: dict[str, Any] | None) -> bool:
     if key in _NON_ANON_STRING_KEYS:
         return True
-    if key == "data" and isinstance(parent_dict, dict) and parent_dict.get("type") == "base64":
-        return True
-    if key == "url" and value.startswith("data:"):
-        return True
-    return False
+    return should_skip_structured_string_transform(key, value, parent_dict)
 
 
 def _anonymize_session_value(

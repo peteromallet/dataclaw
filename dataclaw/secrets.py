@@ -199,6 +199,19 @@ def should_skip_large_binary_string(text: str) -> bool:
     return _BASE64_BLOB_RE.fullmatch(compact) is not None
 
 
+def should_skip_structured_string_transform(
+    key: str | None,
+    value: str,
+    parent_dict: dict[str, Any] | None,
+) -> bool:
+    """Return True for schema-marked binary/document payload strings we should not rewrite."""
+    if key == "data" and isinstance(parent_dict, dict) and parent_dict.get("type") == "base64":
+        return True
+    if key == "url" and value.startswith("data:"):
+        return True
+    return False
+
+
 def contains_large_binary_value(value: Any) -> bool:
     if isinstance(value, str):
         return should_skip_large_binary_string(value)
@@ -425,9 +438,16 @@ def redact_custom_strings(text: str, strings: list[str]) -> tuple[str, int]:
     return text, count
 
 
-def _redact_value(value: Any, custom_strings: list[str] | None = None) -> tuple[Any, int]:
+def _redact_value(
+    value: Any,
+    custom_strings: list[str] | None = None,
+    key: str | None = None,
+    parent_dict: dict[str, Any] | None = None,
+) -> tuple[Any, int]:
     """Recursively redact secrets from a string, list, or dict value."""
     if isinstance(value, str):
+        if should_skip_structured_string_transform(key, value, parent_dict):
+            return value, 0
         if should_skip_large_binary_string(value):
             return value, 0
         result, count = redact_text(value)
@@ -439,7 +459,7 @@ def _redact_value(value: Any, custom_strings: list[str] | None = None) -> tuple[
         total = 0
         out: dict[Any, Any] | None = None
         for k, v in value.items():
-            redacted, n = _redact_value(v, custom_strings)
+            redacted, n = _redact_value(v, custom_strings, k, value)
             total += n
             if out is None:
                 if n == 0 and redacted is v:
@@ -453,7 +473,7 @@ def _redact_value(value: Any, custom_strings: list[str] | None = None) -> tuple[
         total = 0
         out_list: list[Any] | None = None
         for idx, item in enumerate(value):
-            redacted, n = _redact_value(item, custom_strings)
+            redacted, n = _redact_value(item, custom_strings, key, parent_dict)
             total += n
             if out_list is None:
                 if n == 0 and redacted is item:

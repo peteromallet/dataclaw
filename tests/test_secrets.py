@@ -735,3 +735,37 @@ class TestLargeBinarySkipping:
         assert result["messages"][0]["tool_uses"][0]["output"]["raw"]["content"][0]["source"]["data"] == blob
         assert result["messages"][0]["tool_uses"][0]["output"] is output
         assert count == 0
+
+    def test_redact_session_skips_short_base64_field_payload(self):
+        blob = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        session = {
+            "messages": [
+                {
+                    "content_parts": [
+                        {"type": "tool_result", "content": f"Key: {blob}"},
+                        {"type": "image", "source": {"type": "base64", "data": blob}},
+                    ]
+                }
+            ]
+        }
+        result, count = redact_session(session)
+        assert REDACTED in result["messages"][0]["content_parts"][0]["content"]
+        assert result["messages"][0]["content_parts"][1]["source"]["data"] == blob
+        assert count >= 1
+
+    def test_redact_session_skips_data_url_source(self):
+        data_url = "data:text/plain;base64,sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
+        session = {
+            "messages": [
+                {
+                    "content_parts": [
+                        {"type": "document", "source": {"type": "url", "url": data_url}},
+                        {"type": "tool_result", "content": "token: sk-ant-api03-abcdefghijklmnopqrstuvwxyz"},
+                    ]
+                }
+            ]
+        }
+        result, count = redact_session(session)
+        assert result["messages"][0]["content_parts"][0]["source"]["url"] == data_url
+        assert REDACTED in result["messages"][0]["content_parts"][1]["content"]
+        assert count >= 1
