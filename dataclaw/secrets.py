@@ -172,6 +172,9 @@ _BASE64_BLOB_RE = re.compile(r"(?:[A-Za-z0-9+/]{4}){1024,}(?:[A-Za-z0-9+/]{2}==|
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _BINARY_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0E-\x1F]")
 _WHITESPACE_RE = re.compile(r"\s+")
+_DIGIT_RE = re.compile(r"\d")
+_TELEGRAM_PREFIX_RE = re.compile(r"\b\d{8,10}:")
+_IPV4_CANDIDATE_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
 
 def should_skip_large_binary_string(text: str) -> bool:
@@ -264,12 +267,15 @@ _FAST_PATH_LOWER_AUTOMATON = _build_marker_automaton(_FAST_PATH_LOWER_MARKERS)
 
 
 class _FastPathState:
-    __slots__ = ("text", "_case_markers", "_lower_markers")
+    __slots__ = ("text", "_case_markers", "_lower_markers", "_has_digit", "_has_telegram_prefix", "_has_ipv4_candidate")
 
     def __init__(self, text: str):
         self.text = text
         self._case_markers: set[str] | None = None
         self._lower_markers: set[str] | None = None
+        self._has_digit: bool | None = None
+        self._has_telegram_prefix: bool | None = None
+        self._has_ipv4_candidate: bool | None = None
 
     def case_markers(self) -> set[str]:
         if self._case_markers is None:
@@ -280,6 +286,21 @@ class _FastPathState:
         if self._lower_markers is None:
             self._lower_markers = {marker for _, marker in _FAST_PATH_LOWER_AUTOMATON.iter(self.text.lower())}
         return self._lower_markers
+
+    def has_digit(self) -> bool:
+        if self._has_digit is None:
+            self._has_digit = _DIGIT_RE.search(self.text) is not None
+        return self._has_digit
+
+    def has_telegram_prefix(self) -> bool:
+        if self._has_telegram_prefix is None:
+            self._has_telegram_prefix = _TELEGRAM_PREFIX_RE.search(self.text) is not None
+        return self._has_telegram_prefix
+
+    def has_ipv4_candidate(self) -> bool:
+        if self._has_ipv4_candidate is None:
+            self._has_ipv4_candidate = _IPV4_CANDIDATE_RE.search(self.text) is not None
+        return self._has_ipv4_candidate
 
 
 def _has_any_marker(found_markers: set[str], needles: tuple[str, ...]) -> bool:
@@ -301,7 +322,7 @@ def _pattern_may_match(name: str, state: _FastPathState) -> bool:
     if name == "groq_key":
         return "gsk_" in state.case_markers()
     if name == "telegram_token":
-        return ":" in text
+        return len(text) >= 44 and ":" in text and state.has_telegram_prefix()
     if name == "flyio_token":
         case_markers = state.case_markers()
         return "fm1_" in case_markers or "fm2_" in case_markers
@@ -326,9 +347,9 @@ def _pattern_may_match(name: str, state: _FastPathState) -> bool:
     if name == "slack_token":
         return "xox" in state.case_markers()
     if name == "discord_webhook":
-        return "discord" in state.case_markers()
+        return "discord" in state.case_markers() and "/api/webhooks/" in text
     if name == "private_key":
-        return "PRIVATE KEY" in state.case_markers()
+        return "PRIVATE KEY" in state.case_markers() and "-----BEGIN" in text and "-----END" in text
     if name == "generic_secret":
         if (
             "-" not in text
@@ -341,17 +362,17 @@ def _pattern_may_match(name: str, state: _FastPathState) -> bool:
             return False
         return _has_any_marker(state.lower_markers(), _GENERIC_SECRET_MARKERS)
     if name == "bearer":
-        return "Bearer" in state.case_markers()
+        return "Bearer" in state.case_markers() and len(text) >= 27
     if name == "ip_address":
-        return "." in text
+        return "." in text and state.has_ipv4_candidate()
     if name == "password_value":
         case_markers = state.case_markers()
         lower_markers = state.lower_markers()
         return "password" in lower_markers or "passwd" in lower_markers or "密码" in case_markers
     if name == "email":
-        return "@" in text
+        return "@" in text and "." in text
     if name == "high_entropy":
-        return '"' in text or "'" in text
+        return ('"' in text or "'" in text) and state.has_digit()
     return True
 
 
