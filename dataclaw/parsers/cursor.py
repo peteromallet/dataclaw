@@ -7,7 +7,6 @@ from typing import Any
 from .. import _json as json
 from ..anonymizer import Anonymizer
 from ..export_tasks import ExportSessionTask
-from ..secrets import redact_text
 from .common import (
     build_prefixed_project_name,
     build_projects_from_index,
@@ -323,11 +322,10 @@ def parse_session(
             text = (bubble.get("text") or "").strip()
             if not text:
                 continue
-            redacted, _ = redact_text(text)
             messages.append(
                 {
                     "role": "user",
-                    "content": anonymizer.text(redacted),
+                    "content": anonymizer.text(text),
                     "timestamp": timestamp,
                 }
             )
@@ -357,8 +355,7 @@ def parse_session(
                 result_raw = _try_parse_json(tfd.get("result"))
                 tool_output: dict[str, Any] = {}
                 if isinstance(result_raw, str) and result_raw.strip():
-                    redacted_out, _ = redact_text(result_raw)
-                    tool_output = {"text": anonymizer.text(redacted_out)}
+                    tool_output = {"text": anonymizer.text(result_raw)}
                 elif isinstance(result_raw, dict):
                     tool_output = {
                         k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in result_raw.items()
@@ -393,8 +390,7 @@ def parse_session(
 
                 text = (bubble.get("text") or "").strip()
                 if text:
-                    redacted, _ = redact_text(text)
-                    msg["content"] = anonymizer.text(redacted)
+                    msg["content"] = anonymizer.text(text)
 
                 messages.append(msg)
                 stats["assistant_messages"] += 1
@@ -412,8 +408,7 @@ def parse_session(
 
                 msg = {"role": "assistant", "timestamp": timestamp}
                 if text:
-                    redacted, _ = redact_text(text)
-                    msg["content"] = anonymizer.text(redacted)
+                    msg["content"] = anonymizer.text(text)
                 if think_text:
                     msg["thinking"] = anonymizer.text(think_text)
 

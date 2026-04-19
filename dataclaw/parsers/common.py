@@ -7,7 +7,7 @@ from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
-from ..secrets import redact_text, should_skip_large_binary_string
+from ..secrets import should_skip_large_binary_string
 
 logger = logging.getLogger(__name__)
 
@@ -146,8 +146,7 @@ def anonymize_value(key: str, value: Any, anonymizer: Anonymizer) -> Any:
         if key in _PATH_KEYS:
             return anonymizer.path(value)
         if key in _CMD_KEYS:
-            redacted, _ = redact_text(value)
-            return anonymizer.text(redacted)
+            return anonymizer.text(value)
         return anonymizer.text(value)
     if isinstance(value, dict):
         return {k: anonymize_value(k, v, anonymizer) for k, v in value.items()}

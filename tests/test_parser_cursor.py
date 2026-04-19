@@ -4,6 +4,7 @@ import sqlite3
 
 from dataclaw import _json as json
 from dataclaw.parser import discover_projects, parse_project_sessions
+from dataclaw.secrets import REDACTED
 from tests.parser_helpers import disable_other_providers, insert_cursor_conversation, write_cursor_db
 
 
@@ -384,3 +385,37 @@ class TestCursorParseSessions:
         monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
         sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor")
         assert "file_path" in sessions[0]["messages"][1]["tool_uses"][0]["input"]
+
+    def test_parser_does_not_pre_redact_message_content(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"cursor"})
+        cwd = "/Users/testuser/work/myapp"
+        db_path = tmp_path / "state.vscdb"
+        conn = write_cursor_db(db_path)
+        secret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+        insert_cursor_conversation(
+            conn,
+            "conv-secret",
+            [
+                {
+                    "id": "b1",
+                    "type": 1,
+                    "text": f"Use this key: {secret}",
+                    "createdAt": 1706000000000,
+                    "workspaceUris": [f"file://{cwd}"],
+                },
+                {
+                    "id": "b2",
+                    "type": 2,
+                    "text": "Noted.",
+                    "createdAt": 1706000001000,
+                },
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.cursor.CURSOR_DB", db_path)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="cursor")
+        content = sessions[0]["messages"][0]["content"]
+        assert secret in content
+        assert REDACTED not in content

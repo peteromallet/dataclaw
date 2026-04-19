@@ -2,6 +2,7 @@
 
 from dataclaw import _json as json
 from dataclaw.parsers.common import load_json_field, normalize_timestamp, parse_tool_input
+from dataclaw.secrets import REDACTED
 
 
 class TestNormalizeTimestamp:
@@ -119,6 +120,12 @@ class TestParseToolInput:
         assert isinstance(result, dict)
         assert result["command"] == "ls"
         assert "workdir" in result
+
+    def test_command_field_is_not_pre_redacted(self, mock_anonymizer):
+        secret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+        result = parse_tool_input("Bash", {"command": f"export ANTHROPIC_API_KEY={secret}"}, mock_anonymizer)
+        assert secret in result["command"]
+        assert REDACTED not in result["command"]
 
     def test_update_plan_tool(self, mock_anonymizer):
         result = parse_tool_input(

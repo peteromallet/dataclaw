@@ -2,6 +2,7 @@
 
 from dataclaw import _json as json
 from dataclaw.parser import discover_projects, parse_project_sessions
+from dataclaw.secrets import REDACTED
 from tests.parser_helpers import disable_other_providers
 
 
@@ -107,3 +108,15 @@ class TestDiscoverCustomProjects:
         custom_dir.mkdir(parents=True)
         monkeypatch.setattr("dataclaw.parsers.custom.CUSTOM_DIR", custom_dir)
         assert parse_project_sessions("nope", mock_anonymizer, source="custom") == []
+
+    def test_parser_does_not_pre_redact_message_content(self, tmp_path, monkeypatch, mock_anonymizer):
+        custom_dir = tmp_path / "custom"
+        project_dir = custom_dir / "test-proj"
+        project_dir.mkdir(parents=True)
+        secret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+        (project_dir / "data.jsonl").write_text(self._make_valid_session("s1", content=f"token={secret}") + "\n")
+        monkeypatch.setattr("dataclaw.parsers.custom.CUSTOM_DIR", custom_dir)
+        sessions = parse_project_sessions("test-proj", mock_anonymizer, source="custom")
+        content = sessions[0]["messages"][0]["content"]
+        assert secret in content
+        assert REDACTED not in content

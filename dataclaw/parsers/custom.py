@@ -5,7 +5,6 @@ from pathlib import Path
 from .. import _json as json
 from ..anonymizer import Anonymizer
 from ..export_tasks import ExportSessionTask
-from ..secrets import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +155,5 @@ def parse_session_bytes(project_dir_name: str, raw_line: bytes | str, anonymizer
     session["source"] = SOURCE
     for msg in session.get("messages", []):
         if "content" in msg and isinstance(msg["content"], str):
-            redacted, _ = redact_text(msg["content"])
-            msg["content"] = anonymizer.text(redacted)
+            msg["content"] = anonymizer.text(msg["content"])
     return session
