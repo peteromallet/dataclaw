@@ -152,7 +152,7 @@ class CodexParseState:
     pending_user_timestamp: str | None = None
 
 
-def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+def build_tool_result_map(entries: Iterable[dict[str, Any]]) -> dict[str, dict]:
     """Pre-pass: build call_id -> {output, status} from tool outputs."""
     result: dict[str, dict] = {}
     for entry in entries:
@@ -162,14 +162,14 @@ def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymi
         call_id = payload.get("call_id")
         if not call_id:
             continue
-        built = _build_codex_tool_result(payload, anonymizer)
+        built = _build_codex_tool_result(payload)
         if built is not None:
             result[call_id] = built
 
     return result
 
 
-def _build_codex_tool_result(payload: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any] | None:
+def _build_codex_tool_result(payload: dict[str, Any]) -> dict[str, Any] | None:
     payload_type = payload.get("type")
 
     if payload_type == "function_call_output":
@@ -191,7 +191,7 @@ def _build_codex_tool_result(payload: dict[str, Any], anonymizer: Anonymizer) ->
             elif in_output:
                 output_lines.append(line)
         if output_lines:
-            out["output"] = anonymizer.text("\n".join(output_lines).strip())
+            out["output"] = "\n".join(output_lines).strip()
         return {"output": out, "status": "success"}
 
     if payload_type == "custom_tool_call_output":
@@ -201,7 +201,7 @@ def _build_codex_tool_result(payload: dict[str, Any], anonymizer: Anonymizer) ->
             parsed = json.loads(raw)
             text = parsed.get("output", "")
             if text:
-                out["output"] = anonymizer.text(str(text))
+                out["output"] = str(text)
             meta = parsed.get("metadata", {})
             if "exit_code" in meta:
                 out["exit_code"] = meta["exit_code"]
@@ -209,7 +209,7 @@ def _build_codex_tool_result(payload: dict[str, Any], anonymizer: Anonymizer) ->
                 out["duration_seconds"] = meta["duration_seconds"]
         except (json.JSONDecodeError, AttributeError):
             if raw:
-                out["output"] = anonymizer.text(raw)
+                out["output"] = raw
         return {"output": out, "status": "success"}
 
     return None
@@ -224,7 +224,6 @@ def parse_session_file(
     state = CodexParseState(
         metadata={
             "session_id": filepath.stem,
-            "cwd": None,
             "git_branch": None,
             "model": None,
             "start_time": None,
@@ -243,11 +242,11 @@ def parse_session_file(
             entry_type = entry.get("type")
 
             if entry_type == "session_meta":
-                handle_session_meta(state, entry, filepath, anonymizer)
+                handle_session_meta(state, entry, filepath)
             elif entry_type == "turn_context":
-                handle_turn_context(state, entry, anonymizer)
+                handle_turn_context(state, entry)
             elif entry_type == "response_item":
-                handle_response_item(state, entry, anonymizer, include_thinking)
+                handle_response_item(state, entry, include_thinking)
             elif entry_type == "event_msg":
                 payload = entry.get("payload", {})
                 event_type = payload.get("type")
@@ -256,14 +255,14 @@ def parse_session_file(
                 elif event_type == "agent_reasoning" and include_thinking:
                     thinking = payload.get("text")
                     if isinstance(thinking, str) and thinking.strip():
-                        cleaned = anonymizer.text(thinking.strip())
+                        cleaned = thinking.strip()
                         if cleaned not in state._pending_thinking_seen:
                             state._pending_thinking_seen.add(cleaned)
                             state.pending_thinking.append(cleaned)
                 elif event_type == "user_message":
-                    handle_user_message(state, payload, timestamp, anonymizer)
+                    handle_user_message(state, payload, timestamp)
                 elif event_type == "agent_message":
-                    handle_agent_message(state, payload, timestamp, anonymizer, include_thinking)
+                    handle_agent_message(state, payload, timestamp, include_thinking)
     except OSError as e:
         logger.warning("Failed to read Codex session file %s: %s", filepath, e)
         return None
@@ -284,21 +283,18 @@ def parse_session_file(
         else:
             state.metadata["model"] = "codex-unknown"
 
-    return make_session_result(state.metadata, state.messages, state.stats)
+    return make_session_result(state.metadata, state.messages, state.stats, anonymizer=anonymizer)
 
 
 def handle_session_meta(
     state: CodexParseState,
     entry: dict[str, Any],
     filepath: Path,
-    anonymizer: Anonymizer,
 ) -> None:
     payload = entry.get("payload", {})
     session_cwd = payload.get("cwd")
     if isinstance(session_cwd, str) and session_cwd.strip():
         state.raw_cwd = session_cwd
-        if state.metadata["cwd"] is None:
-            state.metadata["cwd"] = anonymizer.path(session_cwd)
     if state.metadata["session_id"] == filepath.stem:
         state.metadata["session_id"] = payload.get("id", state.metadata["session_id"])
     if state.metadata["model_provider"] is None:
@@ -311,21 +307,18 @@ def handle_session_meta(
 def handle_turn_context(
     state: CodexParseState,
     entry: dict[str, Any],
-    anonymizer: Anonymizer,
 ) -> None:
     payload = entry.get("payload", {})
     session_cwd = payload.get("cwd")
     if isinstance(session_cwd, str) and session_cwd.strip():
         state.raw_cwd = session_cwd
-        if state.metadata["cwd"] is None:
-            state.metadata["cwd"] = anonymizer.path(session_cwd)
     if state.metadata["model"] is None:
         model_name = payload.get("model")
         if isinstance(model_name, str) and model_name.strip():
             state.metadata["model"] = model_name
 
 
-def _build_codex_image_part(image_url: str, anonymizer: Anonymizer) -> dict[str, Any] | None:
+def _build_codex_image_part(image_url: str) -> dict[str, Any] | None:
     if not image_url:
         return None
 
@@ -346,7 +339,7 @@ def _build_codex_image_part(image_url: str, anonymizer: Anonymizer) -> dict[str,
             "type": "image",
             "source": {
                 "type": "url",
-                "url": f"file://{anonymizer.path(image_url[7:])}",
+                "url": image_url,
             },
         }
 
@@ -354,12 +347,12 @@ def _build_codex_image_part(image_url: str, anonymizer: Anonymizer) -> dict[str,
         "type": "image",
         "source": {
             "type": "url",
-            "url": anonymizer.text(image_url),
+            "url": image_url,
         },
     }
 
 
-def _build_codex_local_image_part(image_path: str, state: CodexParseState, anonymizer: Anonymizer) -> dict[str, Any]:
+def _build_codex_local_image_part(image_path: str, state: CodexParseState) -> dict[str, Any]:
     path = Path(image_path)
     if not path.is_absolute() and state.raw_cwd != UNKNOWN_CODEX_CWD:
         path = Path(state.raw_cwd) / path
@@ -367,12 +360,12 @@ def _build_codex_local_image_part(image_path: str, state: CodexParseState, anony
         "type": "image",
         "source": {
             "type": "url",
-            "url": f"file://{anonymizer.path(str(path))}",
+            "url": f"file://{path}",
         },
     }
 
 
-def _extract_response_user_content_parts(payload: dict[str, Any], anonymizer: Anonymizer) -> list[dict[str, Any]]:
+def _extract_response_user_content_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     content_parts: list[dict[str, Any]] = []
     for part in payload.get("content", []):
         if not isinstance(part, dict):
@@ -381,7 +374,7 @@ def _extract_response_user_content_parts(payload: dict[str, Any], anonymizer: An
             continue
         image_url = part.get("image_url")
         if isinstance(image_url, str) and image_url:
-            image_part = _build_codex_image_part(image_url, anonymizer)
+            image_part = _build_codex_image_part(image_url)
             if image_part is not None:
                 content_parts.append(image_part)
     return content_parts
@@ -390,17 +383,16 @@ def _extract_response_user_content_parts(payload: dict[str, Any], anonymizer: An
 def _extract_event_user_content_parts(
     payload: dict[str, Any],
     state: CodexParseState,
-    anonymizer: Anonymizer,
 ) -> list[dict[str, Any]]:
     content_parts: list[dict[str, Any]] = []
     for image_url in payload.get("images", []):
         if isinstance(image_url, str) and image_url:
-            image_part = _build_codex_image_part(image_url, anonymizer)
+            image_part = _build_codex_image_part(image_url)
             if image_part is not None:
                 content_parts.append(image_part)
     for image_path in payload.get("local_images", []):
         if isinstance(image_path, str) and image_path:
-            content_parts.append(_build_codex_local_image_part(image_path, state, anonymizer))
+            content_parts.append(_build_codex_local_image_part(image_path, state))
     return content_parts
 
 
@@ -464,13 +456,12 @@ def _is_user_content_entry(entry: dict[str, Any]) -> bool:
 def handle_response_item(
     state: CodexParseState,
     entry: dict[str, Any],
-    anonymizer: Anonymizer,
     include_thinking: bool,
 ) -> None:
     payload = entry.get("payload", {})
     item_type = payload.get("type")
     if item_type == "message" and payload.get("role") == "user":
-        content_parts = _extract_response_user_content_parts(payload, anonymizer)
+        content_parts = _extract_response_user_content_parts(payload)
         if content_parts:
             state.pending_user_content_parts.extend(content_parts)
             if state.pending_user_timestamp is None:
@@ -481,7 +472,7 @@ def handle_response_item(
         args_data = parse_tool_arguments(payload.get("arguments"))
         tool_use = {
             "tool": tool_name,
-            "input": parse_tool_input(tool_name, args_data, anonymizer),
+            "input": parse_tool_input(args_data),
             "_call_id": payload.get("call_id"),
         }
         _register_codex_tool_use(state, tool_use, payload.get("call_id"))
@@ -490,9 +481,9 @@ def handle_response_item(
         tool_name = payload.get("name")
         raw_input = payload.get("input", "")
         if isinstance(raw_input, str):
-            inp = {"patch": anonymizer.text(raw_input)}
+            inp = {"patch": raw_input}
         else:
-            inp = parse_tool_input(tool_name, raw_input, anonymizer)
+            inp = parse_tool_input(raw_input)
         tool_use = {
             "tool": tool_name,
             "input": inp,
@@ -503,7 +494,7 @@ def handle_response_item(
     elif item_type in {"function_call_output", "custom_tool_call_output"}:
         call_id = payload.get("call_id")
         if isinstance(call_id, str) and call_id:
-            result = _build_codex_tool_result(payload, anonymizer)
+            result = _build_codex_tool_result(payload)
             if result is not None:
                 _attach_codex_tool_result(state, call_id, result)
     elif item_type == "reasoning" and include_thinking:
@@ -512,7 +503,7 @@ def handle_response_item(
                 continue
             text = summary.get("text")
             if isinstance(text, str) and text.strip():
-                cleaned = anonymizer.text(text.strip())
+                cleaned = text.strip()
                 if cleaned not in state._pending_thinking_seen:
                     state._pending_thinking_seen.add(cleaned)
                     state.pending_thinking.append(cleaned)
@@ -533,17 +524,16 @@ def handle_user_message(
     state: CodexParseState,
     payload: dict[str, Any],
     timestamp: str | None,
-    anonymizer: Anonymizer,
 ) -> None:
     flush_pending(state, timestamp)
     pending_parts = list(state.pending_user_content_parts)
     content = payload.get("message")
     if not pending_parts:
-        pending_parts.extend(_extract_event_user_content_parts(payload, state, anonymizer))
+        pending_parts.extend(_extract_event_user_content_parts(payload, state))
 
     msg: dict[str, Any] = {"role": "user", "timestamp": timestamp}
     if isinstance(content, str) and content.strip():
-        msg["content"] = anonymizer.text(content.strip())
+        msg["content"] = content.strip()
     if pending_parts:
         msg["content_parts"] = pending_parts
 
@@ -568,13 +558,12 @@ def handle_agent_message(
     state: CodexParseState,
     payload: dict[str, Any],
     timestamp: str | None,
-    anonymizer: Anonymizer,
     include_thinking: bool,
 ) -> None:
     content = payload.get("message")
     msg: dict[str, Any] = {"role": "assistant"}
     if isinstance(content, str) and content.strip():
-        msg["content"] = anonymizer.text(content.strip())
+        msg["content"] = content.strip()
     if state.pending_thinking and include_thinking:
         msg["thinking"] = "\n\n".join(state.pending_thinking)
     if state.pending_tool_uses:

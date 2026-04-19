@@ -69,7 +69,7 @@ class TestBuildProjectName:
 class TestExtractUserContent:
     def test_string_content(self, mock_anonymizer):
         entry = {"message": {"content": "Fix the bug"}}
-        result = extract_user_content(entry, mock_anonymizer)
+        result = extract_user_content(entry)
         assert result == "Fix the bug"
 
     def test_list_content(self, mock_anonymizer):
@@ -81,21 +81,21 @@ class TestExtractUserContent:
                 ]
             }
         }
-        result = extract_user_content(entry, mock_anonymizer)
+        result = extract_user_content(entry)
         assert "Hello" in result
         assert "World" in result
 
     def test_empty_content(self, mock_anonymizer):
         entry = {"message": {"content": ""}}
-        assert extract_user_content(entry, mock_anonymizer) is None
+        assert extract_user_content(entry) is None
 
     def test_whitespace_content(self, mock_anonymizer):
         entry = {"message": {"content": "   \n  "}}
-        assert extract_user_content(entry, mock_anonymizer) is None
+        assert extract_user_content(entry) is None
 
     def test_missing_message(self, mock_anonymizer):
         entry = {}
-        assert extract_user_content(entry, mock_anonymizer) is None
+        assert extract_user_content(entry) is None
 
 
 class TestExtractAssistantContent:
@@ -108,7 +108,7 @@ class TestExtractAssistantContent:
                 ]
             }
         }
-        result = extract_assistant_content(entry, mock_anonymizer, True)
+        result = extract_assistant_content(entry, True)
         assert result is not None
         assert result["role"] == "assistant"
         assert "Part 1" in result["content"]
@@ -123,7 +123,7 @@ class TestExtractAssistantContent:
                 ]
             }
         }
-        result = extract_assistant_content(entry, mock_anonymizer, True)
+        result = extract_assistant_content(entry, True)
         assert result is not None
         assert "thinking" in result
         assert "Need to inspect files." in result["thinking"]
@@ -137,7 +137,7 @@ class TestExtractAssistantContent:
                 ]
             }
         }
-        result = extract_assistant_content(entry, mock_anonymizer, False)
+        result = extract_assistant_content(entry, False)
         assert result is not None
         assert "thinking" not in result
         assert result["content"] == "Visible."
@@ -155,7 +155,7 @@ class TestExtractAssistantContent:
                 ]
             }
         }
-        result = extract_assistant_content(entry, mock_anonymizer, True)
+        result = extract_assistant_content(entry, True)
         assert result is not None
         assert len(result["tool_uses"]) == 1
         assert result["tool_uses"][0]["tool"] == "Read"
@@ -174,10 +174,7 @@ class TestExtractAssistantContent:
             }
         }
         result = extract_assistant_content(
-            entry,
-            mock_anonymizer,
-            True,
-            {"tool-1": {"output": {"text": "file.txt"}, "status": "success"}},
+            entry, True, {"tool-1": {"output": {"text": "file.txt"}, "status": "success"}}
         )
         assert result is not None
         tool_use = result["tool_uses"][0]
@@ -186,11 +183,11 @@ class TestExtractAssistantContent:
 
     def test_empty_blocks_returns_none(self, mock_anonymizer):
         entry = {"message": {"content": []}}
-        assert extract_assistant_content(entry, mock_anonymizer, True) is None
+        assert extract_assistant_content(entry, True) is None
 
     def test_non_list_content_returns_none(self, mock_anonymizer):
         entry = {"message": {"content": "not-a-list"}}
-        assert extract_assistant_content(entry, mock_anonymizer, True) is None
+        assert extract_assistant_content(entry, True) is None
 
     def test_ignores_non_dict_blocks(self, mock_anonymizer):
         entry = {
@@ -201,7 +198,7 @@ class TestExtractAssistantContent:
                 ]
             }
         }
-        result = extract_assistant_content(entry, mock_anonymizer, True)
+        result = extract_assistant_content(entry, True)
         assert result is not None
         assert result["content"] == "Valid."
 
@@ -211,7 +208,6 @@ class TestProcessEntry:
         messages = []
         metadata = {
             "session_id": "test",
-            "cwd": None,
             "git_branch": None,
             "claude_version": None,
             "model": None,
@@ -225,7 +221,7 @@ class TestProcessEntry:
             "input_tokens": 0,
             "output_tokens": 0,
         }
-        process_entry(entry, messages, metadata, stats, anonymizer, include_thinking)
+        process_entry(entry, messages, metadata, stats, include_thinking)
         return messages, metadata, stats
 
     def test_user_entry(self, mock_anonymizer, sample_user_entry):
@@ -250,7 +246,6 @@ class TestProcessEntry:
 
     def test_metadata_extraction(self, mock_anonymizer, sample_user_entry):
         _, metadata, _ = self._run(sample_user_entry, mock_anonymizer)
-        assert metadata["cwd"] is not None
         assert metadata["claude_version"] == "1.0.0"
         assert metadata["start_time"] is not None
 
@@ -655,7 +650,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert "tu-1" in result
         assert result["tu-1"]["status"] == "success"
         assert result["tu-1"]["output"]["text"] == "file contents here"
@@ -676,7 +671,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert result["tu-2"]["status"] == "error"
 
     def test_list_content(self, mock_anonymizer):
@@ -697,7 +692,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert "Part one" in result["tu-3"]["output"]["text"]
         assert "Part two" in result["tu-3"]["output"]["text"]
 
@@ -708,7 +703,7 @@ class TestBuildToolResultMap:
                 "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-4", "content": ""}]},
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert result["tu-4"]["output"] == {}
 
     def test_structured_tool_result_keeps_extra_fields_without_dup_text(self, mock_anonymizer):
@@ -734,7 +729,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         output = result["tu-structured"]["output"]
         assert output["text"] == "command output"
         assert "stdout" not in output["raw"]
@@ -767,12 +762,12 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         raw = result["tu-file"]["output"]["raw"]
         assert raw["type"] == "text"
         assert raw["file"]["numLines"] == 2
         assert "content" not in raw["file"]
-        assert "testuser" not in raw["file"]["filePath"]
+        assert raw["file"]["filePath"] == "/Users/testuser/Documents/myproject/out.txt"
 
     def test_file_tool_result_omits_duplicate_content_with_line_prefixes(self, mock_anonymizer):
         entries = [
@@ -797,7 +792,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         raw = result["tu-file-numbered"]["output"]["raw"]
         assert raw["type"] == "text"
         assert "content" not in raw["file"]
@@ -827,7 +822,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         raw = result["tu-file-wrapped"]["output"]["raw"]
         assert raw["type"] == "text"
         assert "content" not in raw["file"]
@@ -853,7 +848,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         output = result["tu-image"]["output"]
         assert "text" not in output
         assert output["raw"]["content"][0]["type"] == "image"
@@ -875,7 +870,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         output = result["tu-blob"]["output"]
         assert "text" not in output
         assert output["raw"]["content"] == blob
@@ -898,7 +893,7 @@ class TestBuildToolResultMap:
                 "sourceToolAssistantUUID": "assistant-blob",
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         output = result["tu-blob-result"]["output"]
         assert "text" not in output
         assert output["raw"]["content"] == blob
@@ -925,7 +920,7 @@ class TestBuildToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         output = result["tu-ansi"]["output"]
         assert output["text"].startswith("Exit code 1")
         assert "Successfully preprocessed" in output["text"]
@@ -952,9 +947,9 @@ class TestBuildToolResultMap:
                 "sourceToolAssistantUUID": "assistant-123",
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         raw = result["tu-edit"]["output"]["raw"]
-        assert raw["filePath"] != "/Users/testuser/Documents/myproject/app.py"
+        assert raw["filePath"] == "/Users/testuser/Documents/myproject/app.py"
         assert "oldString" not in raw
         assert "newString" not in raw
         assert "structuredPatch" not in raw
@@ -981,11 +976,11 @@ class TestBuildToolResultMap:
                 "sourceToolAssistantUUID": "assistant-create",
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         output = result["tu-create"]["output"]
         assert output["text"].startswith("File created successfully at:")
         assert output["raw"]["type"] == "create"
-        assert output["raw"]["filePath"] != "/Users/testuser/Documents/myproject/out.txt"
+        assert output["raw"]["filePath"] == "/Users/testuser/Documents/myproject/out.txt"
         assert "content" not in output["raw"]
         assert output["raw"]["sourceToolAssistantUUID"] == "assistant-create"
 
@@ -996,7 +991,7 @@ class TestBuildToolResultMap:
                 "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-5", "content": "ignored"}]},
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert "tu-5" not in result
 
     def test_tool_output_attached_in_session(self, tmp_path, mock_anonymizer):

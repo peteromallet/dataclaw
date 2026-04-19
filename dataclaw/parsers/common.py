@@ -11,23 +11,28 @@ from ..secrets import should_skip_large_binary_string
 
 logger = logging.getLogger(__name__)
 
-_PATH_KEYS = frozenset(
+_NON_ANON_STRING_KEYS = frozenset(
     {
-        "file_path",
-        "filePath",
-        "path",
-        "dir",
-        "dir_path",
-        "cwd",
-        "outputFile",
-        "workdir",
-        "targetFile",
-        "targetDirectory",
-        "relativeWorkspacePath",
-        "rootDir",
+        "session_id",
+        "model",
+        "git_branch",
+        "start_time",
+        "end_time",
+        "role",
+        "timestamp",
+        "tool",
+        "status",
+        "type",
+        "media_type",
+        "mime_type",
+        "id",
+        "tool_use_id",
+        "sourceToolAssistantUUID",
+        "source",
+        "project",
+        "wall_time",
     }
 )
-_CMD_KEYS = frozenset({"command", "cmd"})
 
 
 def iter_jsonl(filepath: Path):
@@ -58,10 +63,11 @@ def make_session_result(
     metadata: dict[str, Any],
     messages: list[dict[str, Any]],
     stats: dict[str, int],
+    anonymizer: Anonymizer | None = None,
 ) -> dict[str, Any] | None:
     if not messages:
         return None
-    return {
+    session = {
         "session_id": metadata["session_id"],
         "model": metadata["model"],
         "git_branch": metadata["git_branch"],
@@ -70,6 +76,9 @@ def make_session_result(
         "messages": messages,
         "stats": stats,
     }
+    if anonymizer is None:
+        return session
+    return anonymize_session(session, anonymizer)
 
 
 def update_time_bounds(metadata: dict[str, Any], timestamp: str | None) -> None:
@@ -139,28 +148,72 @@ def normalize_timestamp(value: Any) -> str | None:
     return None
 
 
-def anonymize_value(key: str, value: Any, anonymizer: Anonymizer) -> Any:
+def _should_skip_anonymizing_string(key: str | None, value: str, parent_dict: dict[str, Any] | None) -> bool:
+    if key in _NON_ANON_STRING_KEYS:
+        return True
+    if key == "data" and isinstance(parent_dict, dict) and parent_dict.get("type") == "base64":
+        return True
+    if key == "url" and value.startswith("data:"):
+        return True
+    return False
+
+
+def _anonymize_session_value(
+    key: str | None,
+    value: Any,
+    anonymizer: Anonymizer,
+    parent_dict: dict[str, Any] | None = None,
+) -> tuple[Any, bool]:
     if isinstance(value, str):
+        if _should_skip_anonymizing_string(key, value, parent_dict):
+            return value, False
         if should_skip_large_binary_string(value):
-            return value
-        if key in _PATH_KEYS:
-            return anonymizer.path(value)
-        if key in _CMD_KEYS:
-            return anonymizer.text(value)
-        return anonymizer.text(value)
+            return value, False
+        anonymized = anonymizer.text(value)
+        return anonymized, anonymized != value
+
     if isinstance(value, dict):
-        return {k: anonymize_value(k, v, anonymizer) for k, v in value.items()}
+        out: dict[str, Any] | None = None
+        for child_key, child_value in value.items():
+            anonymized_child, changed = _anonymize_session_value(child_key, child_value, anonymizer, value)
+            if not changed:
+                continue
+            if out is None:
+                out = dict(value)
+            out[child_key] = anonymized_child
+        if out is None:
+            return value, False
+        return out, True
+
     if isinstance(value, list):
-        return [anonymize_value(key, item, anonymizer) for item in value]
-    return value
+        out_list: list[Any] | None = None
+        for idx, item in enumerate(value):
+            anonymized_item, changed = _anonymize_session_value(key, item, anonymizer, parent_dict)
+            if not changed:
+                continue
+            if out_list is None:
+                out_list = list(value)
+            out_list[idx] = anonymized_item
+        if out_list is None:
+            return value, False
+        return out_list, True
+
+    return value, False
 
 
-def parse_tool_input(tool_name: str | None, input_data: Any, anonymizer: Anonymizer) -> dict:
-    """Return a structured dict for a tool's input args, with paths/content anonymized."""
+def anonymize_session(session: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any]:
+    anonymized, _changed = _anonymize_session_value(None, session, anonymizer)
+    if isinstance(anonymized, dict):
+        return anonymized
+    return session
+
+
+def parse_tool_input(input_data: Any) -> dict:
+    """Return a structured dict for a tool's input args without anonymizing it yet."""
     if not isinstance(input_data, dict):
-        return {"raw": anonymizer.text(str(input_data))}
+        return {"raw": str(input_data)}
 
-    return {k: anonymize_value(k, v, anonymizer) for k, v in input_data.items()}
+    return input_data
 
 
 def get_cached_index(

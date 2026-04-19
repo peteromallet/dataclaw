@@ -11,7 +11,6 @@ from ..anonymizer import Anonymizer
 from ..export_tasks import ExportSessionTask
 from ..secrets import should_skip_large_binary_string
 from .common import (
-    anonymize_value,
     collect_project_sessions,
     count_existing_paths_and_sizes,
     make_session_result,
@@ -204,7 +203,7 @@ def parse_export_session_task(
     return parse_session_file(Path(task.file_path), anonymizer, include_thinking)
 
 
-def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
+def parse_tool_call(tool_call: dict) -> dict:
     """Parse a Gemini tool call into a structured dict with input/output/status."""
     name = tool_call.get("name")
     args = tool_call.get("args", {})
@@ -223,40 +222,40 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
             extra_texts.append(item["text"])
 
     if name == "read_file":
-        inp = {"file_path": anonymizer.path(args.get("file_path", ""))}
+        inp = {"file_path": args.get("file_path", "")}
     elif name == "write_file":
         inp = {
-            "file_path": anonymizer.path(args.get("file_path", "")),
-            "content": anonymizer.text(args.get("content", "")),
+            "file_path": args.get("file_path", ""),
+            "content": args.get("content", ""),
         }
     elif name == "replace":
         inp = {
-            "file_path": anonymizer.path(args.get("file_path", "")),
-            "old_string": anonymizer.text(args.get("old_string", "")),
-            "new_string": anonymizer.text(args.get("new_string", "")),
+            "file_path": args.get("file_path", ""),
+            "old_string": args.get("old_string", ""),
+            "new_string": args.get("new_string", ""),
             "expected_replacements": args.get("expected_replacements"),
-            "instruction": (anonymizer.text(args.get("instruction", "")) if args.get("instruction") else None),
+            "instruction": (args.get("instruction", "") if args.get("instruction") else None),
         }
         inp = {k: v for k, v in inp.items() if v is not None}
     elif name == "run_shell_command":
-        inp = {"command": anonymizer.text(args.get("command", ""))}
+        inp = {"command": args.get("command", "")}
     elif name == "read_many_files":
-        inp = {"paths": [anonymizer.path(path) for path in args.get("paths", [])]}
+        inp = {"paths": list(args.get("paths", []))}
     elif name in ("search_file_content", "grep_search"):
-        inp = {k: anonymizer.text(str(v)) for k, v in args.items()}
+        inp = {k: str(v) for k, v in args.items()}
     elif name == "list_directory":
-        inp = {"dir_path": anonymizer.path(args.get("dir_path", ""))}
+        inp = {"dir_path": args.get("dir_path", "")}
         if args.get("ignore"):
             if isinstance(args["ignore"], list):
-                inp["ignore"] = [anonymizer.text(str(path)) for path in args["ignore"]]
+                inp["ignore"] = [str(path) for path in args["ignore"]]
             else:
-                inp["ignore"] = anonymizer.text(str(args["ignore"]))
+                inp["ignore"] = str(args["ignore"])
     elif name == "glob":
         inp = {"pattern": args.get("pattern", "")}
     elif name in ("google_web_search", "web_fetch", "codebase_investigator"):
-        inp = {k: anonymizer.text(str(v)) for k, v in args.items()}
+        inp = {k: str(v) for k, v in args.items()}
     else:
-        inp = {k: anonymizer.text(str(v)) if isinstance(v, str) else v for k, v in args.items()}
+        inp = {k: str(v) if isinstance(v, str) else v for k, v in args.items()}
 
     if name == "read_many_files":
         files: list[dict] = []
@@ -269,8 +268,8 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
                     if current_path is not None:
                         files.append(
                             {
-                                "path": anonymizer.path(current_path),
-                                "content": anonymizer.text("\n".join(content_lines).strip()),
+                                "path": current_path,
+                                "content": "\n".join(content_lines).strip(),
                             }
                         )
                     current_path = line[4:-4].strip()
@@ -280,8 +279,8 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
             if current_path is not None:
                 files.append(
                     {
-                        "path": anonymizer.path(current_path),
-                        "content": anonymizer.text("\n".join(content_lines).strip()),
+                        "path": current_path,
+                        "content": "\n".join(content_lines).strip(),
                     }
                 )
         out: dict[str, Any] = {"files": files}
@@ -311,29 +310,17 @@ def parse_tool_call(tool_call: dict, anonymizer: Anonymizer) -> dict:
             try:
                 parsed["exit_code"] = int(parsed["exit_code"])
             except ValueError:
-                parsed["exit_code"] = anonymizer.text(parsed["exit_code"])
-        if "command" in parsed:
-            parsed["command"] = anonymizer.text(parsed["command"])
-        if "directory" in parsed:
-            parsed["directory"] = anonymizer.path(parsed["directory"])
-        if "output" in parsed:
-            parsed["output"] = anonymizer.text(parsed["output"])
+                pass
         out = parsed
     elif output_text is not None:
-        out = {"text": anonymizer.text(output_text)}
+        out = {"text": output_text}
     else:
         out = {}
 
     return {"tool": name, "input": inp, "output": out, "status": status}
 
 
-def anonymize_text_preserving_blobs(
-    text: Any,
-    anonymizer: Anonymizer,
-    *,
-    strip: bool = False,
-    drop_empty: bool = True,
-) -> str | None:
+def normalize_text_preserving_blobs(text: Any, *, strip: bool = False, drop_empty: bool = True) -> str | None:
     if not isinstance(text, str):
         return None
     if should_skip_large_binary_string(text):
@@ -341,7 +328,7 @@ def anonymize_text_preserving_blobs(
     normalized = text.strip() if strip else text
     if drop_empty and not normalized.strip():
         return None
-    return anonymizer.text(normalized)
+    return normalized
 
 
 def build_gemini_call_id(name: str, args: Any, counters: dict[str, int]) -> str:
@@ -349,22 +336,19 @@ def build_gemini_call_id(name: str, args: Any, counters: dict[str, int]) -> str:
     return f"fc_{name}_{counters[name]}"
 
 
-def anonymize_file_uri(file_uri: Any, anonymizer: Anonymizer) -> str | None:
+def normalize_file_uri(file_uri: Any) -> str | None:
     if not isinstance(file_uri, str):
         return None
-    if file_uri.startswith("file://"):
-        return f"file://{anonymizer.path(file_uri[7:])}"
-    return anonymizer.text(file_uri)
+    return file_uri
 
 
 def parse_gemini_user_part(
     part: Any,
-    anonymizer: Anonymizer,
     pending_call_ids: dict[str, deque[str]],
     call_counters: dict[str, int],
 ) -> tuple[str | None, dict[str, Any] | None]:
     if isinstance(part, str):
-        text = anonymize_text_preserving_blobs(part, anonymizer, drop_empty=False)
+        text = normalize_text_preserving_blobs(part, drop_empty=False)
         if text is None:
             return None, None
         if should_skip_large_binary_string(part):
@@ -375,7 +359,7 @@ def parse_gemini_user_part(
         return None, None
 
     if "text" in part:
-        text = anonymize_text_preserving_blobs(part.get("text"), anonymizer, drop_empty=False)
+        text = normalize_text_preserving_blobs(part.get("text"), drop_empty=False)
         if text is None:
             return None, None
         if should_skip_large_binary_string(part.get("text", "")):
@@ -397,7 +381,7 @@ def parse_gemini_user_part(
     file_data = part.get("fileData")
     if isinstance(file_data, dict):
         source: dict[str, Any] = {"type": "url"}
-        url = anonymize_file_uri(file_data.get("fileUri"), anonymizer)
+        url = normalize_file_uri(file_data.get("fileUri"))
         if url:
             source["url"] = url
         mime_type = file_data.get("mimeType")
@@ -415,7 +399,7 @@ def parse_gemini_user_part(
             "type": "tool_use",
             "id": call_id,
             "name": name,
-            "input": parse_tool_input(name, args, anonymizer),
+            "input": parse_tool_input(args),
         }
 
     function_response = part.get("functionResponse")
@@ -427,9 +411,9 @@ def parse_gemini_user_part(
         response = function_response.get("response")
         content: Any = None
         if isinstance(response, dict) and "output" in response:
-            content = anonymize_text_preserving_blobs(response.get("output"), anonymizer)
+            content = normalize_text_preserving_blobs(response.get("output"))
         elif response is not None:
-            content = anonymize_value("response", response, anonymizer)
+            content = response
         part_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": tool_use_id}
         if content not in (None, "", [], {}):
             part_result["content"] = content
@@ -438,9 +422,9 @@ def parse_gemini_user_part(
     return None, None
 
 
-def parse_gemini_user_content(content: Any, anonymizer: Anonymizer) -> tuple[str | None, list[dict[str, Any]]]:
+def parse_gemini_user_content(content: Any) -> tuple[str | None, list[dict[str, Any]]]:
     if isinstance(content, str):
-        text = anonymize_text_preserving_blobs(content, anonymizer, drop_empty=False)
+        text = normalize_text_preserving_blobs(content, drop_empty=False)
         if text is None:
             return None, []
         if should_skip_large_binary_string(content):
@@ -456,7 +440,7 @@ def parse_gemini_user_content(content: Any, anonymizer: Anonymizer) -> tuple[str
     call_counters: dict[str, int] = defaultdict(int)
 
     for part in content:
-        text, content_part = parse_gemini_user_part(part, anonymizer, pending_call_ids, call_counters)
+        text, content_part = parse_gemini_user_part(part, pending_call_ids, call_counters)
         if text is not None:
             text_parts.append(text)
         if content_part:
@@ -484,7 +468,6 @@ def parse_session_file(
     messages = []
     metadata = {
         "session_id": data.get("sessionId", filepath.stem),
-        "cwd": None,
         "git_branch": None,
         "model": None,
         "start_time": data.get("startTime"),
@@ -497,7 +480,7 @@ def parse_session_file(
         timestamp = msg_data.get("timestamp")
 
         if msg_type == "user":
-            text, content_parts = parse_gemini_user_content(msg_data.get("content"), anonymizer)
+            text, content_parts = parse_gemini_user_content(msg_data.get("content"))
             if text is None and not content_parts:
                 continue
             message: dict[str, Any] = {"role": "user", "timestamp": timestamp}
@@ -524,7 +507,7 @@ def parse_session_file(
 
             content = msg_data.get("content")
             if isinstance(content, str) and content.strip():
-                msg["content"] = anonymizer.text(content.strip())
+                msg["content"] = content.strip()
 
             if include_thinking:
                 thoughts = msg_data.get("thoughts", [])
@@ -534,11 +517,11 @@ def parse_session_file(
                         if "description" in thought and isinstance(thought["description"], str):
                             thought_texts.append(thought["description"].strip())
                     if thought_texts:
-                        msg["thinking"] = anonymizer.text("\n\n".join(thought_texts))
+                        msg["thinking"] = "\n\n".join(thought_texts)
 
             tool_uses = []
             for tool_call in msg_data.get("toolCalls", []):
-                tool_uses.append(parse_tool_call(tool_call, anonymizer))
+                tool_uses.append(parse_tool_call(tool_call))
 
             if tool_uses:
                 msg["tool_uses"] = tool_uses
@@ -549,4 +532,4 @@ def parse_session_file(
                 stats["assistant_messages"] += 1
                 update_time_bounds(metadata, timestamp)
 
-    return make_session_result(metadata, messages, stats)
+    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)

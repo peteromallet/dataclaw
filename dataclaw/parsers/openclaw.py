@@ -158,15 +158,11 @@ def parse_session_file(
 
     metadata: dict[str, Any] = {
         "session_id": header.get("id", filepath.stem),
-        "cwd": None,
         "git_branch": None,
         "model": None,
         "start_time": header.get("timestamp"),
         "end_time": None,
     }
-    cwd = header.get("cwd")
-    if isinstance(cwd, str) and cwd.strip():
-        metadata["cwd"] = anonymizer.path(cwd)
 
     messages: list[dict[str, Any]] = []
     stats = make_stats()
@@ -212,7 +208,7 @@ def parse_session_file(
                 messages.append(
                     {
                         "role": "user",
-                        "content": anonymizer.text(text.strip()),
+                        "content": text.strip(),
                         "timestamp": effective_ts,
                     }
                 )
@@ -246,19 +242,19 @@ def parse_session_file(
                     if block_type == "text":
                         text = block.get("text", "")
                         if isinstance(text, str) and text.strip():
-                            text_parts.append(anonymizer.text(text.strip()))
+                            text_parts.append(text.strip())
 
                     elif block_type == "thinking" and include_thinking:
                         thinking = block.get("thinking", "")
                         if isinstance(thinking, str) and thinking.strip():
-                            thinking_parts.append(anonymizer.text(thinking.strip()))
+                            thinking_parts.append(thinking.strip())
 
                     elif block_type == "toolCall":
                         tool_name = block.get("name")
                         args = block.get("arguments", {})
                         tool_entry: dict[str, Any] = {
                             "tool": tool_name,
-                            "input": parse_tool_input(tool_name, args, anonymizer),
+                            "input": parse_tool_input(args),
                         }
                         tool_call_id = block.get("id")
                         if isinstance(tool_call_id, str) and tool_call_id:
@@ -291,7 +287,7 @@ def parse_session_file(
                 tool_call_id = msg_data.get("toolCallId")
                 if not isinstance(tool_call_id, str) or not tool_call_id:
                     continue
-                result = _build_openclaw_tool_result(msg_data, anonymizer)
+                result = _build_openclaw_tool_result(msg_data)
                 matched_tool_uses = pending_tool_uses.pop(tool_call_id, [])
                 if matched_tool_uses:
                     for tool_use in matched_tool_uses:
@@ -306,11 +302,11 @@ def parse_session_file(
                 is_error = exit_code is not None and exit_code != 0
                 tool_entry: dict[str, Any] = {
                     "tool": "bash",
-                    "input": {"command": anonymizer.text(command)} if command else {},
+                    "input": {"command": command} if command else {},
                 }
                 out_dict: dict[str, Any] = {}
                 if output:
-                    out_dict["text"] = anonymizer.text(output.strip())
+                    out_dict["text"] = output.strip()
                 if exit_code is not None:
                     out_dict["exit_code"] = exit_code
                 if out_dict:
@@ -333,10 +329,10 @@ def parse_session_file(
     if metadata["model"] is None:
         metadata["model"] = "openclaw-unknown"
 
-    return make_session_result(metadata, messages, stats)
+    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
 
 
-def _build_openclaw_tool_result(msg_data: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any]:
+def _build_openclaw_tool_result(msg_data: dict[str, Any]) -> dict[str, Any]:
     is_error = bool(msg_data.get("isError"))
     content = msg_data.get("content", [])
     if isinstance(content, list):
@@ -349,7 +345,7 @@ def _build_openclaw_tool_result(msg_data: dict[str, Any], anonymizer: Anonymizer
     else:
         output_text = ""
     return {
-        "output": {"text": anonymizer.text(output_text)} if output_text else {},
+        "output": {"text": output_text} if output_text else {},
         "status": "error" if is_error else "success",
     }
 

@@ -185,7 +185,6 @@ def parse_session_file(
     messages: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {
         "session_id": filepath.parent.name,
-        "cwd": None,
         "git_branch": None,
         "model": None,
         "start_time": None,
@@ -203,7 +202,7 @@ def parse_session_file(
                     messages.append(
                         {
                             "role": "user",
-                            "content": anonymizer.text(content.strip()),
+                            "content": content.strip(),
                             "timestamp": None,
                         }
                     )
@@ -224,11 +223,11 @@ def parse_session_file(
                         if block_type == "text":
                             text = block.get("text", "").strip()
                             if text:
-                                text_parts.append(anonymizer.text(text))
+                                text_parts.append(text)
                         elif block_type == "think" and include_thinking:
                             think = block.get("think", "").strip()
                             if think:
-                                thinking_parts.append(anonymizer.text(think))
+                                thinking_parts.append(think)
 
                 if text_parts:
                     msg["content"] = "\n\n".join(text_parts)
@@ -257,7 +256,7 @@ def parse_session_file(
                             tool_uses.append(
                                 {
                                     "tool": tool_name,
-                                    "input": parse_tool_input(tool_name, args, anonymizer),
+                                    "input": parse_tool_input(args),
                                 }
                             )
 
@@ -278,4 +277,4 @@ def parse_session_file(
         logger.warning("Failed to read Kimi session file %s: %s", filepath, e)
         return None
 
-    return make_session_result(metadata, messages, stats)
+    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)

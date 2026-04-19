@@ -209,7 +209,6 @@ def _parse_session_with_connection(
     messages: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {
         "session_id": session_id,
-        "cwd": None,
         "git_branch": None,
         "model": None,
         "start_time": None,
@@ -229,7 +228,6 @@ def _parse_session_with_connection(
         if isinstance(raw_cwd, str) and raw_cwd.strip():
             if raw_cwd != target_cwd:
                 return None
-            metadata["cwd"] = anonymizer.path(raw_cwd)
         elif target_cwd != UNKNOWN_OPENCODE_CWD:
             return None
 
@@ -253,14 +251,14 @@ def _parse_session_with_connection(
             parts = iter_message_parts(conn, message_row["id"])
 
             if role == "user":
-                msg = extract_user_message(parts, anonymizer)
+                msg = extract_user_message(parts)
                 if msg is not None:
                     msg["timestamp"] = timestamp
                     messages.append(msg)
                     stats["user_messages"] += 1
                     update_time_bounds(metadata, timestamp)
             elif role == "assistant":
-                msg = extract_assistant_content(parts, anonymizer, include_thinking)
+                msg = extract_assistant_content(parts, include_thinking)
                 if msg:
                     msg["timestamp"] = timestamp
                     messages.append(msg)
@@ -282,7 +280,7 @@ def _parse_session_with_connection(
     if metadata["model"] is None:
         metadata["model"] = "opencode-unknown"
 
-    return make_session_result(metadata, messages, stats)
+    return make_session_result(metadata, messages, stats, anonymizer=anonymizer)
 
 
 def extract_model(message_data: dict[str, Any]) -> str | None:
@@ -307,7 +305,7 @@ def iter_message_parts(conn: sqlite3.Connection, message_id: str) -> Iterator[di
         yield load_json_field(part_row["data"])
 
 
-def build_opencode_file_source(url: Any, mime: Any, anonymizer: Anonymizer) -> dict[str, Any] | None:
+def build_opencode_file_source(url: Any, mime: Any) -> dict[str, Any] | None:
     if not isinstance(url, str) or not url:
         return None
 
@@ -323,18 +321,18 @@ def build_opencode_file_source(url: Any, mime: Any, anonymizer: Anonymizer) -> d
     if url.startswith("file://"):
         source: dict[str, Any] = {
             "type": "url",
-            "url": f"file://{anonymizer.path(url[7:])}",
+            "url": url,
         }
     else:
-        source = {"type": "url", "url": anonymizer.text(url)}
+        source = {"type": "url", "url": url}
 
     if isinstance(mime, str) and mime:
         source["media_type"] = mime
     return source
 
 
-def extract_opencode_file_part(part: dict[str, Any], anonymizer: Anonymizer) -> dict[str, Any] | None:
-    source = build_opencode_file_source(part.get("url"), part.get("mime"), anonymizer)
+def extract_opencode_file_part(part: dict[str, Any]) -> dict[str, Any] | None:
+    source = build_opencode_file_source(part.get("url"), part.get("mime"))
     if source is None:
         return None
 
@@ -344,7 +342,7 @@ def extract_opencode_file_part(part: dict[str, Any], anonymizer: Anonymizer) -> 
     return {"type": "document", "source": source}
 
 
-def extract_user_message(parts: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, Any] | None:
+def extract_user_message(parts: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     text_parts: list[str] = []
     content_parts: list[dict[str, Any]] = []
     for part in parts:
@@ -354,9 +352,9 @@ def extract_user_message(parts: Iterable[dict[str, Any]], anonymizer: Anonymizer
         if part_type == "text":
             text = part.get("text")
             if isinstance(text, str) and text.strip():
-                text_parts.append(anonymizer.text(text.strip()))
+                text_parts.append(text.strip())
         elif part_type == "file":
-            content_part = extract_opencode_file_part(part, anonymizer)
+            content_part = extract_opencode_file_part(part)
             if content_part is not None:
                 content_parts.append(content_part)
 
@@ -373,7 +371,6 @@ def extract_user_message(parts: Iterable[dict[str, Any]], anonymizer: Anonymizer
 
 def extract_assistant_content(
     parts: Iterable[dict[str, Any]],
-    anonymizer: Anonymizer,
     include_thinking: bool,
 ) -> dict[str, Any] | None:
     text_parts: list[str] = []
@@ -388,18 +385,18 @@ def extract_assistant_content(
         if part_type == "text":
             text = part.get("text")
             if isinstance(text, str) and text.strip():
-                text_parts.append(anonymizer.text(text.strip()))
+                text_parts.append(text.strip())
         elif part_type == "reasoning" and include_thinking:
             text = part.get("text")
             if isinstance(text, str) and text.strip():
-                thinking_parts.append(anonymizer.text(text.strip()))
+                thinking_parts.append(text.strip())
         elif part_type == "tool":
             tool_name = part.get("tool")
             state = part.get("state", {})
             tool_input = state.get("input", {}) if isinstance(state, dict) else {}
             tool_use: dict[str, Any] = {
                 "tool": tool_name,
-                "input": parse_tool_input(tool_name, tool_input, anonymizer),
+                "input": parse_tool_input(tool_input),
             }
             if isinstance(state, dict):
                 status = state.get("status")
@@ -407,7 +404,7 @@ def extract_assistant_content(
                     tool_use["status"] = "success" if status == "completed" else status
                 output = state.get("output")
                 if isinstance(output, str) and output:
-                    tool_use["output"] = {"text": anonymizer.text(output)}
+                    tool_use["output"] = {"text": output}
                 elif output is not None:
                     tool_use["output"] = {}
             tool_uses.append(tool_use)

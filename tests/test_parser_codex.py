@@ -416,7 +416,7 @@ class TestBuildCodexToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert "call-1" in result
         assert result["call-1"]["status"] == "success"
         assert result["call-1"]["output"]["exit_code"] == 0
@@ -439,7 +439,7 @@ class TestBuildCodexToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert "call-2" in result
         assert result["call-2"]["output"]["exit_code"] == 0
         assert "Successfully applied patch" in result["call-2"]["output"]["output"]
@@ -456,7 +456,7 @@ class TestBuildCodexToolResultMap:
                 },
             }
         ]
-        result = build_tool_result_map(entries, mock_anonymizer)
+        result = build_tool_result_map(entries)
         assert "call-3" not in result
 
     def test_output_attached_end_to_end(self, tmp_path, monkeypatch, mock_anonymizer):

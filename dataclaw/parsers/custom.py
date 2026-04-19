@@ -5,6 +5,7 @@ from pathlib import Path
 from .. import _json as json
 from ..anonymizer import Anonymizer
 from ..export_tasks import ExportSessionTask
+from .common import anonymize_session
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,4 @@ def parse_session_bytes(project_dir_name: str, raw_line: bytes | str, anonymizer
 
     session["project"] = f"custom:{project_dir_name}"
     session["source"] = SOURCE
-    for msg in session.get("messages", []):
-        if "content" in msg and isinstance(msg["content"], str):
-            msg["content"] = anonymizer.text(msg["content"])
-    return session
+    return anonymize_session(session, anonymizer)
