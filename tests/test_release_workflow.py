@@ -49,6 +49,7 @@ def test_release_yml_falls_back_to_unsigned_dmg_builds():
     assert "id: signing" in text
     assert "if: steps.signing.outputs.signed == 'true'" in text
     assert "if: steps.signing.outputs.signed != 'true'" in text
+    assert 'APPLE_SIGNING_IDENTITY: "-"' in text
     assert "--config '{\"bundle\":{\"createUpdaterArtifacts\":false}" in text
     assert "Skipping latest.json because updater artifacts were not produced by unsigned builds." in text
     assert "if [[ -f latest.json ]]; then" in text

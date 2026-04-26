@@ -146,7 +146,7 @@ jobs:
       - name: Build unsigned app
         if: steps.signing.outputs.signed != 'true'
         env:
-          APPLE_SIGNING_IDENTITY: ""
+          APPLE_SIGNING_IDENTITY: "-"
         run: |
           set -euo pipefail
           pnpm -C app tauri build --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":false},"plugins":{"updater":{"active":false}}}'
