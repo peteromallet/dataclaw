@@ -1,9 +1,9 @@
 """Tests for dataclaw.parser — JSONL parsing and project discovery."""
 
 import json
+import os
 import sqlite3
-
-import pytest
+from datetime import datetime, timedelta, timezone
 
 from dataclaw.parser import (
     _build_project_name,
@@ -13,6 +13,7 @@ from dataclaw.parser import (
     _extract_user_content,
     _find_subagent_only_sessions,
     _normalize_timestamp,
+    _parse_iso,
     _parse_session_file,
     _parse_subagent_session,
     _parse_tool_input,
@@ -20,6 +21,7 @@ from dataclaw.parser import (
     discover_projects,
     parse_project_sessions,
     _parse_codex_session_file,
+    _parse_hermes_session_file,
     _parse_openclaw_session_file,
 )
 
@@ -438,6 +440,7 @@ class TestDiscoverProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.HERMES_SESSIONS_DIR", tmp_path / "no-hermes-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def _write_opencode_db(self, db_path):
@@ -822,6 +825,186 @@ class TestDiscoverProjects:
         assert sessions[0]["messages"][1]["tool_uses"][0]["tool"] == "bash"
 
 
+class TestCooledAndCutoff:
+    def _write_claude_session(self, path, end_time="2026-04-25T00:00:00Z"):
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-04-24T23:59:00Z",
+                    "message": {"content": "Hello"},
+                    "cwd": "/tmp",
+                }
+            ) + "\n"
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": end_time,
+                    "message": {
+                        "model": "claude-sonnet",
+                        "content": [{"type": "text", "text": "Hi"}],
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                }
+            ) + "\n"
+        )
+
+    def _write_custom_session(self, path, session_id, end_time):
+        path.write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "model": "gpt-4",
+                    "end_time": end_time,
+                    "messages": [{"role": "user", "content": "hello"}],
+                }
+            ) + "\n"
+        )
+
+    def _set_mtime(self, path, *, age_hours):
+        ts = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).timestamp()
+        os.utime(path, (ts, ts))
+
+    def _write_opencode_db(self, db_path, session_id="ses_1", cwd="/Users/testuser/work/repo"):
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE session ("
+            "id TEXT PRIMARY KEY, "
+            "directory TEXT, "
+            "time_created INTEGER, "
+            "time_updated INTEGER"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE message ("
+            "id TEXT PRIMARY KEY, "
+            "session_id TEXT, "
+            "time_created INTEGER, "
+            "data TEXT"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE part ("
+            "id TEXT PRIMARY KEY, "
+            "message_id TEXT, "
+            "time_created INTEGER, "
+            "data TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            (session_id, cwd, 1706000000000, 1706000005000),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            ("msg_1", session_id, 1706000001000, json.dumps({"role": "user"})),
+        )
+        conn.execute(
+            "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+            ("prt_1", "msg_1", 1706000001001, json.dumps({"type": "text", "text": "hello"})),
+        )
+        conn.commit()
+        conn.close()
+        return cwd
+
+    def test_parse_iso_handles_z_suffix_offset_and_bad(self):
+        assert _parse_iso("2026-04-25T12:00:00Z") == datetime(2026, 4, 25, 12, tzinfo=timezone.utc)
+        assert _parse_iso("2026-04-25T14:00:00+02:00") == datetime(2026, 4, 25, 12, tzinfo=timezone.utc)
+        assert _parse_iso("2026-04-25T12:00:00") == datetime(2026, 4, 25, 12, tzinfo=timezone.utc)
+        assert _parse_iso("not-a-time") is None
+        assert _parse_iso(None) is None
+
+    def test_cooled_only_drops_fresh_claude_session(self, tmp_path, monkeypatch, mock_anonymizer):
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "test-project"
+        proj.mkdir(parents=True)
+        session_file = proj / "fresh.jsonl"
+        self._write_claude_session(session_file)
+        self._set_mtime(session_file, age_hours=23)
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", projects_dir)
+
+        sessions = parse_project_sessions("test-project", mock_anonymizer, cooled_only=True)
+
+        assert sessions == []
+
+    def test_cooled_only_keeps_25h_claude_session(self, tmp_path, monkeypatch, mock_anonymizer):
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "test-project"
+        proj.mkdir(parents=True)
+        session_file = proj / "cooled.jsonl"
+        self._write_claude_session(session_file)
+        self._set_mtime(session_file, age_hours=25)
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", projects_dir)
+
+        sessions = parse_project_sessions("test-project", mock_anonymizer, cooled_only=True)
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "cooled"
+
+    def test_cooled_only_claude_subagent_merged(self, tmp_path, monkeypatch, mock_anonymizer):
+        projects_dir = tmp_path / "projects"
+        proj = projects_dir / "test-project"
+        subagents = proj / "session-1" / "subagents"
+        subagents.mkdir(parents=True)
+        old_agent = subagents / "agent-old.jsonl"
+        new_agent = subagents / "agent-new.jsonl"
+        self._write_claude_session(old_agent)
+        self._write_claude_session(new_agent)
+        self._set_mtime(old_agent, age_hours=25)
+        self._set_mtime(new_agent, age_hours=10)
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", projects_dir)
+
+        sessions = parse_project_sessions("test-project", mock_anonymizer, cooled_only=True)
+
+        assert sessions == []
+
+    def test_cooled_only_opencode_uses_db_file_mtime(self, tmp_path, monkeypatch, mock_anonymizer):
+        db_path = tmp_path / "opencode.db"
+        cwd = self._write_opencode_db(db_path)
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", db_path)
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+
+        self._set_mtime(db_path, age_hours=23)
+        assert parse_project_sessions(cwd, mock_anonymizer, source="opencode", cooled_only=True) == []
+
+        self._set_mtime(db_path, age_hours=25)
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="opencode", cooled_only=True)
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "ses_1"
+
+    def test_since_cutoff_strictly_greater(self, tmp_path, monkeypatch, mock_anonymizer):
+        custom_dir = tmp_path / "custom"
+        proj = custom_dir / "test-proj"
+        proj.mkdir(parents=True)
+        cutoff = "2026-04-25T00:00:00Z"
+        self._write_custom_session(proj / "equal.jsonl", "equal", cutoff)
+        self._write_custom_session(proj / "after.jsonl", "after", "2026-04-25T00:00:00.000001Z")
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", custom_dir)
+
+        sessions = parse_project_sessions("test-proj", mock_anonymizer, source="custom", since={"custom": cutoff})
+
+        assert [s["session_id"] for s in sessions] == ["after"]
+
+    def test_session_with_none_end_time_is_skipped(self, tmp_path, monkeypatch, mock_anonymizer):
+        custom_dir = tmp_path / "custom"
+        proj = custom_dir / "test-proj"
+        proj.mkdir(parents=True)
+        (proj / "data.jsonl").write_text(
+            json.dumps(
+                {
+                    "session_id": "missing-end",
+                    "model": "gpt-4",
+                    "messages": [{"role": "user", "content": "hello"}],
+                }
+            ) + "\n"
+        )
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", custom_dir)
+
+        sessions = parse_project_sessions("test-proj", mock_anonymizer, source="custom")
+
+        assert sessions == []
+
+
 # --- Subagent-only session discovery and parsing ---
 
 
@@ -990,6 +1173,7 @@ class TestDiscoverSubagentProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.HERMES_SESSIONS_DIR", tmp_path / "no-hermes-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def test_discover_includes_subagent_sessions(self, tmp_path, monkeypatch, mock_anonymizer):
@@ -1256,6 +1440,35 @@ class TestBuildCodexToolResultMap:
         assert result["call-2"]["output"]["exit_code"] == 0
         assert "Successfully applied patch" in result["call-2"]["output"]["output"]
         assert result["call-2"]["output"]["duration_seconds"] == 0.5
+
+    def test_function_call_output_accepts_list_payload(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-list",
+                    "output": [{"type": "text", "text": "structured result"}],
+                },
+            }
+        ]
+        result = _build_codex_tool_result_map(entries, mock_anonymizer)
+        assert result["call-list"]["status"] == "success"
+
+    def test_custom_tool_call_output_accepts_list_payload(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-list",
+                    "output": [{"type": "text", "text": "structured result"}],
+                },
+            }
+        ]
+        result = _build_codex_tool_result_map(entries, mock_anonymizer)
+        assert result["call-list"]["status"] == "success"
+        assert "structured result" in result["call-list"]["output"]["output"]
 
     def test_non_response_item_ignored(self, mock_anonymizer):
         entries = [
@@ -1590,6 +1803,7 @@ class TestDiscoverOpenclawProjects:
         monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.HERMES_SESSIONS_DIR", tmp_path / "no-hermes-sessions")
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
 
     def test_discover_openclaw_projects(self, tmp_path, monkeypatch, mock_anonymizer):
@@ -1677,6 +1891,7 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
         monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
         monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.HERMES_SESSIONS_DIR", tmp_path / "no-hermes-sessions")
 
     def _make_valid_session(self, session_id="s1", model="gpt-4", content="hello"):
         return json.dumps({
@@ -1686,6 +1901,7 @@ class TestDiscoverCustomProjects:
                 {"role": "user", "content": content},
                 {"role": "assistant", "content": "hi there"},
             ],
+            "end_time": "2024-01-01T00:00:00Z",
             "stats": {"user_messages": 1, "assistant_messages": 1, "tool_uses": 0,
                        "input_tokens": 10, "output_tokens": 5},
         })
@@ -1778,3 +1994,79 @@ class TestDiscoverCustomProjects:
         monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", custom_dir)
         sessions = parse_project_sessions("nope", mock_anonymizer, source="custom")
         assert sessions == []
+
+
+class TestHermesParser:
+    def _disable_others(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("dataclaw.parser.PROJECTS_DIR", tmp_path / "no-claude")
+        monkeypatch.setattr("dataclaw.parser.CODEX_SESSIONS_DIR", tmp_path / "no-codex-sessions")
+        monkeypatch.setattr("dataclaw.parser.CODEX_ARCHIVED_DIR", tmp_path / "no-codex-archived")
+        monkeypatch.setattr("dataclaw.parser._CODEX_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.GEMINI_DIR", tmp_path / "no-gemini")
+        monkeypatch.setattr("dataclaw.parser.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
+        monkeypatch.setattr("dataclaw.parser._OPENCODE_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.OPENCLAW_AGENTS_DIR", tmp_path / "no-openclaw-agents")
+        monkeypatch.setattr("dataclaw.parser._OPENCLAW_PROJECT_INDEX", {})
+        monkeypatch.setattr("dataclaw.parser.KIMI_SESSIONS_DIR", tmp_path / "no-kimi-sessions")
+        monkeypatch.setattr("dataclaw.parser.CUSTOM_DIR", tmp_path / "no-custom")
+
+    def _write_session(self, path):
+        path.write_text(json.dumps({
+            "session_id": "hermes-1",
+            "model": "moonshotai/kimi-k2.6",
+            "session_start": "2026-04-25T19:41:59.585494",
+            "last_updated": "2026-04-25T19:44:19.881548",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "I should inspect the file.",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"/Users/testuser/Documents/app.py\"}",
+                        },
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "file contents"},
+                {"role": "assistant", "content": "done"},
+            ],
+        }))
+
+    def test_parse_hermes_session_file(self, tmp_path, mock_anonymizer):
+        session_file = tmp_path / "session_hermes-1.json"
+        self._write_session(session_file)
+
+        parsed = _parse_hermes_session_file(session_file, mock_anonymizer)
+
+        assert parsed["session_id"] == "hermes-1"
+        assert parsed["model"] == "moonshotai/kimi-k2.6"
+        assert parsed["stats"]["user_messages"] == 1
+        assert parsed["stats"]["assistant_messages"] == 2
+        assert parsed["stats"]["tool_uses"] == 1
+        assert parsed["messages"][1]["thinking"] == "I should inspect the file."
+        assert parsed["messages"][1]["tool_uses"][0]["tool"] == "read_file"
+        assert parsed["messages"][1]["tool_uses"][0]["output"]["text"] == "file contents"
+
+    def test_discover_and_parse_hermes_project(self, tmp_path, monkeypatch, mock_anonymizer):
+        self._disable_others(tmp_path, monkeypatch)
+        sessions_dir = tmp_path / "hermes" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        self._write_session(sessions_dir / "session_hermes-1.json")
+        monkeypatch.setattr("dataclaw.parser.HERMES_SESSIONS_DIR", sessions_dir)
+
+        projects = discover_projects()
+        assert projects == [{
+            "dir_name": "sessions",
+            "display_name": "hermes:sessions",
+            "session_count": 1,
+            "total_size_bytes": (sessions_dir / "session_hermes-1.json").stat().st_size,
+            "source": "hermes",
+        }]
+
+        sessions = parse_project_sessions("sessions", mock_anonymizer, source="hermes")
+        assert len(sessions) == 1
+        assert sessions[0]["project"] == "hermes:sessions"
+        assert sessions[0]["source"] == "hermes"

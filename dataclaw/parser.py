@@ -1,4 +1,4 @@
-"""Parse Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw session data into conversations."""
+"""Parse supported coding-agent session data into conversations."""
 
 import dataclasses
 import hashlib
@@ -20,6 +20,7 @@ GEMINI_SOURCE = "gemini"
 OPENCODE_SOURCE = "opencode"
 OPENCLAW_SOURCE = "openclaw"
 KIMI_SOURCE = "kimi"
+HERMES_SOURCE = "hermes"
 CUSTOM_SOURCE = "custom"
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -45,13 +46,94 @@ KIMI_SESSIONS_DIR = KIMI_DIR / "sessions"
 KIMI_CONFIG_PATH = KIMI_DIR / "kimi.json"
 UNKNOWN_KIMI_CWD = "<unknown-cwd>"
 
+HERMES_DIR = Path.home() / ".hermes"
+HERMES_SESSIONS_DIR = HERMES_DIR / "sessions"
+
 CUSTOM_DIR = Path.home() / ".dataclaw" / "custom"
+COOL_DOWN_SECONDS = 86400
 
 _CODEX_PROJECT_INDEX: dict[str, list[Path]] = {}
 _GEMINI_HASH_MAP: dict[str, str] = {}
 _OPENCODE_PROJECT_INDEX: dict[str, list[str]] = {}
 _OPENCLAW_PROJECT_INDEX: dict[str, list[Path]] = {}
 _KIMI_PROJECT_INDEX: dict[str, list[Path]] = {}
+
+
+def _parse_iso(ts) -> datetime | None:
+    """Parse an ISO timestamp into an aware UTC datetime."""
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    raw = ts.strip()
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_cooled_path(p, *, now=None) -> bool:
+    """Return True when a source path has been untouched for at least 24 hours."""
+    if p is None:
+        return False
+    try:
+        source_path = Path(p)
+        mtime = source_path.stat().st_mtime
+    except (TypeError, OSError):
+        return False
+    if now is None:
+        now_dt = datetime.now(timezone.utc)
+    elif isinstance(now, datetime):
+        now_dt = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        now_dt = now_dt.astimezone(timezone.utc)
+    else:
+        return False
+    return (now_dt.timestamp() - mtime) >= COOL_DOWN_SECONDS
+
+
+def _latest_mtime_path(paths: list[Path]) -> Path | None:
+    existing = [p for p in paths if p.exists()]
+    if not existing:
+        return None
+    return max(existing, key=lambda p: p.stat().st_mtime)
+
+
+def _apply_session_filters(
+    sessions: list[dict],
+    *,
+    cooled_only: bool,
+    since: dict[str, str] | None,
+    source: str,
+) -> list[dict]:
+    filtered = []
+    cutoff_cache: dict[str, datetime | None] = {}
+    for session in sessions:
+        end_time = _parse_iso(session.get("end_time"))
+        if end_time is None:
+            logger.debug(
+                "Skipping %s session %s with unparseable end_time",
+                session.get("source", source),
+                session.get("session_id"),
+            )
+            continue
+
+        if cooled_only and not _is_cooled_path(session.get("_source_file")):
+            continue
+
+        source_key = session.get("source", source)
+        cutoff = None
+        if since:
+            if source_key not in cutoff_cache:
+                cutoff_cache[source_key] = _parse_iso(since.get(source_key))
+            cutoff = cutoff_cache[source_key]
+        if cutoff is not None and end_time <= cutoff:
+            continue
+
+        filtered.append(session)
+    return filtered
 
 
 def _build_gemini_hash_map() -> dict[str, str]:
@@ -140,6 +222,7 @@ def discover_projects() -> list[dict]:
     projects.extend(_discover_opencode_projects())
     projects.extend(_discover_openclaw_projects())
     projects.extend(_discover_kimi_projects())
+    projects.extend(_discover_hermes_projects())
     projects.extend(_discover_custom_projects())
     return sorted(projects, key=lambda p: (p["display_name"], p["source"]))
 
@@ -334,6 +417,26 @@ def _build_kimi_project_name(cwd: str) -> str:
     return f"kimi:{Path(cwd).name or cwd}"
 
 
+def _discover_hermes_projects() -> list[dict]:
+    if not HERMES_SESSIONS_DIR.exists():
+        return []
+
+    session_files = sorted(HERMES_SESSIONS_DIR.glob("session_*.json"))
+    session_files = [p for p in session_files if p.is_file()]
+    if not session_files:
+        return []
+
+    return [
+        {
+            "dir_name": "sessions",
+            "display_name": "hermes:sessions",
+            "session_count": len(session_files),
+            "total_size_bytes": sum(f.stat().st_size for f in session_files),
+            "source": HERMES_SOURCE,
+        }
+    ]
+
+
 def _discover_custom_projects() -> list[dict]:
     if not CUSTOM_DIR.exists():
         return []
@@ -406,6 +509,7 @@ def _parse_custom_sessions(
                     continue
                 session["project"] = f"custom:{project_dir_name}"
                 session["source"] = CUSTOM_SOURCE
+                session["_source_file"] = jsonl_file
                 # Redact message content through the anonymizer
                 for msg in session.get("messages", []):
                     if "content" in msg and isinstance(msg["content"], str):
@@ -422,65 +526,77 @@ def parse_project_sessions(
     anonymizer: Anonymizer,
     include_thinking: bool = True,
     source: str = CLAUDE_SOURCE,
+    *,
+    cooled_only: bool = False,
+    since: dict[str, str] | None = None,
 ) -> list[dict]:
     """Parse all sessions for a project into structured dicts."""
+    sessions = []
     if source == CUSTOM_SOURCE:
-        return _parse_custom_sessions(project_dir_name, anonymizer)
+        sessions = _parse_custom_sessions(project_dir_name, anonymizer)
 
-    if source == KIMI_SOURCE:
+    elif source == HERMES_SOURCE:
+        if HERMES_SESSIONS_DIR.exists():
+            for session_file in sorted(HERMES_SESSIONS_DIR.glob("session_*.json")):
+                parsed = _parse_hermes_session_file(
+                    session_file,
+                    anonymizer=anonymizer,
+                    include_thinking=include_thinking,
+                )
+                if parsed and parsed["messages"]:
+                    parsed["project"] = "hermes:sessions"
+                    parsed["source"] = HERMES_SOURCE
+                    parsed["_source_file"] = session_file
+                    sessions.append(parsed)
+
+    elif source == KIMI_SOURCE:
         project_hash = _get_kimi_project_hash(project_dir_name)
         project_path = KIMI_SESSIONS_DIR / project_hash
-        if not project_path.exists():
-            return []
-        sessions = []
-        for session_dir in sorted(project_path.iterdir()):
-            if not session_dir.is_dir():
-                continue
-            context_file = session_dir / "context.jsonl"
-            if not context_file.exists():
-                continue
-            parsed = _parse_kimi_session_file(
-                context_file,
-                anonymizer=anonymizer,
-                include_thinking=include_thinking,
-            )
-            if parsed and parsed["messages"]:
-                parsed["project"] = _build_kimi_project_name(project_dir_name)
-                parsed["source"] = KIMI_SOURCE
-                if not parsed.get("model"):
-                    parsed["model"] = "kimi-k2"
-                sessions.append(parsed)
-        return sessions
+        if project_path.exists():
+            for session_dir in sorted(project_path.iterdir()):
+                if not session_dir.is_dir():
+                    continue
+                context_file = session_dir / "context.jsonl"
+                if not context_file.exists():
+                    continue
+                parsed = _parse_kimi_session_file(
+                    context_file,
+                    anonymizer=anonymizer,
+                    include_thinking=include_thinking,
+                )
+                if parsed and parsed["messages"]:
+                    parsed["project"] = _build_kimi_project_name(project_dir_name)
+                    parsed["source"] = KIMI_SOURCE
+                    parsed["_source_file"] = context_file
+                    if not parsed.get("model"):
+                        parsed["model"] = "kimi-k2"
+                    sessions.append(parsed)
 
-    if source == OPENCLAW_SOURCE:
+    elif source == OPENCLAW_SOURCE:
         index = _get_openclaw_project_index()
         session_files = index.get(project_dir_name, [])
-        sessions = []
         for session_file in session_files:
             parsed = _parse_openclaw_session_file(session_file, anonymizer, include_thinking)
             if parsed and parsed["messages"]:
                 parsed["project"] = _build_openclaw_project_name(project_dir_name)
                 parsed["source"] = OPENCLAW_SOURCE
+                parsed["_source_file"] = session_file
                 sessions.append(parsed)
-        return sessions
 
-    if source == GEMINI_SOURCE:
+    elif source == GEMINI_SOURCE:
         project_path = GEMINI_DIR / project_dir_name / "chats"
-        if not project_path.exists():
-            return []
-        sessions = []
-        for session_file in sorted(project_path.glob("session-*.json")):
-            parsed = _parse_gemini_session_file(session_file, anonymizer, include_thinking)
-            if parsed and parsed["messages"]:
-                parsed["project"] = f"gemini:{_resolve_gemini_hash(project_dir_name)}"
-                parsed["source"] = GEMINI_SOURCE
-                sessions.append(parsed)
-        return sessions
+        if project_path.exists():
+            for session_file in sorted(project_path.glob("session-*.json")):
+                parsed = _parse_gemini_session_file(session_file, anonymizer, include_thinking)
+                if parsed and parsed["messages"]:
+                    parsed["project"] = f"gemini:{_resolve_gemini_hash(project_dir_name)}"
+                    parsed["source"] = GEMINI_SOURCE
+                    parsed["_source_file"] = session_file
+                    sessions.append(parsed)
 
-    if source == OPENCODE_SOURCE:
+    elif source == OPENCODE_SOURCE:
         index = _get_opencode_project_index()
         session_ids = index.get(project_dir_name, [])
-        sessions = []
         for session_id in session_ids:
             parsed = _parse_opencode_session(
                 session_id,
@@ -491,13 +607,12 @@ def parse_project_sessions(
             if parsed and parsed["messages"]:
                 parsed["project"] = _build_opencode_project_name(project_dir_name)
                 parsed["source"] = OPENCODE_SOURCE
+                parsed["_source_file"] = OPENCODE_DB_PATH
                 sessions.append(parsed)
-        return sessions
 
-    if source == CODEX_SOURCE:
+    elif source == CODEX_SOURCE:
         index = _get_codex_project_index()
         session_files = index.get(project_dir_name, [])
-        sessions = []
         for session_file in session_files:
             parsed = _parse_codex_session_file(
                 session_file,
@@ -508,29 +623,35 @@ def parse_project_sessions(
             if parsed and parsed["messages"]:
                 parsed["project"] = _build_codex_project_name(project_dir_name)
                 parsed["source"] = CODEX_SOURCE
+                parsed["_source_file"] = session_file
                 sessions.append(parsed)
-        return sessions
 
-    project_path = PROJECTS_DIR / project_dir_name
-    if not project_path.exists():
-        return []
+    else:
+        project_path = PROJECTS_DIR / project_dir_name
+        if project_path.exists():
+            for session_file in sorted(project_path.glob("*.jsonl")):
+                parsed = _parse_claude_session_file(session_file, anonymizer, include_thinking)
+                if parsed and parsed["messages"]:
+                    parsed["project"] = _build_project_name(project_dir_name)
+                    parsed["source"] = CLAUDE_SOURCE
+                    parsed["_source_file"] = session_file
+                    sessions.append(parsed)
 
-    sessions = []
-    for session_file in sorted(project_path.glob("*.jsonl")):
-        parsed = _parse_claude_session_file(session_file, anonymizer, include_thinking)
-        if parsed and parsed["messages"]:
-            parsed["project"] = _build_project_name(project_dir_name)
-            parsed["source"] = CLAUDE_SOURCE
-            sessions.append(parsed)
+            for session_dir in _find_subagent_only_sessions(project_path):
+                parsed = _parse_subagent_session(session_dir, anonymizer, include_thinking)
+                if parsed and parsed["messages"]:
+                    parsed["project"] = _build_project_name(project_dir_name)
+                    parsed["source"] = CLAUDE_SOURCE
+                    subagent_files = sorted((session_dir / "subagents").glob("agent-*.jsonl"))
+                    parsed["_source_file"] = _latest_mtime_path(subagent_files)
+                    sessions.append(parsed)
 
-    for session_dir in _find_subagent_only_sessions(project_path):
-        parsed = _parse_subagent_session(session_dir, anonymizer, include_thinking)
-        if parsed and parsed["messages"]:
-            parsed["project"] = _build_project_name(project_dir_name)
-            parsed["source"] = CLAUDE_SOURCE
-            sessions.append(parsed)
-
-    return sessions
+    return _apply_session_filters(
+        sessions,
+        cooled_only=cooled_only,
+        since=since,
+        source=source,
+    )
 
 
 def _parse_opencode_session(
@@ -621,6 +742,150 @@ def _parse_opencode_session(
 
     if metadata["model"] is None:
         metadata["model"] = "opencode-unknown"
+
+    return _make_session_result(metadata, messages, stats)
+
+
+def _extract_hermes_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _parse_hermes_tool_arguments(raw: Any) -> Any:
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    return raw
+
+
+def _build_hermes_tool_result_map(messages: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+    results: dict[str, dict] = {}
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        tool_call_id = msg.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            continue
+        text = _extract_hermes_text(msg.get("content")).strip()
+        results[tool_call_id] = {
+            "output": {"text": anonymizer.text(text)} if text else {},
+            "status": "success",
+        }
+    return results
+
+
+def _parse_hermes_session_file(
+    filepath: Path,
+    anonymizer: Anonymizer,
+    include_thinking: bool = True,
+) -> dict | None:
+    try:
+        data = json.loads(filepath.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    raw_messages = data.get("messages")
+    if not isinstance(raw_messages, list):
+        return None
+
+    metadata: dict[str, Any] = {
+        "session_id": data.get("session_id", filepath.stem.removeprefix("session_")),
+        "cwd": None,
+        "git_branch": None,
+        "model": data.get("model") or "hermes-unknown",
+        "start_time": _normalize_timestamp(data.get("session_start")),
+        "end_time": _normalize_timestamp(data.get("last_updated")),
+    }
+    messages: list[dict[str, Any]] = []
+    stats = _make_stats()
+    tool_result_map = _build_hermes_tool_result_map(
+        [msg for msg in raw_messages if isinstance(msg, dict)],
+        anonymizer,
+    )
+
+    for raw_msg in raw_messages:
+        if not isinstance(raw_msg, dict):
+            continue
+        role = raw_msg.get("role")
+
+        if role == "user":
+            text = _extract_hermes_text(raw_msg.get("content")).strip()
+            if not text:
+                continue
+            messages.append({"role": "user", "content": anonymizer.text(text)})
+            stats["user_messages"] += 1
+
+        elif role == "assistant":
+            msg: dict[str, Any] = {"role": "assistant"}
+            text = _extract_hermes_text(raw_msg.get("content")).strip()
+            if text:
+                msg["content"] = anonymizer.text(text)
+
+            thinking_parts: list[str] = []
+            reasoning = raw_msg.get("reasoning")
+            if isinstance(reasoning, str) and reasoning.strip():
+                thinking_parts.append(reasoning.strip())
+            reasoning_details = raw_msg.get("reasoning_details")
+            if isinstance(reasoning_details, list):
+                for detail in reasoning_details:
+                    if isinstance(detail, dict) and isinstance(detail.get("text"), str):
+                        detail_text = detail["text"].strip()
+                        if detail_text and detail_text not in thinking_parts:
+                            thinking_parts.append(detail_text)
+            if include_thinking and thinking_parts:
+                msg["thinking"] = anonymizer.text("\n\n".join(thinking_parts))
+
+            tool_uses: list[dict[str, Any]] = []
+            raw_tool_calls = raw_msg.get("tool_calls")
+            if isinstance(raw_tool_calls, list):
+                for tool_call in raw_tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function = tool_call.get("function")
+                    if not isinstance(function, dict):
+                        function = {}
+                    tool_name = function.get("name") or tool_call.get("name")
+                    arguments = _parse_hermes_tool_arguments(
+                        function.get("arguments", tool_call.get("arguments", {}))
+                    )
+                    tool_entry: dict[str, Any] = {
+                        "tool": tool_name,
+                        "input": _parse_tool_input(
+                            str(tool_name) if tool_name is not None else None,
+                            arguments,
+                            anonymizer,
+                        ),
+                    }
+                    tool_call_id = tool_call.get("id") or tool_call.get("call_id")
+                    if isinstance(tool_call_id, str) and tool_call_id in tool_result_map:
+                        result = tool_result_map[tool_call_id]
+                        if result.get("output"):
+                            tool_entry["output"] = result["output"]
+                        tool_entry["status"] = result.get("status", "success")
+                    tool_uses.append(tool_entry)
+
+            if tool_uses:
+                msg["tool_uses"] = tool_uses
+                stats["tool_uses"] += len(tool_uses)
+
+            if "content" in msg or "thinking" in msg or "tool_uses" in msg:
+                messages.append(msg)
+                stats["assistant_messages"] += 1
 
     return _make_session_result(metadata, messages, stats)
 
@@ -1214,9 +1479,10 @@ def _build_codex_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anon
 
         if pt == "function_call_output":
             raw = p.get("output", "")
+            raw_text = raw if isinstance(raw, str) else json.dumps(raw, default=str)
             # Parse "Exit code: N\nWall time: ...\nOutput:\n..." format
             out: dict = {}
-            lines = raw.splitlines()
+            lines = raw_text.splitlines()
             output_lines: list[str] = []
             in_output = False
             for line in lines:
@@ -1237,9 +1503,10 @@ def _build_codex_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anon
 
         elif pt == "custom_tool_call_output":
             raw = p.get("output", "")
+            raw_text = raw if isinstance(raw, str) else json.dumps(raw, default=str)
             out = {}
             try:
-                parsed = json.loads(raw)
+                parsed = json.loads(raw_text)
                 text = parsed.get("output", "")
                 if text:
                     out["output"] = anonymizer.text(str(text))
@@ -1249,8 +1516,8 @@ def _build_codex_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anon
                 if "duration_seconds" in meta:
                     out["duration_seconds"] = meta["duration_seconds"]
             except (json.JSONDecodeError, AttributeError):
-                if raw:
-                    out["output"] = anonymizer.text(raw)
+                if raw_text:
+                    out["output"] = anonymizer.text(raw_text)
             result[call_id] = {"output": out, "status": "success"}
 
     return result

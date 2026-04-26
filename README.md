@@ -8,6 +8,30 @@ Turn your Claude Code, Codex, Gemini CLI, OpenCode, and OpenClaw conversation hi
 
 Every export is tagged **`dataclaw`** on Hugging Face. Together, they may someday form a growing [distributed dataset](https://huggingface.co/datasets?other=dataclaw) of real-world human-AI coding collaboration.
 
+## Install
+
+### Mac app
+
+Download the latest signed macOS installer from [GitHub Releases](https://github.com/banodoco/dataclaw/releases/latest).
+
+Choose the Apple Silicon `.dmg` for M-series Macs, or the Intel `.dmg` for older Intel Macs. Open the `.dmg`, drag `DataClaw.app` to Applications, then launch DataClaw from Applications or Spotlight.
+
+The Mac app bundles the DataClaw sidecar, so users do not need to install Python, PyInstaller, or the CLI separately. Releases are signed, notarized, and configured for in-app updates through GitHub Releases.
+
+### CLI only
+
+Use this if you want the terminal workflow or you are asking a coding agent to run DataClaw for you:
+
+```bash
+pip install dataclaw
+```
+
+Optional local model privacy scanning:
+
+```bash
+pip install "dataclaw[pii]"
+```
+
 ## Give this to your agent
 
 Paste this into Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, or any coding agent:
@@ -30,11 +54,11 @@ STEP 3 — START
 
 STEP 3A — CHOOSE SOURCE SCOPE (REQUIRED BEFORE EXPORT)
   Ask the user explicitly: Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw, or all?
-  dataclaw config --source "claude|codex|gemini|opencode|openclaw|all"
+  dataclaw config --source "claude|codex|gemini|opencode|openclaw|kimi|hermes|custom|all"
   Do not export until source scope is explicitly confirmed.
 
 STEP 3B — PRESENT ALL FOLDERS (REQUIRED BEFORE EXPORT)
-  dataclaw list --source "claude|codex|gemini|opencode|openclaw|all"
+  dataclaw list --source "claude|codex|gemini|opencode|openclaw|kimi|hermes|custom|all"
   Send the FULL project/folder list to the user in a message (name, source, sessions, size, excluded).
   Ask which projects to exclude.
   dataclaw config --exclude "project1,project2" OR dataclaw config --confirm-projects
@@ -65,11 +89,15 @@ IMPORTANT: Always export with --no-push first and review for PII before publishi
 
 ```bash
 pip install dataclaw
+# Optional Phase 4 PII scanner
+pip install dataclaw[pii]
+# Optional local app sidecar build dependencies
+pip install -e ".[build]"
 huggingface-cli login --token YOUR_TOKEN
 
 # See your projects
 dataclaw prep
-dataclaw config --source all  # REQUIRED: choose claude, codex, gemini, opencode, openclaw, or all
+dataclaw config --source all  # REQUIRED: choose claude, codex, gemini, opencode, openclaw, kimi, hermes, custom, or all
 dataclaw list --source all  # Present full list and confirm folder scope before export
 
 # Configure
@@ -99,6 +127,8 @@ dataclaw confirm \
 dataclaw export --publish-attestation "User explicitly approved publishing to Hugging Face."
 ```
 
+Building the Mac app from source with signing requires your own Apple Developer Certificate; see [`docs/RELEASING.md`](docs/RELEASING.md) for the release runbook.
+
 ### Commands
 
 | Command | Description |
@@ -111,12 +141,13 @@ dataclaw export --publish-attestation "User explicitly approved publishing to Hu
 | `dataclaw prep --source gemini` | Prep using only Gemini CLI sessions |
 | `dataclaw prep --source opencode` | Prep using only OpenCode sessions |
 | `dataclaw prep --source openclaw` | Prep using only OpenClaw sessions |
+| `dataclaw prep --source hermes` | Prep using only Hermes Agent sessions |
 | `dataclaw list` | List all projects with exclusion status |
 | `dataclaw list --source all` | List all sources |
 | `dataclaw list --source codex` | List only Codex projects |
 | `dataclaw config` | Show current config |
 | `dataclaw config --repo user/my-personal-codex-data` | Set HF repo |
-| `dataclaw config --source all` | REQUIRED source scope selection (`claude`, `codex`, `gemini`, `opencode`, `openclaw`, or `all`) |
+| `dataclaw config --source all` | REQUIRED source scope selection (`claude`, `codex`, `gemini`, `opencode`, `openclaw`, `kimi`, `hermes`, `custom`, or `all`) |
 | `dataclaw config --exclude "a,b"` | Add excluded projects (appends) |
 | `dataclaw config --redact "str1,str2"` | Add strings to always redact (appends) |
 | `dataclaw config --redact-usernames "u1,u2"` | Add usernames to anonymize (appends) |
@@ -128,12 +159,17 @@ dataclaw export --publish-attestation "User explicitly approved publishing to Hu
 | `dataclaw export --source gemini --no-push` | Export only Gemini CLI sessions locally |
 | `dataclaw export --source opencode --no-push` | Export only OpenCode sessions locally |
 | `dataclaw export --source openclaw --no-push` | Export only OpenClaw sessions locally |
+| `dataclaw export --source hermes --no-push` | Export only Hermes Agent sessions locally |
 | `dataclaw confirm --full-name "NAME" --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Scan for PII, run exact-name privacy check, verify review attestations, unlock pushing |
 | `dataclaw confirm --skip-full-name-scan --attest-full-name "..." --attest-sensitive "..." --attest-manual-scan "..."` | Skip exact-name scan when user declines sharing full name (requires skip attestation) |
 | `dataclaw export --publish-attestation "..."` | Export and push (requires `dataclaw confirm` first) |
 | `dataclaw export --all-projects` | Include everything (ignore exclusions) |
 | `dataclaw export --no-thinking` | Exclude extended thinking blocks |
 | `dataclaw update-skill claude` | Install/update the dataclaw skill for Claude Code |
+
+### Logs
+
+DataClaw writes structured JSON logs to `~/.dataclaw/logs/auto-YYYY-MM-DD.jsonl`. View the most recent lines with `dataclaw status --logs [--run <id>] [--lines N]`.
 
 </details>
 
@@ -166,6 +202,10 @@ Automated redaction cannot catch everything — especially service-specific
 identifiers, third-party PII, or secrets in unusual formats.
 
 To help improve redaction, report issues: https://github.com/banodoco/dataclaw/issues
+
+### Privacy filter (optional)
+
+Install with `pip install "dataclaw[pii]"`. Enable per-run scanning by setting `privacy_filter.enabled=true` in `~/.dataclaw/config.json`. `dataclaw confirm` will block on new findings under the default `--policy strict`. Acknowledge with `--ack-privacy-findings`.
 
 </details>
 

@@ -1,10 +1,9 @@
 """Tests for dataclaw.config — config persistence."""
 
 import json
+import stat
 
-import pytest
-
-from dataclaw.config import load_config, save_config
+from dataclaw.config import DEFAULT_CONFIG, load_config, save_config
 
 
 class TestLoadConfig:
@@ -13,6 +12,7 @@ class TestLoadConfig:
         assert config["repo"] is None
         assert config["excluded_projects"] == []
         assert config["redact_strings"] == []
+        assert config["privacy_filter"] == {"enabled": True, "device": "auto"}
 
     def test_valid_file_merged(self, tmp_config):
         tmp_config.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,26 @@ class TestSaveConfig:
         assert tmp_config.exists()
         data = json.loads(tmp_config.read_text())
         assert data["repo"] == "alice/data"
+
+    def test_config_roundtrip_with_new_fields(self, tmp_config):
+        config = {
+            **DEFAULT_CONFIG,
+            "last_export_cutoff": {"claude": "2026-04-25T00:00:00Z"},
+            "folder_rules": {
+                "projects": {"repo-a": "work"},
+                "default_bucket": "misc",
+            },
+            "project_tags": {"repo-a": ["client", "python"]},
+            "last_auto_run": {"finished_at": "2026-04-25T01:00:00Z"},
+        }
+        save_config(config)
+
+        assert load_config() == config
+
+    def test_config_file_chmod_600(self, tmp_config):
+        save_config({})
+
+        assert stat.S_IMODE(tmp_config.stat().st_mode) == 0o600
 
     def test_overwrites_existing(self, tmp_config):
         tmp_config.parent.mkdir(parents=True, exist_ok=True)

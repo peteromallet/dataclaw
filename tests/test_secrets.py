@@ -309,6 +309,47 @@ class TestRedactText:
         assert result is None
         assert count == 0
 
+    def test_redacts_prose_access_token(self):
+        token = "3HKcoLeJAFFf9pQw7RtY2uIoP5sD8gH1"
+        result, count = redact_text(f"Reigh access token {token}")
+        assert count == 1
+        assert token not in result
+        assert REDACTED in result
+
+    def test_redacts_quoted_bare_token(self):
+        token = "3HKcoLeJAFFf9pQw7RtY2uIoP5sD8gH1"
+        result, count = redact_text(f"Given token '{token}' returns the correct user_id.")
+        assert count == 1
+        assert token not in result
+        assert REDACTED in result
+
+    def test_redacts_markdown_backtick_token(self):
+        token = "3HKcoLeJAFFf9pQw7RtY2uIoP5sD8gH1"
+        result, count = redact_text(f"Reigh access token `{token}`")
+        assert count == 1
+        assert token not in result
+        assert REDACTED in result
+
+    def test_redacts_contextual_grep_token_value(self):
+        token = "3HKcoLeJAFFf9pQw7RtY2uIoP5sD8gH1"
+        result, count = redact_text(f"Verify test token is not hardcoded: grep -r '{token}' scripts/")
+        assert count == 1
+        assert token not in result
+        assert f"grep -r '{REDACTED}'" in result
+
+    def test_redacts_encrypted_content_field(self):
+        blob = "gAAAAABmQ1cXdY3Kp7Lm9Nq2R8vS4tU6wX1yZ3aB5cD7eF9gH0iJ"
+        result, count = redact_text(f'{{"encrypted_content":"{blob}","type":"reasoning"}}')
+        assert count == 1
+        assert blob not in result
+        assert REDACTED in result
+
+    def test_does_not_redact_css_task_ids(self):
+        text = "sk-creation-task sk-notification hf_hub_download"
+        result, count = redact_text(text)
+        assert result == text
+        assert count == 0
+
 
 # --- redact_custom_strings ---
 

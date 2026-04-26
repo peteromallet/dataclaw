@@ -36,4 +36,15 @@ Issues = "https://github.com/banodoco/dataclaw/issues"
 dataclaw = "dataclaw.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pytest-mock", "freezegun"]
+pii = ["transformers>=4.57", "torch>=2.3", "accelerate>=0.30", "tokenizers>=0.20"]
+keyring = ["keyring>=25", "secretstorage>=3.3; sys_platform == 'linux'"]
+build = ["pyinstaller>=6.10", "keyring>=25", "secretstorage>=3.3; sys_platform == 'linux'"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = ["pii: tests that require the optional privacy-filter model dependencies"]
+addopts = "-m 'not pii'"
+
+[tool.setuptools.packages.find]
+include = ["dataclaw*"]

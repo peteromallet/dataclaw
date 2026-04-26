@@ -8,6 +8,12 @@ REDACTED = "[REDACTED]"
 
 # Ordered from most specific to least specific
 SECRET_PATTERNS = [
+    # Codex encrypted reasoning payloads are opaque, non-user-useful blobs and
+    # look like secrets to downstream scanners. Remove the whole JSON field
+    # whether it appears in normal JSON or escaped inside a logged string.
+    ("encrypted_content_json", re.compile(r'"encrypted_content"\s*:\s*"[^"]{40,}"')),
+    ("encrypted_content_escaped_json", re.compile(r'\\"encrypted_content\\"\s*:\s*\\"[^"\\]{40,}\\"')),
+
     # JWT tokens — full 3-segment form
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}")),
 
@@ -21,10 +27,10 @@ SECRET_PATTERNS = [
     ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
 
     # OpenAI API keys
-    ("openai_key", re.compile(r"sk-[A-Za-z0-9]{40,}")),
+    ("openai_key", re.compile(r"sk-(?:proj-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{40,})")),
 
     # Hugging Face tokens
-    ("hf_token", re.compile(r"hf_[A-Za-z0-9]{20,}")),
+    ("hf_token", re.compile(r"hf_(?!hub_)[A-Za-z0-9_-]{24,}")),
 
     # GitHub tokens
     ("github_token", re.compile(r"(?:ghp|gho|ghs|ghr)_[A-Za-z0-9]{30,}")),
@@ -63,6 +69,22 @@ SECRET_PATTERNS = [
     ("cli_token_flag", re.compile(
         r"(?:--|-)(?:access[_-]?token|auth[_-]?token|api[_-]?key|secret|password|token)"
         r"[\s=]+([A-Za-z0-9_/+=.-]{8,})",
+        re.IGNORECASE,
+    )),
+
+    # Prose/log mentions such as "access token abc..." or "api key abc..."
+    # that are not written as CLI flags or env assignments.
+    ("prose_token", re.compile(
+        r"\b(?:access[_ -]?token|auth[_ -]?token|api[_ -]?key|secret|password|credential|token)"
+        r"\s+(?:is\s+|was\s+|=|:)?['\"`]?([A-Za-z0-9_/+=.-]{16,})['\"`]?",
+        re.IGNORECASE,
+    )),
+
+    # Search/log snippets often say things like:
+    # "verify test token not hardcoded: grep -r 'abc...'"
+    ("contextual_token_value", re.compile(
+        r"\b(?:access[_ -]?token|auth[_ -]?token|api[_ -]?key|secret|password|credential|token)"
+        r"\b[^\n\r]{0,160}?['\"`]([A-Za-z0-9_/+=.-]{20,})['\"`]",
         re.IGNORECASE,
     )),
 
@@ -160,7 +182,14 @@ def scan_text(text: str) -> list[dict]:
     findings = []
     for name, pattern in SECRET_PATTERNS:
         for match in pattern.finditer(text):
-            matched_text = match.group(0)
+            if name == "contextual_token_value" and match.lastindex:
+                matched_text = match.group(1)
+                start = match.start(1)
+                end = match.end(1)
+            else:
+                matched_text = match.group(0)
+                start = match.start()
+                end = match.end()
 
             if any(allow_pat.search(matched_text) for allow_pat in ALLOWLIST):
                 continue
@@ -177,8 +206,8 @@ def scan_text(text: str) -> list[dict]:
 
             findings.append({
                 "type": name,
-                "start": match.start(),
-                "end": match.end(),
+                "start": start,
+                "end": end,
                 "match": matched_text,
             })
 

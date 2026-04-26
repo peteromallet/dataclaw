@@ -1,10 +1,27 @@
 __pycache__/
 *.pyc
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+.pnpm-store/
 dist/
 build/
+target/
 .DS_Store
 *.jsonl
+.env
+.env.*
+!.env.example
+
+# Tauri / desktop build outputs
+app/src-tauri/target/
+app/src-tauri/binaries/dataclaw-*
+*.app
+*.dmg
 
 # DataClaw local export/review artifacts
 dataclaw_conversations.jsonl
@@ -13,3 +30,5 @@ findings.json
 
 # Local tooling state
 .desloppify/
+.megaplan/
+.claude/scheduled_tasks.lock

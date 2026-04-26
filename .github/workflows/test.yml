@@ -18,3 +18,46 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: python -m pytest tests/ -v
+
+  app-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-14, macos-13]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install -e ".[dev,build]"
+      - run: make build-sidecar
+      - name: Smoke sidecar auth command
+        run: |
+          BIN=$(ls app/src-tauri/binaries/dataclaw-*)
+          BIN="$BIN" python - <<'PY' || echo "expected non-zero or timeout (no token configured)"
+          import os
+          import subprocess
+
+          subprocess.run(
+              [os.environ["BIN"], "hf", "whoami", "--check-keyring-only"],
+              check=True,
+              timeout=15,
+          )
+          PY
+      - run: pnpm -C app install --frozen-lockfile
+      - run: pnpm -C app tauri build
+        env:
+          APPLE_SIGNING_IDENTITY: ""
+      - run: test -d app/src-tauri/target/release/bundle/macos/DataClaw.app
+      - name: Assert sidecar inside app bundle
+        run: |
+          test -x "app/src-tauri/target/release/bundle/macos/DataClaw.app/Contents/MacOS/dataclaw"

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "shell:allow-execute",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "dataclaw",
+          "sidecar": true,
+          "args": [{ "validator": ".*" }]
+        }
+      ]
+    },
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "notification:default",
+    "updater:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit"
+  ]
+}
