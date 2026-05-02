@@ -51,6 +51,9 @@ class Provider:
     def missing_source_message(self) -> str:
         return f"{self.source_path} was not found."
 
+    def non_anon_string_keys(self) -> frozenset[str]:
+        return frozenset()
+
 
 @dataclass(frozen=True)
 class ModuleProvider(Provider):
@@ -86,6 +89,9 @@ class ModuleProvider(Provider):
         include_thinking: bool,
     ) -> dict | None:
         return self.module.parse_export_session_task(task, anonymizer, include_thinking)
+
+    def non_anon_string_keys(self) -> frozenset[str]:
+        return frozenset(getattr(self.module, "NON_ANON_STRING_KEYS", ()))
 
 
 PROVIDERS: dict[str, Provider] = {
@@ -136,6 +142,13 @@ PROVIDER_ORDER = tuple(PROVIDERS.values())
 
 def get_provider(source: str) -> Provider:
     return PROVIDERS[source]
+
+
+def get_provider_non_anon_string_keys(source: str) -> frozenset[str]:
+    provider = PROVIDERS.get(source)
+    if provider is None:
+        return frozenset()
+    return provider.non_anon_string_keys()
 
 
 def iter_providers() -> tuple[Provider, ...]:

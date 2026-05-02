@@ -3,6 +3,7 @@
 import pytest
 
 from dataclaw.secrets import (
+    _NON_ANON_STRING_KEYS,
     REDACTED,
     _has_mixed_char_types,
     _shannon_entropy,
@@ -11,6 +12,7 @@ from dataclaw.secrets import (
     redact_text,
     scan_text,
     should_skip_large_binary_string,
+    transform_session,
 )
 
 # --- _shannon_entropy ---
@@ -769,3 +771,41 @@ class TestLargeBinarySkipping:
         assert result["messages"][0]["content_parts"][0]["source"]["url"] == data_url
         assert REDACTED in result["messages"][0]["content_parts"][1]["content"]
         assert count >= 1
+
+
+class TestTransformSession:
+    def test_common_non_anon_keys_do_not_include_provider_raw_keys(self):
+        assert "sourceToolAssistantUUID" not in _NON_ANON_STRING_KEYS
+        assert "wall_time" not in _NON_ANON_STRING_KEYS
+        assert "tool_use_id" not in _NON_ANON_STRING_KEYS
+
+    def test_provider_can_exempt_raw_payload_keys(self, mock_anonymizer):
+        session = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_uses": [
+                        {
+                            "tool": "Read",
+                            "output": {
+                                "raw": {
+                                    "sourceToolAssistantUUID": "assistant-testuser",
+                                    "note": "path owned by testuser",
+                                }
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result, count = transform_session(
+            session,
+            mock_anonymizer,
+            non_anon_string_keys={"sourceToolAssistantUUID"},
+        )
+
+        raw = result["messages"][0]["tool_uses"][0]["output"]["raw"]
+        assert count == 0
+        assert raw["sourceToolAssistantUUID"] == "assistant-testuser"
+        assert raw["note"] == f"path owned by {mock_anonymizer.username_hash}"

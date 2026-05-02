@@ -51,6 +51,9 @@ _FAST_PATH_LOWER_MARKERS = tuple(
 )
 _NON_ANON_STRING_KEYS = frozenset(
     {
+        # Keep this list limited to keys in DataClaw's normalized export schema.
+        # Providers that preserve source-specific raw payload fields can expose
+        # NON_ANON_STRING_KEYS in their parser module; export passes those here.
         "session_id",
         "model",
         "git_branch",
@@ -62,13 +65,8 @@ _NON_ANON_STRING_KEYS = frozenset(
         "status",
         "type",
         "media_type",
-        "mime_type",
-        "id",
-        "tool_use_id",
-        "sourceToolAssistantUUID",
         "source",
         "project",
-        "wall_time",
     }
 )
 
@@ -489,6 +487,7 @@ def _transform_value(
     custom_strings: list[str] | None = None,
     key: str | None = None,
     parent_dict: dict[str, Any] | None = None,
+    non_anon_string_keys: frozenset[str] = _NON_ANON_STRING_KEYS,
 ) -> tuple[Any, int, bool]:
     """Recursively anonymize and/or redact a string, list, or dict value."""
     if isinstance(value, str):
@@ -501,7 +500,7 @@ def _transform_value(
         count = 0
         changed = False
 
-        if anonymizer is not None and key not in _NON_ANON_STRING_KEYS:
+        if anonymizer is not None and key not in non_anon_string_keys:
             anonymized = anonymizer.text(result)
             if anonymized != result:
                 result = anonymized
@@ -521,7 +520,7 @@ def _transform_value(
         total = 0
         out: dict[Any, Any] | None = None
         for k, v in value.items():
-            transformed, n, changed = _transform_value(v, anonymizer, custom_strings, k, value)
+            transformed, n, changed = _transform_value(v, anonymizer, custom_strings, k, value, non_anon_string_keys)
             total += n
             if out is None:
                 if not changed:
@@ -536,7 +535,14 @@ def _transform_value(
         total = 0
         out_list: list[Any] | None = None
         for idx, item in enumerate(value):
-            transformed, n, changed = _transform_value(item, anonymizer, custom_strings, key, parent_dict)
+            transformed, n, changed = _transform_value(
+                item,
+                anonymizer,
+                custom_strings,
+                key,
+                parent_dict,
+                non_anon_string_keys,
+            )
             total += n
             if out_list is None:
                 if not changed:
@@ -553,9 +559,11 @@ def transform_session(
     session: dict,
     anonymizer: Anonymizer,
     custom_strings: list[str] | None = None,
+    non_anon_string_keys: frozenset[str] | set[str] | None = None,
 ) -> tuple[dict, int]:
     """Anonymize and redact all exported session content in one pass."""
     total = 0
+    effective_non_anon_string_keys = _NON_ANON_STRING_KEYS | frozenset(non_anon_string_keys or ())
 
     for msg in session.get("messages", []):
         for field in ("content", "thinking"):
@@ -566,6 +574,7 @@ def transform_session(
                     custom_strings,
                     field,
                     msg,
+                    effective_non_anon_string_keys,
                 )
                 total += count
         if msg.get("content_parts"):
@@ -575,6 +584,7 @@ def transform_session(
                 custom_strings,
                 "content_parts",
                 msg,
+                effective_non_anon_string_keys,
             )
             total += count
         for tool_use in msg.get("tool_uses", []):
@@ -586,6 +596,7 @@ def transform_session(
                         custom_strings,
                         field,
                         tool_use,
+                        effective_non_anon_string_keys,
                     )
                     total += count
 

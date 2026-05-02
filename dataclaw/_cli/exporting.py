@@ -17,6 +17,7 @@ from .. import _json as json
 from .._workers import configured_workers
 from ..anonymizer import Anonymizer
 from ..parser import iter_project_sessions
+from ..providers import get_provider_non_anon_string_keys
 from ..secrets import transform_session
 from ..session_tasks import ExportSessionTask, build_export_session_tasks, parse_export_session_task
 from .common import HF_TAG, REPO_URL, SKILL_URL, _format_token_count, _provider_dataset_tags
@@ -197,7 +198,12 @@ def _export_session_task_worker(payload) -> _WorkerSessionResult:
     if not model or model == "<synthetic>":
         return _WorkerSessionResult(project_index=task.project_index, skipped_model=True)
 
-    session, n_redacted = transform_session(session, anonymizer, custom_strings=custom_strings)
+    session, n_redacted = transform_session(
+        session,
+        anonymizer,
+        custom_strings=custom_strings,
+        non_anon_string_keys=get_provider_non_anon_string_keys(task.source),
+    )
     fingerprint = _gemini_dedupe_fingerprint(session, task.source)
     stats = session.get("stats", {})
     input_tokens, output_tokens = _token_totals(stats)
@@ -283,7 +289,12 @@ def _export_to_jsonl_serial(
                 skipped += 1
                 continue
 
-            session, n_redacted = transform_session(session, anonymizer, custom_strings=custom_strings)
+            session, n_redacted = transform_session(
+                session,
+                anonymizer,
+                custom_strings=custom_strings,
+                non_anon_string_keys=get_provider_non_anon_string_keys(source),
+            )
             total_redactions += n_redacted
 
             fingerprint = _gemini_dedupe_fingerprint(session, source)

@@ -22,6 +22,7 @@ from .common import (
 SOURCE = "claude"
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
+NON_ANON_STRING_KEYS = frozenset({"sourceToolAssistantUUID"})
 
 
 def discover_projects(projects_dir: Path | None = None) -> list[dict]:

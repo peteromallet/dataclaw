@@ -29,6 +29,7 @@ SOURCE = "codex"
 CODEX_DIR = Path.home() / ".codex"
 CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
 CODEX_ARCHIVED_DIR = CODEX_DIR / "archived_sessions"
+NON_ANON_STRING_KEYS = frozenset({"wall_time"})
 UNKNOWN_CODEX_CWD = "<unknown-cwd>"
 
 _PROJECT_INDEX: dict[str, list[Path]] = {}

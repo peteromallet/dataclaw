@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "gemini"
 GEMINI_DIR = Path.home() / ".gemini" / "tmp"
+NON_ANON_STRING_KEYS = frozenset({"id", "name", "tool_use_id"})
 
 _HASH_MAP: dict[str, str] = {}
 
