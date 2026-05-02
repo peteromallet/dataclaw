@@ -26,6 +26,8 @@ SOURCE = "opencode"
 OPENCODE_DIR = Path.home() / ".local" / "share" / "opencode"
 OPENCODE_DB_PATH = OPENCODE_DIR / "opencode.db"
 UNKNOWN_OPENCODE_CWD = "<unknown-cwd>"
+READ_TOOL_SYNTHETIC_PREFIX = "Called the Read tool with the following input: "
+IMAGE_READ_SUCCESS_TEXT = "Image read successfully"
 
 _PROJECT_INDEX: dict[str, list[str]] = {}
 _SESSION_SIZE_MAP: dict[str, int] = {}
@@ -331,21 +333,39 @@ def build_opencode_file_source(url: Any, mime: Any) -> dict[str, Any] | None:
     return source
 
 
-def extract_opencode_file_part(part: dict[str, Any]) -> dict[str, Any] | None:
+def extract_opencode_file_part(part: dict[str, Any], file_path: str | None = None) -> dict[str, Any] | None:
     source = build_opencode_file_source(part.get("url"), part.get("mime"))
     if source is None:
         return None
 
     mime = part.get("mime")
     if isinstance(mime, str) and mime.startswith("image/"):
-        return {"type": "image", "source": source}
-    return {"type": "document", "source": source}
+        content_part = {"type": "image", "source": source}
+    else:
+        content_part = {"type": "document", "source": source}
+
+    if source.get("type") == "base64":
+        if file_path:
+            content_part["path"] = file_path
+        elif isinstance(part.get("filename"), str) and part["filename"]:
+            content_part["filename"] = part["filename"]
+    return content_part
 
 
 def extract_opencode_tool_attachment(attachment: Any) -> dict[str, Any] | None:
     if not isinstance(attachment, dict):
         return None
     return extract_opencode_file_part(attachment)
+
+
+def extract_synthetic_read_file_path(text: Any) -> str | None:
+    if not isinstance(text, str) or not text.startswith(READ_TOOL_SYNTHETIC_PREFIX):
+        return None
+    args = load_json_field(text.removeprefix(READ_TOOL_SYNTHETIC_PREFIX))
+    file_path = args.get("filePath")
+    if isinstance(file_path, str) and file_path:
+        return file_path
+    return None
 
 
 def build_opencode_tool_output(state: dict[str, Any]) -> dict[str, Any]:
@@ -368,22 +388,32 @@ def build_opencode_tool_output(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_user_message(parts: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    part_list = [part for part in parts if isinstance(part, dict)]
+    pending_file_path: str | None = None
+
     text_parts: list[str] = []
     content_parts: list[dict[str, Any]] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            continue
+    for part in part_list:
         part_type = part.get("type")
         if part_type == "text":
-            if part.get("synthetic") is True:
-                continue
             text = part.get("text")
+            if part.get("synthetic") is True:
+                file_path = extract_synthetic_read_file_path(text)
+                if file_path is not None:
+                    pending_file_path = file_path
+                    continue
+                if text == IMAGE_READ_SUCCESS_TEXT:
+                    continue
             if isinstance(text, str) and text.strip():
                 text_parts.append(text.strip())
         elif part_type == "file":
-            content_part = extract_opencode_file_part(part)
+            content_part = extract_opencode_file_part(part, pending_file_path)
             if content_part is not None:
                 content_parts.append(content_part)
+                pending_file_path = None
+        else:
+            if part.get("synthetic") is True:
+                continue
 
     if not text_parts and not content_parts:
         return None
