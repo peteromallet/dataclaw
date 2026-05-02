@@ -1,7 +1,8 @@
 import dataclasses
 import logging
+import posixpath
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .. import _json as json
@@ -174,6 +175,11 @@ def _build_codex_tool_result(payload: dict[str, Any]) -> dict[str, Any] | None:
 
     if payload_type == "function_call_output":
         raw = payload.get("output", "")
+        if isinstance(raw, list):
+            return {"output": _build_codex_structured_tool_output(raw), "status": "success"}
+        if not isinstance(raw, str):
+            return {"output": {"raw": raw}, "status": "success"}
+
         out: dict[str, Any] = {}
         lines = raw.splitlines()
         output_lines: list[str] = []
@@ -213,6 +219,40 @@ def _build_codex_tool_result(payload: dict[str, Any]) -> dict[str, Any] | None:
         return {"output": out, "status": "success"}
 
     return None
+
+
+def _build_codex_structured_tool_output(parts: list[Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    text_parts: list[str] = []
+    raw_parts: list[Any] = []
+
+    for part in parts:
+        if not isinstance(part, dict):
+            raw_parts.append(part)
+            continue
+
+        part_type = part.get("type")
+        if part_type in {"text", "output_text"}:
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+            raw_parts.append(part)
+            continue
+
+        if part_type == "input_image":
+            image_url = part.get("image_url")
+            if isinstance(image_url, str) and image_url:
+                image_part = _build_codex_image_part(image_url)
+                if image_part is not None:
+                    raw_parts.append(image_part)
+                    continue
+        raw_parts.append(part)
+
+    if text_parts:
+        out["text"] = "\n\n".join(text_parts)
+    if raw_parts:
+        out["raw"] = {"content": raw_parts}
+    return out
 
 
 def parse_session_file(
@@ -353,16 +393,43 @@ def _build_codex_image_part(image_url: str) -> dict[str, Any] | None:
 
 
 def _build_codex_local_image_part(image_path: str, state: CodexParseState) -> dict[str, Any]:
-    path = Path(image_path)
-    if not path.is_absolute() and state.raw_cwd != UNKNOWN_CODEX_CWD:
-        path = Path(state.raw_cwd) / path
+    path = _resolve_codex_local_path(image_path, state.raw_cwd)
     return {
         "type": "image",
         "source": {
             "type": "url",
-            "url": f"file://{path}",
+            "url": _codex_file_url(path),
         },
     }
+
+
+def _is_windows_absolute_path(path: str) -> bool:
+    return PureWindowsPath(path).is_absolute()
+
+
+def _is_posix_absolute_path(path: str) -> bool:
+    return PurePosixPath(path).is_absolute()
+
+
+def _resolve_codex_local_path(image_path: str, cwd: str) -> str:
+    if _is_windows_absolute_path(image_path) or _is_posix_absolute_path(image_path):
+        return image_path
+    if cwd == UNKNOWN_CODEX_CWD:
+        return image_path
+    if _is_windows_absolute_path(cwd):
+        return str(PureWindowsPath(cwd) / image_path)
+    if _is_posix_absolute_path(cwd):
+        return posixpath.join(cwd, image_path.replace("\\", "/"))
+    return str(Path(cwd) / image_path)
+
+
+def _codex_file_url(path: str) -> str:
+    if _is_windows_absolute_path(path):
+        return PureWindowsPath(path).as_uri()
+    if _is_posix_absolute_path(path):
+        return PurePosixPath(path.replace("\\", "/")).as_uri()
+    normalized_path = path.replace("\\", "/")
+    return f"file://{normalized_path}"
 
 
 def _extract_response_user_content_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
