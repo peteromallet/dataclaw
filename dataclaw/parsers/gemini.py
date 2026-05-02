@@ -13,6 +13,7 @@ from ..secrets import should_skip_large_binary_string
 from .common import (
     collect_project_sessions,
     count_existing_paths_and_sizes,
+    iter_jsonl,
     make_session_result,
     make_stats,
     parse_tool_input,
@@ -25,6 +26,47 @@ SOURCE = "gemini"
 GEMINI_DIR = Path.home() / ".gemini" / "tmp"
 
 _HASH_MAP: dict[str, str] = {}
+
+
+def iter_gemini_session_files(chats_dir: Path) -> list[Path]:
+    return sorted([*chats_dir.glob("session-*.json"), *chats_dir.glob("session-*.jsonl")])
+
+
+def load_gemini_session_data(filepath: Path) -> dict[str, Any]:
+    if filepath.suffix == ".jsonl":
+        return load_gemini_jsonl_session_data(filepath)
+
+    with open(filepath, "rb") as f:
+        return json.load(f)
+
+
+def load_gemini_jsonl_session_data(filepath: Path) -> dict[str, Any]:
+    data: dict[str, Any] = {"messages": []}
+    message_positions: dict[str, int] = {}
+
+    for entry in iter_jsonl(filepath):
+        update = entry.get("$set")
+        if isinstance(update, dict):
+            data.update(update)
+            continue
+
+        if entry.get("type") in ("user", "gemini"):
+            message_id = entry.get("id")
+            if isinstance(message_id, str) and message_id:
+                position = message_positions.get(message_id)
+                if position is not None:
+                    data["messages"][position] = entry
+                    continue
+                message_positions[message_id] = len(data["messages"])
+            data["messages"].append(entry)
+            continue
+
+        if isinstance(entry.get("sessionId"), str):
+            for key in ("sessionId", "startTime", "lastUpdated"):
+                if key in entry:
+                    data[key] = entry[key]
+
+    return data
 
 
 def build_hash_map() -> dict[str, str]:
@@ -54,10 +96,9 @@ def extract_project_path_from_sessions(project_hash: str, gemini_dir: Path) -> s
     if not chats_dir.exists():
         return None
 
-    for session_file in sorted(chats_dir.glob("session-*.json"), reverse=True):
+    for session_file in sorted(iter_gemini_session_files(chats_dir), reverse=True):
         try:
-            with open(session_file, "rb") as f:
-                data = json.load(f)
+            data = load_gemini_session_data(session_file)
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse JSON in %s: %s", session_file, e)
             continue
@@ -139,7 +180,7 @@ def discover_projects(
         chats_dir = project_dir / "chats"
         if not chats_dir.exists():
             continue
-        session_count, total_size = count_existing_paths_and_sizes(chats_dir.glob("session-*.json"))
+        session_count, total_size = count_existing_paths_and_sizes(iter_gemini_session_files(chats_dir))
         if session_count == 0:
             continue
         projects.append(
@@ -164,7 +205,7 @@ def parse_project_sessions(
         return ()
 
     return collect_project_sessions(
-        sorted(project_path.glob("session-*.json")),
+        iter_gemini_session_files(project_path),
         lambda session_file: parse_session_file(session_file, anonymizer, include_thinking),
         build_project_name(project_dir_name),
         SOURCE,
@@ -177,7 +218,7 @@ def build_export_session_tasks(project_index: int, project: dict) -> list[Export
         return []
 
     tasks: list[ExportSessionTask] = []
-    for task_index, session_file in enumerate(sorted(project_path.glob("session-*.json"))):
+    for task_index, session_file in enumerate(iter_gemini_session_files(project_path)):
         tasks.append(
             ExportSessionTask(
                 source=SOURCE,
@@ -212,6 +253,7 @@ def parse_tool_call(tool_call: dict) -> dict:
 
     output_text: str | None = None
     extra_texts: list[str] = []
+    raw_parts: list[dict[str, Any]] = []
     for item in result_list:
         if not isinstance(item, dict):
             continue
@@ -220,6 +262,10 @@ def parse_tool_call(tool_call: dict) -> dict:
             output_text = resp.get("output")
         elif "text" in item:
             extra_texts.append(item["text"])
+        elif "inlineData" in item or "fileData" in item:
+            _text, content_part = parse_gemini_user_part(item, defaultdict(deque), defaultdict(int))
+            if content_part is not None:
+                raw_parts.append(content_part)
 
     if name == "read_file":
         inp = {"file_path": args.get("file_path", "")}
@@ -316,6 +362,8 @@ def parse_tool_call(tool_call: dict) -> dict:
         out = {"text": output_text}
     else:
         out = {}
+    if raw_parts:
+        out["raw"] = {"content": raw_parts}
 
     return {"tool": name, "input": inp, "output": out, "status": status}
 
@@ -456,8 +504,7 @@ def parse_session_file(
     include_thinking: bool = True,
 ) -> dict | None:
     try:
-        with open(filepath, "rb") as f:
-            data = json.load(f)
+        data = load_gemini_session_data(filepath)
     except json.JSONDecodeError as e:
         logger.warning("Failed to parse JSON in %s: %s", filepath, e)
         return None
