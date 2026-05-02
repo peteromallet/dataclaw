@@ -293,7 +293,7 @@ The auto-generated HF README includes:
 - Did you export all data, especially:
   - tool call inputs and outputs
   - long inputs and outputs that may be saved somewhere else
-  - binary content (may be encoded as base64) such as images. We do not apply anonymizer on binary content
+  - binary content (may be encoded as base64) such as images, in both user messages and tool calls. We do not apply anonymizer on binary content
   - subagents
 - Does the coding agent automatically delete old sessions? How to prevent this?
 

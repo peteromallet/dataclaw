@@ -342,6 +342,31 @@ def extract_opencode_file_part(part: dict[str, Any]) -> dict[str, Any] | None:
     return {"type": "document", "source": source}
 
 
+def extract_opencode_tool_attachment(attachment: Any) -> dict[str, Any] | None:
+    if not isinstance(attachment, dict):
+        return None
+    return extract_opencode_file_part(attachment)
+
+
+def build_opencode_tool_output(state: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    text = state.get("output")
+    if isinstance(text, str) and text:
+        output["text"] = text
+    elif isinstance(state.get("error"), str) and state["error"]:
+        output["text"] = state["error"]
+
+    attachments = state.get("attachments")
+    if isinstance(attachments, list):
+        content = [
+            part for attachment in attachments if (part := extract_opencode_tool_attachment(attachment)) is not None
+        ]
+        if content:
+            output["raw"] = {"content": content}
+
+    return output
+
+
 def extract_user_message(parts: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     text_parts: list[str] = []
     content_parts: list[dict[str, Any]] = []
@@ -350,6 +375,8 @@ def extract_user_message(parts: Iterable[dict[str, Any]]) -> dict[str, Any] | No
             continue
         part_type = part.get("type")
         if part_type == "text":
+            if part.get("synthetic") is True:
+                continue
             text = part.get("text")
             if isinstance(text, str) and text.strip():
                 text_parts.append(text.strip())
@@ -403,10 +430,10 @@ def extract_assistant_content(
                 if isinstance(status, str):
                     tool_use["status"] = "success" if status == "completed" else status
                 output = state.get("output")
-                if isinstance(output, str) and output:
-                    tool_use["output"] = {"text": output}
-                elif output is not None:
-                    tool_use["output"] = {}
+                attachments = state.get("attachments")
+                error = state.get("error")
+                if output is not None or attachments is not None or error is not None:
+                    tool_use["output"] = build_opencode_tool_output(state)
             tool_uses.append(tool_use)
 
     if not text_parts and not thinking_parts and not tool_uses:

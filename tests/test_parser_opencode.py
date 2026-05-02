@@ -250,6 +250,219 @@ class TestOpenCodeProjects:
             }
         ]
 
+    def test_parse_opencode_user_synthetic_image_file(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"opencode"})
+        db_path = tmp_path / "opencode.db"
+        conn = write_opencode_db(db_path)
+
+        session_id = "ses_synthetic_file"
+        cwd = "C:\\tmp\\test_codex"
+        conn.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            (session_id, cwd, 1706000000000, 1706000005000),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "msg_user",
+                session_id,
+                1706000001000,
+                json.dumps({"role": "user", "model": {"providerID": "openai", "modelID": "gpt-5.5"}}),
+            ),
+        )
+        parts = [
+            {"id": "prt_text", "data": {"type": "text", "text": "Let's test the image read tool again."}},
+            {
+                "id": "prt_synthetic_call",
+                "data": {
+                    "type": "text",
+                    "synthetic": True,
+                    "text": 'Called the Read tool with the following input: {"filePath":"C:\\\\tmp\\\\test_codex\\\\in.png"}',
+                },
+            },
+            {
+                "id": "prt_synthetic_output",
+                "data": {"type": "text", "synthetic": True, "text": "Image read successfully"},
+            },
+            {
+                "id": "prt_image",
+                "data": {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,QUJDRA==",
+                    "synthetic": True,
+                    "filename": "in.png",
+                },
+            },
+        ]
+        for index, part in enumerate(parts):
+            conn.execute(
+                "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+                (part["id"], "msg_user", 1706000001001 + index, json.dumps(part["data"])),
+            )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", db_path)
+        monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
+
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="opencode")
+
+        assert len(sessions) == 1
+        message = sessions[0]["messages"][0]
+        assert message["content"] == "Let's test the image read tool again."
+        assert message["content_parts"] == [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "QUJDRA==",
+                },
+            }
+        ]
+
+    def test_parse_opencode_tool_image_attachments(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"opencode"})
+        db_path = tmp_path / "opencode.db"
+        conn = write_opencode_db(db_path)
+
+        session_id = "ses_tool_attachment"
+        cwd = "C:\\tmp\\test_codex"
+        conn.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            (session_id, cwd, 1706000000000, 1706000005000),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "msg_user",
+                session_id,
+                1706000001000,
+                json.dumps({"role": "user", "model": {"providerID": "openai", "modelID": "gpt-5.5"}}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "msg_assistant",
+                session_id,
+                1706000002000,
+                json.dumps({"role": "assistant", "providerID": "openai", "modelID": "gpt-5.5"}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+            ("prt_user", "msg_user", 1706000001001, json.dumps({"type": "text", "text": "Read in.png"})),
+        )
+        conn.execute(
+            "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "prt_read",
+                "msg_assistant",
+                1706000002001,
+                json.dumps(
+                    {
+                        "type": "tool",
+                        "tool": "read",
+                        "state": {
+                            "status": "completed",
+                            "input": {"filePath": "C:\\tmp\\test_codex\\in.png", "limit": 2000, "offset": 1},
+                            "output": "Image read successfully",
+                            "attachments": [
+                                {
+                                    "type": "file",
+                                    "mime": "image/png",
+                                    "url": "data:image/png;base64,QUJDRA==",
+                                    "id": "prt_attachment",
+                                    "sessionID": session_id,
+                                    "messageID": "msg_assistant",
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", db_path)
+        monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
+
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="opencode")
+
+        assert len(sessions) == 1
+        tool_use = sessions[0]["messages"][1]["tool_uses"][0]
+        assert tool_use["status"] == "success"
+        assert tool_use["output"] == {
+            "text": "Image read successfully",
+            "raw": {
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "QUJDRA==",
+                        },
+                    }
+                ]
+            },
+        }
+
+    def test_parse_opencode_tool_error_output(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"opencode"})
+        db_path = tmp_path / "opencode.db"
+        conn = write_opencode_db(db_path)
+
+        session_id = "ses_tool_error"
+        cwd = "C:\\tmp\\test_codex"
+        conn.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            (session_id, cwd, 1706000000000, 1706000005000),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "msg_assistant",
+                session_id,
+                1706000002000,
+                json.dumps({"role": "assistant", "providerID": "openai", "modelID": "gpt-5.5"}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "prt_read_error",
+                "msg_assistant",
+                1706000002001,
+                json.dumps(
+                    {
+                        "type": "tool",
+                        "tool": "read",
+                        "state": {
+                            "status": "error",
+                            "input": {"filePath": "C:\\tmp\\test_codex\\in.png", "limit": 2000, "offset": 0},
+                            "error": "offset must be greater than or equal to 1",
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", db_path)
+        monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
+
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="opencode")
+
+        assert len(sessions) == 1
+        tool_use = sessions[0]["messages"][0]["tool_uses"][0]
+        assert tool_use["status"] == "error"
+        assert tool_use["output"] == {"text": "offset must be greater than or equal to 1"}
+
     def test_parse_project_sessions_reuses_single_db_connection(self, tmp_path, monkeypatch, mock_anonymizer):
         disable_other_providers(monkeypatch, tmp_path, keep={"opencode"})
         db_path = tmp_path / "opencode.db"
