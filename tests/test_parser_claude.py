@@ -854,6 +854,52 @@ class TestBuildToolResultMap:
         assert output["raw"]["content"][0]["type"] == "image"
         assert output["raw"]["content"][0]["source"]["data"] == image_data
 
+    def test_image_tool_result_drops_duplicate_tool_use_result_base64(self, mock_anonymizer):
+        image_data = "A" * 5000
+        entries = [
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-image",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "data": image_data,
+                                        "media_type": "image/jpeg",
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "toolUseResult": {
+                    "type": "image",
+                    "file": {
+                        "base64": image_data,
+                        "type": "image/jpeg",
+                        "originalSize": 1567019,
+                    },
+                },
+                "sourceToolAssistantUUID": "assistant-image",
+            }
+        ]
+
+        result = build_tool_result_map(entries)
+        raw = result["tu-image"]["output"]["raw"]
+
+        assert raw["content"][0]["source"]["data"] == image_data
+        assert raw["toolUseResult"]["type"] == "image"
+        assert raw["toolUseResult"]["file"] == {
+            "type": "image/jpeg",
+            "originalSize": 1567019,
+        }
+        assert raw["toolUseResult"]["sourceToolAssistantUUID"] == "assistant-image"
+
     def test_large_string_blob_content_preserved_verbatim_in_raw(self, mock_anonymizer):
         blob = "A" * 5000
         entries = [

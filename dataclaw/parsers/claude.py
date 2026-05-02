@@ -181,7 +181,7 @@ def build_tool_result_output(
     if text is None:
         text = extract_tool_result_text(entry.get("toolUseResult"))
 
-    raw_result = sanitize_tool_use_result(entry.get("toolUseResult"), text)
+    raw_result = sanitize_tool_use_result(entry.get("toolUseResult"), text, raw_content)
     source_tool_uuid = entry.get("sourceToolAssistantUUID")
     if isinstance(source_tool_uuid, str) and source_tool_uuid:
         if raw_result is None:
@@ -283,6 +283,7 @@ def normalize_tool_result_text(value: Any) -> str | None:
 def sanitize_tool_use_result(
     tool_use_result: Any,
     text: str | None,
+    raw_content: Any = None,
 ) -> dict[str, Any] | None:
     if tool_use_result is None:
         return None
@@ -295,7 +296,7 @@ def sanitize_tool_use_result(
             return None
         return {"text": sanitized_text}
 
-    sanitized = tool_use_result
+    sanitized = drop_duplicate_tool_result_blobs(tool_use_result, raw_content)
     sanitized = drop_redundant_result_fields(sanitized)
     sanitized = drop_duplicate_text_fields(sanitized, text)
     pruned = prune_empty_values(sanitized)
@@ -304,6 +305,39 @@ def sanitize_tool_use_result(
     if isinstance(pruned, dict):
         return pruned
     return {"value": pruned}
+
+
+def drop_duplicate_tool_result_blobs(tool_use_result: Any, raw_content: Any) -> Any:
+    duplicate_blobs = collect_tool_result_blobs(raw_content)
+    if not duplicate_blobs:
+        return tool_use_result
+    return drop_matching_base64_fields(tool_use_result, duplicate_blobs)
+
+
+def collect_tool_result_blobs(value: Any) -> set[str]:
+    blobs: set[str] = set()
+    if isinstance(value, dict):
+        source = value.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            data = source.get("data")
+            if isinstance(data, str) and data:
+                blobs.add(data)
+        for item in value.values():
+            blobs.update(collect_tool_result_blobs(item))
+    elif isinstance(value, list):
+        for item in value:
+            blobs.update(collect_tool_result_blobs(item))
+    return blobs
+
+
+def drop_matching_base64_fields(value: Any, duplicate_blobs: set[str], key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {k: drop_matching_base64_fields(v, duplicate_blobs, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [drop_matching_base64_fields(item, duplicate_blobs) for item in value]
+    if isinstance(value, str) and key == "base64" and value in duplicate_blobs:
+        return None
+    return value
 
 
 def drop_redundant_result_fields(value: Any) -> Any:
