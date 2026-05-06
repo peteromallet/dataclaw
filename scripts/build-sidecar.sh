@@ -23,7 +23,7 @@ mkdir -p app/src-tauri/binaries
 cp dist/dataclaw "app/src-tauri/binaries/dataclaw-${TRIPLE}"
 codesign --force --sign - "app/src-tauri/binaries/dataclaw-${TRIPLE}"
 
-SIDECAR_PATH="app/src-tauri/binaries/dataclaw-${TRIPLE}" python - <<'PY'
+SIDECAR_PATH="app/src-tauri/binaries/dataclaw-${TRIPLE}" "${PYTHON_BIN}" - <<'PY'
 import os
 import subprocess
 

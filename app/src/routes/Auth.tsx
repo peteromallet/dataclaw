@@ -109,9 +109,9 @@ export default function Auth() {
       <div className="card">
         <h2>Token</h2>
         <p className="muted">
-          Paste a Hugging Face access token with <strong>write</strong> permission. It is stored in
-          macOS Keychain and mirrored to <code>~/.cache/huggingface/token</code> (mode 600) so the CLI
-          and scheduled runs find it. Get a token at{" "}
+          Paste a Hugging Face access token with <strong>write</strong> permission. It is stored at{" "}
+          <code>~/.cache/huggingface/token</code> (mode 600) so the CLI and scheduled runs find it.
+          Get a token at{" "}
           <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">
             huggingface.co/settings/tokens
           </a>

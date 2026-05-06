@@ -307,7 +307,6 @@ fn base_env() -> HashMap<String, String> {
         "LC_CTYPE",
         "USER",
         "TMPDIR",
-        "HF_TOKEN",
         "HF_HOME",
         "HUGGINGFACE_HUB_CACHE",
     ] {

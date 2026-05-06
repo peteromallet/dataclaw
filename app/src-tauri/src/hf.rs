@@ -3,13 +3,7 @@ use std::{collections::HashMap, fs};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-const SERVICE: &str = "io.dataclaw.app";
-const ACCOUNT: &str = "hf_token";
 const WHOAMI_URL: &str = "https://huggingface.co/api/whoami-v2";
-
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| e.to_string())
-}
 
 pub fn hf_token_path() -> std::path::PathBuf {
     dirs::home_dir()
@@ -19,7 +13,7 @@ pub fn hf_token_path() -> std::path::PathBuf {
         .join("token")
 }
 
-fn write_mirror(token: &str) -> Result<(), String> {
+fn write_token_file(token: &str) -> Result<(), String> {
     let path = hf_token_path();
     let parent = path
         .parent()
@@ -35,7 +29,7 @@ fn write_mirror(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn read_mirror() -> Option<String> {
+fn read_token_file() -> Option<String> {
     let token = fs::read_to_string(hf_token_path()).ok()?;
     let trimmed = token.trim();
     if trimmed.is_empty() {
@@ -45,27 +39,11 @@ fn read_mirror() -> Option<String> {
     }
 }
 
-fn delete_mirror() -> Result<(), String> {
+fn delete_token_file() -> Result<(), String> {
     match fs::remove_file(hf_token_path()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.to_string()),
-    }
-}
-
-fn try_save_keychain(token: &str) {
-    if let Ok(entry) = entry() {
-        let _ = entry.set_password(token);
-    }
-}
-
-fn try_load_keychain() -> Option<String> {
-    entry().ok()?.get_password().ok()
-}
-
-fn try_delete_keychain() {
-    if let Ok(entry) = entry() {
-        let _ = entry.delete_credential();
     }
 }
 
@@ -75,24 +53,18 @@ pub fn hf_save_token(token: String) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("token is empty".into());
     }
-    write_mirror(trimmed)?;
-    try_save_keychain(trimmed);
+    write_token_file(trimmed)?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn hf_load_token() -> Result<Option<String>, String> {
-    if let Some(token) = read_mirror() {
-        return Ok(Some(token));
-    }
-    Ok(try_load_keychain())
+    Ok(read_token_file())
 }
 
 #[tauri::command]
 pub fn hf_delete_token() -> Result<(), String> {
-    try_delete_keychain();
-    let _ = delete_mirror();
-    Ok(())
+    delete_token_file()
 }
 
 pub async fn run_with_token(app: &AppHandle, args: &[&str]) -> Result<Value, String> {
@@ -148,7 +120,7 @@ pub async fn hf_whoami(_app: AppHandle) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_mirror, hf_token_path, write_mirror};
+    use super::{delete_token_file, hf_token_path, write_token_file};
     use std::{
         fs,
         sync::Mutex,
@@ -178,11 +150,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn write_mirror_writes_token_with_chmod_600() {
+    fn write_token_file_writes_token_with_chmod_600() {
         use std::os::unix::fs::PermissionsExt;
 
         with_temp_home(|| {
-            write_mirror("hf_test").unwrap();
+            write_token_file("hf_test").unwrap();
             let path = hf_token_path();
             assert_eq!(fs::read_to_string(&path).unwrap(), "hf_test");
             let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
@@ -191,12 +163,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_mirror_removes_file() {
+    fn delete_token_file_removes_file() {
         with_temp_home(|| {
-            write_mirror("hf_test").unwrap();
+            write_token_file("hf_test").unwrap();
             let path = hf_token_path();
             assert!(path.exists());
-            delete_mirror().unwrap();
+            delete_token_file().unwrap();
             assert!(!path.exists());
         });
     }
