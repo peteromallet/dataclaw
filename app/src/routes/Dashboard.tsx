@@ -28,6 +28,7 @@ const STAGES = [
   { key: "export", label: "Export" },
   { key: "mechanical_pii", label: "PII scan" },
   { key: "model_privacy", label: "Model privacy" },
+  { key: "confirm", label: "Confirm" },
   { key: "push", label: "Upload" },
   { key: "finish", label: "Finish" }
 ];
@@ -52,6 +53,53 @@ function pick(status: JsonObject | null, keys: string[]) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sidecarPayload(message: string): JsonObject | null {
+  const match = message.match(/:\s*(\{[\s\S]*\})\s*\nstderr:/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]) as JsonObject;
+  } catch {
+    return null;
+  }
+}
+
+function friendlyRunError(message: string) {
+  const payload = sidecarPayload(message);
+  const error = asString(payload?.error);
+  if (!error) return message;
+  const hint = asString(payload?.hint);
+  return hint ? `${error} ${hint}` : error;
+}
+
+function progressFromRunError(message: string, startedAtMs: number): ProgressState {
+  const payload = sidecarPayload(message);
+  const now = Date.now();
+  const blockedOn = asString(payload?.blocked_on_step);
+  const nextCommand = asString(payload?.next_command);
+  const isBlocked = Boolean(blockedOn) || message.includes("requires a freshly confirmed review") || message.includes("dataclaw confirm");
+  const detail = friendlyRunError(message);
+  const metrics = [
+    metric(isBlocked ? "Blocked on" : "Error", blockedOn ?? "Run Now"),
+    metric("Next command", nextCommand)
+  ].filter((item): item is { label: string; value: string } => Boolean(item));
+
+  return {
+    runId: "",
+    stageKey: isBlocked ? "review" : "finish",
+    stageLabel: isBlocked ? "Review required" : "Failed",
+    stageIndex: isBlocked ? 4 : STAGES.length - 1,
+    totalStages: STAGES.length,
+    detail,
+    percent: null,
+    metrics,
+    nextStages: isBlocked ? ["Confirm", "Upload"] : [],
+    status: isBlocked ? "blocked" : "failed",
+    startedAtMs,
+    updatedAtMs: now,
+    eventCount: 1
+  };
 }
 
 function asObject(value: unknown): JsonObject | null {
@@ -163,6 +211,7 @@ function stageForMessage(msg: string, phase: string) {
   if (msg.startsWith("token_count_")) return "export";
   if (msg.startsWith("export_")) return "export";
   if (msg.startsWith("push_")) return "push";
+  if (msg.startsWith("auto_confirm_")) return "confirm";
   if (msg.startsWith("resolve_export_inputs_")) return "discover";
   if (msg === "auto_gate_checked" || phase === "gate") return "gate";
   if (msg === "auto_run_started" || phase === "start") return "start";
@@ -240,6 +289,16 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
       detail = "Checked repo, token, source, and privacy policy";
       metrics.push(metric("Privacy", extra.privacy_filter_enabled ? "on" : "off"));
       metrics.push(metric("Policy", extra.policy));
+      break;
+    case "auto_confirm_started":
+      detail = "Confirming automated review";
+      metrics.push(metric("File", compactPath(extra.file) ?? extra.file));
+      break;
+    case "auto_confirm_finished":
+      detail = "Automated review confirmed";
+      percent = 100;
+      metrics.push(metric("Sessions", extra.total_sessions, "0"));
+      metrics.push(metric("File size", extra.file_size));
       break;
     case "resolve_export_inputs_started":
       detail = "Loading configured project selection";
@@ -668,9 +727,10 @@ export default function Dashboard() {
       const summary = pick(result, ["result", "stage"]);
       setRunMessage(typeof summary === "string" ? `Result: ${summary}` : "Run complete.");
     } catch (err) {
-      const message = errorMessage(err);
+      const rawMessage = errorMessage(err);
+      const message = friendlyRunError(rawMessage);
       setError(message);
-      setProgress((current) => current ? { ...current, status: "failed", detail: message, updatedAtMs: Date.now() } : current);
+      setProgress((current) => current ? progressFromRunError(rawMessage, current.startedAtMs) : progressFromRunError(rawMessage, startedAtMs));
     } finally {
       runInFlightRef.current = false;
       activeRunRef.current = false;

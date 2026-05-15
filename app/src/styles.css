@@ -57,6 +57,7 @@ main {
 
 nav {
   display: flex;
+  align-items: center;
   gap: 4px;
   padding: 8px 12px;
   background: var(--panel);
@@ -81,6 +82,14 @@ nav a:hover {
 nav a.active {
   background: var(--accent);
   color: white;
+}
+
+.nav-logo {
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  object-fit: contain;
+  flex: 0 0 auto;
 }
 
 section.page {

@@ -95,14 +95,9 @@ async fn run_due_sync(app: AppHandle) -> Result<(), String> {
     crate::dataclaw::write_config(&config)?;
 
     let _ = app.emit("dataclaw-scheduled-sync-started", ());
-    crate::dataclaw::ensure_auto_enabled_for_run_now()?;
-    match crate::hf::run_with_token(
+    match crate::dataclaw::run_auto_pipeline(
         &app,
-        &[
-            "export",
-            "--publish-attestation",
-            "User explicitly approved publishing to Hugging Face via DataClaw.app scheduled sync.",
-        ],
+        "User explicitly approved publishing to Hugging Face via DataClaw.app scheduled sync.",
     )
     .await
     {

@@ -13,6 +13,7 @@ import Auth from "./routes/Auth";
 import Config from "./routes/Config";
 import Dashboard from "./routes/Dashboard";
 import Logs from "./routes/Logs";
+import appIcon from "../src-tauri/icons/icon.png";
 
 const navItems = [
   ["Dashboard", "/dashboard"],
@@ -85,6 +86,7 @@ function AppShell() {
             {label}
           </NavLink>
         ))}
+        <img className="nav-logo" src={appIcon} alt="DataClaw" />
       </nav>
       <Routes>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
