@@ -208,6 +208,29 @@ class TestMergeJsonlUnion:
         assert merged == {"r1", "r2"}
         assert stats.merged_total >= stats.remote_total
 
+    def test_duplicate_remote_keys_do_not_trip_invariant(self, tmp_path):
+        # The old non-deduping uploader could leave duplicate (source, session_id)
+        # lines in the remote. remote_total must count UNIQUE keys, not raw lines,
+        # so dedup never makes merged_total < remote_total (which would permanently
+        # block publishing).
+        remote = tmp_path / "remote.jsonl"
+        local = tmp_path / "local.jsonl"
+        out = tmp_path / "merged.jsonl"
+        _write_jsonl(
+            remote,
+            [
+                {"source": "claude", "session_id": "r1", "messages": [{"role": "user"}]},
+                {"source": "claude", "session_id": "r1", "messages": [{"role": "user"}]},  # dup line
+            ],
+        )
+        _write_jsonl(local, [])
+
+        stats = merge_jsonl_union(remote, local, out, redact_fn=_identity)
+
+        assert stats.remote_total == 1  # unique keys, not 2 raw lines
+        assert stats.merged_total == 1
+        assert stats.merged_total >= stats.remote_total  # invariant holds, no false abort
+
     def test_changelog_line_format(self):
         stats = MergeStats(
             remote_total=3, local_total=2, merged_total=4, added=1, updated=1, carried_forward=2, unchanged=0

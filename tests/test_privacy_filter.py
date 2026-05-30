@@ -366,6 +366,28 @@ def test_read_privacy_filter_config_defaults(monkeypatch):
     assert cfg.model is None
 
 
+def test_carry_forward_redactor_applies_model_filter(monkeypatch):
+    # Carried-forward remote records must get the model PII pass too, not just
+    # mechanical redaction -- otherwise the bulk of a steady-state push ships
+    # without model scrubbing.
+    monkeypatch.setattr(_exp, "_read_privacy_filter_config", lambda: _exp._PrivacyFilterConfig(enabled=True))
+
+    seen = []
+
+    def fake_model_filter(session, pf_config):
+        seen.append(pf_config.enabled)
+        session["_model_filtered"] = True
+        return session
+
+    monkeypatch.setattr(_exp, "_apply_model_privacy_filter", fake_model_filter)
+
+    redact_fn = _exp._build_carry_forward_redactor({"redact_strings": [], "redact_usernames": []})
+    out = redact_fn({"source": "claude", "session_id": "r1", "messages": [{"role": "user", "content": "hi"}]})
+
+    assert out.get("_model_filtered") is True
+    assert seen == [True]
+
+
 def _match_pipe(entity: str, needle: str):
     def pipe(text):
         start = text.find(needle)

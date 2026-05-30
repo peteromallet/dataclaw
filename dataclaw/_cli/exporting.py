@@ -760,6 +760,10 @@ def _build_carry_forward_redactor(redaction: dict | None):
     redaction = redaction or {}
     extra_usernames = list(redaction.get("redact_usernames") or [])
     custom_strings = list(redaction.get("redact_strings") or [])
+    # Carried-forward records must get the SAME passes fresh local sessions get,
+    # including the model privacy filter when it is enabled — otherwise the bulk of
+    # a steady-state push (carry-forwards) would ship with mechanical redaction only.
+    pf_config = _read_privacy_filter_config()
 
     def redact_fn(record: dict) -> dict:
         # A fresh Anonymizer per record matches the per-worker construction and keeps
@@ -772,6 +776,9 @@ def _build_carry_forward_redactor(redaction: dict | None):
             custom_strings=custom_strings,
             non_anon_string_keys=get_provider_non_anon_string_keys(source),
         )
+        # Mirror the export loop: model PII pass after mechanical redaction. No-op
+        # (and idempotent) when the filter is disabled or unavailable.
+        redacted = _apply_model_privacy_filter(redacted, pf_config)
         return redacted
 
     return redact_fn

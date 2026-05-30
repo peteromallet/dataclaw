@@ -239,7 +239,12 @@ def merge_jsonl_union(
     remote_records = _load_raw_records(remote_path)
     local_records = _load_raw_records(local_path)
 
-    stats = MergeStats(remote_total=len(remote_records), local_total=len(local_records))
+    # Totals are counted by UNIQUE merge key, not raw line count. A remote file
+    # written by the old non-deduping uploader can contain duplicate
+    # (source, session_id) lines; counting raw lines would make merged_total <
+    # remote_total trip the union-invariant guard and permanently block publishing
+    # even though no session was dropped. (Set precisely after the build below.)
+    stats = MergeStats()
 
     # Build winning record per key, tracking origin (which side won) and which sides
     # the key appeared on, so we can classify the change and re-redact correctly.
@@ -296,6 +301,8 @@ def merge_jsonl_union(
             handle.write(b"\n")
             merged_total += 1
 
+    stats.remote_total = len(in_remote)
+    stats.local_total = len(in_local)
     stats.merged_total = merged_total
     return stats
 
