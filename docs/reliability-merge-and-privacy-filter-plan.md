@@ -160,6 +160,32 @@ Bugs / gaps (line refs on the `5d0a741` version):
    and **harden secret patterns + salt the anonymizer**. (From the first audit.)
 5. Real cross-process run lock; batch the 3 HF uploads into one `create_commit`.
 
+## Merge-quality review (4-perspective sense-check) + fixes shipped
+
+A focused review of the update/merge mechanism (correctness, reliability, elegance, scale)
+found the design **fundamentally right and reliable** (fail-closed, convergent, self-healing,
+optimistic-concurrency correct) but flagged a scale problem the carry-forward re-redaction fix
+introduced. Shipped in `619ef63`:
+
+- **Keystone — redaction-policy stamp.** Each record is stamped with
+  `redaction_policy_version()` (hash of redact strings/usernames + model config + code
+  version). The carry-forward redactor skips re-redaction for records already stamped current,
+  re-redacting only stale ones. Turns a steady-state push from **O(total history)** (was
+  re-running the PII model over the whole dataset every push) into **~O(new data)**, while
+  preserving tighten-only (policy change bumps the version → one-time full re-scan).
+- **Skip-unchanged.** If the merged file is byte-identical to the downloaded remote, skip all
+  uploads — no more empty-commit churn from the metadata timestamp.
+- **Corrupt-line guard.** `_load_raw_records` preserves unparseable JSONL lines verbatim
+  instead of raising — a corrupt remote line can't drop data or wedge all future pushes.
+
+### Known/deferred from the merge review (not yet done)
+- **Memory**: merge materializes both full files in RAM → OOM risk past ~1–2 GB (streaming merge).
+- **Network**: full re-download + re-upload every push (sharding — larger change).
+- **Compaction semantics**: "more messages wins" keeps the stale pre-compaction copy when a
+  conversation was legitimately summarized (keeps data, doesn't lose it; judgment call).
+- **Atomicity**: 3 uploads are separate commits (self-heals; `create_commit` would make atomic).
+- Model-load-status publish-time signal; `git_branch` redaction; dead UI telemetry. (From earlier audits.)
+
 ## Open verification items (couldn't run live)
 - `huggingface_hub` version: confirm `upload_file(parent_commit=...)` support and that conflicts
   surface as HTTP 412; confirm `hf_hub_download` error classes.
