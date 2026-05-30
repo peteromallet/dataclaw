@@ -111,12 +111,17 @@ Bugs / gaps (line refs on the `5d0a741` version):
 - Minor: cross-chunk-boundary entities may be split/under-redacted (low severity); `min_score`
   discarded in `_load` then re-applied in `scan_text` (cosmetic); `dtype=` kwarg needs transformers ≥4.45.
 
-### Model recommendation (drop-in for the existing pipeline call)
-- **Default: `iiiorg/piiranha-v1-detect-personal-information`** — MIT, ~280 MB, DeBERTa
-  token-classification, MPS-ok, drops in with **zero adapter code**.
-- **Fallback: `lakshyakh93/deberta_finetuned_pii`** — broader labels, also a pure drop-in.
-- Avoid GLiNER / Presidio for v1 (need adapters / heavier deps). Verify Hub availability and that
-  `aggregation_strategy="simple"` yields `start`/`end` offsets before committing.
+### Model decision (drop-in for the existing pipeline call)
+- **Default: `openai/privacy-filter`** — the model the original implementation
+  intended. It is a REAL, published model (Apache-2.0, ~300k downloads,
+  token-classification, safetensors + ONNX) — the earlier "placeholder that doesn't
+  exist" claim was WRONG. It drops into the existing
+  `pipeline(task="token-classification", aggregation_strategy="simple")` call with no
+  adapter code and detects PII as intended.
+- Overridable via the `privacy_filter.model` config key / `DATACLAW_PRIVACY_FILTER_MODEL`
+  env var, so swapping is trivial.
+- Alternatives if ever needed: `lakshyakh93/deberta_finetuned_pii` (MIT, broad labels,
+  pure drop-in). Avoid GLiNER / Presidio (need adapters / heavier deps).
 
 ### Rewiring against HEAD `_cli` structure
 - **Mutation happens only at EXPORT time**, inline per session, right after

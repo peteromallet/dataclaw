@@ -155,6 +155,88 @@ class _WorkerSessionResult:
     skipped_model: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _PrivacyFilterConfig:
+    """Resolved model privacy-filter settings.
+
+    Read once at export time and passed by value into the parallel worker
+    process (which has no access to the parent's loaded config), mirroring how
+    ``custom_strings``/``extra_usernames`` are already threaded through.
+    """
+
+    enabled: bool = False
+    device: str | None = None
+    min_score: float = 0.85
+    model: str | None = None
+
+
+def _read_privacy_filter_config() -> _PrivacyFilterConfig:
+    """Read the free-form ``privacy_filter.*`` config block (no schema).
+
+    Defaults: ``enabled=False``, ``device=auto`` (resolved lazily inside the
+    filter), ``min_score=0.85``, ``model=None`` (filter falls back to its
+    default PII model id / env override).
+    """
+    try:
+        from ..config import load_config
+        cfg = load_config()
+    except Exception:  # pragma: no cover - config IO is best-effort
+        return _PrivacyFilterConfig()
+    pf_cfg = cfg.get("privacy_filter") if isinstance(cfg, dict) else None
+    if not isinstance(pf_cfg, dict):
+        return _PrivacyFilterConfig()
+
+    enabled = bool(pf_cfg.get("enabled", False))
+    device = pf_cfg.get("device")
+    device = device.strip() if isinstance(device, str) and device.strip() else None
+    min_score = pf_cfg.get("min_score", 0.85)
+    try:
+        min_score = float(min_score)
+    except (TypeError, ValueError):
+        min_score = 0.85
+    model = pf_cfg.get("model")
+    model = model.strip() if isinstance(model, str) and model.strip() else None
+    return _PrivacyFilterConfig(enabled=enabled, device=device, min_score=min_score, model=model)
+
+
+_PF_WARNED = False
+
+
+def _apply_model_privacy_filter(session: dict, pf_config: _PrivacyFilterConfig) -> dict:
+    """Run the optional model PII filter over an already-redacted session.
+
+    Graceful degradation: this runs AFTER ``secrets.transform_session`` (the
+    mechanical redaction has already happened and is preserved). If the model
+    stack (torch/transformers/the model download) is unavailable for any
+    reason, warn once and return the session unchanged — the model stage is
+    additive safety, never a hard dependency for a successful export.
+    """
+    global _PF_WARNED
+    if not pf_config.enabled:
+        return session
+    try:
+        # Lazy import so importing this module / the CLI never pulls in torch.
+        from .. import privacy_filter
+        if not privacy_filter.is_available():
+            raise RuntimeError("torch/transformers not installed")
+        redacted, _findings = privacy_filter.redact_session(
+            session,
+            device=pf_config.device,
+            min_score=pf_config.min_score,
+            model=pf_config.model,
+        )
+        return redacted
+    except Exception as exc:  # noqa: BLE001 - never let the model stage abort export
+        if not _PF_WARNED:
+            _PF_WARNED = True
+            print(
+                f"  Warning: model privacy filter skipped ({exc}); "
+                "continuing with mechanical redaction only.",
+                file=sys.stderr,
+            )
+        return session
+
+
 def _export_extra_usernames(anonymizer: Anonymizer) -> tuple[str, ...]:
     extra = getattr(anonymizer, "_extra_dict", {})
     if isinstance(extra, dict):
@@ -180,7 +262,7 @@ def _can_parallelize_export(parse_project_sessions_fn, task_count: int, workers:
 
 
 def _export_session_task_worker(payload) -> _WorkerSessionResult:
-    task, include_thinking, custom_strings, extra_usernames = payload
+    task, include_thinking, custom_strings, extra_usernames, pf_config = payload
     anonymizer = Anonymizer(extra_usernames=list(extra_usernames))
     try:
         session = parse_export_session_task(task, anonymizer, include_thinking)
@@ -205,6 +287,8 @@ def _export_session_task_worker(payload) -> _WorkerSessionResult:
         custom_strings=custom_strings,
         non_anon_string_keys=get_provider_non_anon_string_keys(task.source),
     )
+    # Optional model privacy filter runs AFTER mechanical redaction, before hashing.
+    session = _apply_model_privacy_filter(session, pf_config)
     fingerprint = _gemini_dedupe_fingerprint(session, task.source)
     stats = session.get("stats", {})
     input_tokens, output_tokens = _token_totals(stats)
@@ -260,6 +344,7 @@ def _export_to_jsonl_serial(
     default_source: str,
     include_thinking: bool,
     custom_strings: list[str] | None,
+    pf_config: _PrivacyFilterConfig,
 ) -> dict:
     total = 0
     skipped = 0
@@ -296,6 +381,8 @@ def _export_to_jsonl_serial(
                 custom_strings=custom_strings,
                 non_anon_string_keys=get_provider_non_anon_string_keys(source),
             )
+            # Optional model privacy filter runs AFTER mechanical redaction, before hashing.
+            session = _apply_model_privacy_filter(session, pf_config)
             total_redactions += n_redacted
 
             fingerprint = _gemini_dedupe_fingerprint(session, source)
@@ -358,6 +445,7 @@ def _export_to_jsonl_parallel(
     tasks: list[ExportSessionTask],
     workers: int,
     anonymizer: Anonymizer,
+    pf_config: _PrivacyFilterConfig,
 ) -> dict:
     total = 0
     skipped = 0
@@ -398,7 +486,7 @@ def _export_to_jsonl_parallel(
             state = project_state[task.project_index]
             if state["start_time"] is None:
                 state["start_time"] = time.perf_counter()
-            payload = (task, include_thinking, custom_strings, extra_usernames)
+            payload = (task, include_thinking, custom_strings, extra_usernames, pf_config)
             future = executor.submit(_export_session_task_worker, payload)
             pending[future] = order_index
 
@@ -495,6 +583,11 @@ def export_to_jsonl(
     except OSError as e:
         emit_blocked_error(f"cannot write to {output_path}: {e}")
 
+    pf_config = _read_privacy_filter_config()
+    if pf_config.enabled:
+        # stderr so it doesn't interleave with the per-project stdout summaries.
+        print("  Model privacy filter enabled; will run after mechanical redaction.", file=sys.stderr)
+
     with fh as f:
         if parse_project_sessions_fn is iter_project_sessions:
             tasks = build_export_session_tasks(selected_projects, default_source)
@@ -508,6 +601,7 @@ def export_to_jsonl(
                     tasks,
                     resolved_workers,
                     anonymizer,
+                    pf_config,
                 )
         return _export_to_jsonl_serial(
             selected_projects,
@@ -517,6 +611,7 @@ def export_to_jsonl(
             default_source,
             include_thinking,
             custom_strings,
+            pf_config,
         )
 
 
