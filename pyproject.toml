@@ -38,6 +38,14 @@ dataclaw = "dataclaw.cli:main"
 [project.optional-dependencies]
 dev = ["pre-commit", "pytest", "ruff"]
 build = ["pyinstaller>=6.10", "keyring>=25", "secretstorage>=3.3; sys_platform == 'linux'"]
+# Optional model-based PII filter (power-user / first-run model download).
+# Deliberately NOT a core dep and NOT bundled in the Mac sidecar by default.
+pii = ["transformers>=4.57", "torch>=2.3", "accelerate", "tokenizers"]
+
+[tool.pytest.ini_options]
+markers = [
+    "pii: tests that require the optional model PII stack (transformers/torch); skipped when absent",
+]
 
 [tool.ruff]
 line-length = 120

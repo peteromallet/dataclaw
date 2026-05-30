@@ -223,10 +223,11 @@ class TestWorkflowGateMessages:
             lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not regenerate jsonl")),
         )
 
-        def fake_push(path, repo_id, meta):
+        def fake_push(path, repo_id, meta, redaction=None):
             pushed["path"] = path
             pushed["repo_id"] = repo_id
             pushed["meta"] = meta
+            pushed["redaction"] = redaction
 
         monkeypatch.setattr("dataclaw.cli.push_to_huggingface", fake_push)
         monkeypatch.setattr(

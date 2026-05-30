@@ -17,6 +17,7 @@ from typing import Any
 from .. import _json as json
 from .._workers import configured_workers
 from ..anonymizer import Anonymizer
+from ..jsonl_tools import merge_jsonl_union
 from ..parser import iter_project_sessions
 from ..providers import get_provider_non_anon_string_keys
 from ..secrets import transform_session
@@ -154,6 +155,115 @@ class _WorkerSessionResult:
     skipped_model: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _PrivacyFilterConfig:
+    """Resolved model privacy-filter settings.
+
+    Read once at export time and passed by value into the parallel worker
+    process (which has no access to the parent's loaded config), mirroring how
+    ``custom_strings``/``extra_usernames`` are already threaded through.
+    """
+
+    enabled: bool = False
+    device: str | None = None
+    min_score: float = 0.85
+    model: str | None = None
+
+
+def _read_privacy_filter_config() -> _PrivacyFilterConfig:
+    """Read the free-form ``privacy_filter.*`` config block (no schema).
+
+    Defaults: ``enabled=False``, ``device=auto`` (resolved lazily inside the
+    filter), ``min_score=0.85``, ``model=None`` (filter falls back to its
+    default PII model id / env override).
+    """
+    try:
+        from ..config import load_config
+        cfg = load_config()
+    except Exception:  # pragma: no cover - config IO is best-effort
+        return _PrivacyFilterConfig()
+    pf_cfg = cfg.get("privacy_filter") if isinstance(cfg, dict) else None
+    if not isinstance(pf_cfg, dict):
+        return _PrivacyFilterConfig()
+
+    enabled = bool(pf_cfg.get("enabled", False))
+    device = pf_cfg.get("device")
+    device = device.strip() if isinstance(device, str) and device.strip() else None
+    min_score = pf_cfg.get("min_score", 0.85)
+    try:
+        min_score = float(min_score)
+    except (TypeError, ValueError):
+        min_score = 0.85
+    model = pf_cfg.get("model")
+    model = model.strip() if isinstance(model, str) and model.strip() else None
+    return _PrivacyFilterConfig(enabled=enabled, device=device, min_score=min_score, model=model)
+
+
+# Bump when the redaction CODE changes in a way that should force re-scanning
+# already-published records (independent of user config).
+_REDACTION_CODE_VERSION = "1"
+_REDACTION_POLICY_KEY = "redaction_policy"
+
+
+def redaction_policy_version(custom_strings, extra_usernames, pf_config: _PrivacyFilterConfig) -> str:
+    """Stable fingerprint of the CURRENT redaction policy.
+
+    Records are stamped with this on export. The merge re-redacts a
+    carried-forward record only when its stamp differs from the current version,
+    so a steady-state push is ~O(new data) instead of re-running redaction (and
+    the PII model) over the entire history every push. Tightening the policy
+    (new redact strings/usernames, model change, code bump) changes the version,
+    which forces a one-time full re-scan -- preserving the tighten-only guarantee.
+    """
+    parts = [
+        _REDACTION_CODE_VERSION,
+        "\x1f".join(sorted(custom_strings or [])),
+        "\x1f".join(sorted(extra_usernames or [])),
+        "1" if pf_config.enabled else "0",
+        (pf_config.model or "") if pf_config.enabled else "",
+        format(pf_config.min_score, ".4f") if pf_config.enabled else "",
+    ]
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+_PF_WARNED = False
+
+
+def _apply_model_privacy_filter(session: dict, pf_config: _PrivacyFilterConfig) -> dict:
+    """Run the optional model PII filter over an already-redacted session.
+
+    Graceful degradation: this runs AFTER ``secrets.transform_session`` (the
+    mechanical redaction has already happened and is preserved). If the model
+    stack (torch/transformers/the model download) is unavailable for any
+    reason, warn once and return the session unchanged — the model stage is
+    additive safety, never a hard dependency for a successful export.
+    """
+    global _PF_WARNED
+    if not pf_config.enabled:
+        return session
+    try:
+        # Lazy import so importing this module / the CLI never pulls in torch.
+        from .. import privacy_filter
+        if not privacy_filter.is_available():
+            raise RuntimeError("torch/transformers not installed")
+        redacted, _findings = privacy_filter.redact_session(
+            session,
+            device=pf_config.device,
+            min_score=pf_config.min_score,
+            model=pf_config.model,
+        )
+        return redacted
+    except Exception as exc:  # noqa: BLE001 - never let the model stage abort export
+        if not _PF_WARNED:
+            _PF_WARNED = True
+            print(
+                f"  Warning: model privacy filter skipped ({exc}); "
+                "continuing with mechanical redaction only.",
+                file=sys.stderr,
+            )
+        return session
+
+
 def _export_extra_usernames(anonymizer: Anonymizer) -> tuple[str, ...]:
     extra = getattr(anonymizer, "_extra_dict", {})
     if isinstance(extra, dict):
@@ -179,7 +289,7 @@ def _can_parallelize_export(parse_project_sessions_fn, task_count: int, workers:
 
 
 def _export_session_task_worker(payload) -> _WorkerSessionResult:
-    task, include_thinking, custom_strings, extra_usernames = payload
+    task, include_thinking, custom_strings, extra_usernames, pf_config = payload
     anonymizer = Anonymizer(extra_usernames=list(extra_usernames))
     try:
         session = parse_export_session_task(task, anonymizer, include_thinking)
@@ -204,7 +314,12 @@ def _export_session_task_worker(payload) -> _WorkerSessionResult:
         custom_strings=custom_strings,
         non_anon_string_keys=get_provider_non_anon_string_keys(task.source),
     )
+    # Optional model privacy filter runs AFTER mechanical redaction, before hashing.
+    session = _apply_model_privacy_filter(session, pf_config)
     fingerprint = _gemini_dedupe_fingerprint(session, task.source)
+    # Stamp the current redaction policy so future merges can skip re-redacting
+    # this record while it stays current. After fingerprinting so dedup is stable.
+    session[_REDACTION_POLICY_KEY] = redaction_policy_version(custom_strings, extra_usernames, pf_config)
     stats = session.get("stats", {})
     input_tokens, output_tokens = _token_totals(stats)
     has_token_stats = isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats)
@@ -259,6 +374,7 @@ def _export_to_jsonl_serial(
     default_source: str,
     include_thinking: bool,
     custom_strings: list[str] | None,
+    pf_config: _PrivacyFilterConfig,
 ) -> dict:
     total = 0
     skipped = 0
@@ -268,6 +384,7 @@ def _export_to_jsonl_serial(
     total_input_tokens = 0
     total_output_tokens = 0
     seen_fingerprints: set[str] = set()
+    policy_version = redaction_policy_version(custom_strings, _export_extra_usernames(anonymizer), pf_config)
 
     for project in selected_projects:
         print(f"  Parsing {project['display_name']}...", end="", flush=True)
@@ -295,6 +412,8 @@ def _export_to_jsonl_serial(
                 custom_strings=custom_strings,
                 non_anon_string_keys=get_provider_non_anon_string_keys(source),
             )
+            # Optional model privacy filter runs AFTER mechanical redaction, before hashing.
+            session = _apply_model_privacy_filter(session, pf_config)
             total_redactions += n_redacted
 
             fingerprint = _gemini_dedupe_fingerprint(session, source)
@@ -304,6 +423,7 @@ def _export_to_jsonl_serial(
             if fingerprint is not None:
                 seen_fingerprints.add(fingerprint)
 
+            session[_REDACTION_POLICY_KEY] = policy_version
             fh.write(json.dumps_bytes(session))
             fh.write(b"\n")
             total += 1
@@ -357,6 +477,7 @@ def _export_to_jsonl_parallel(
     tasks: list[ExportSessionTask],
     workers: int,
     anonymizer: Anonymizer,
+    pf_config: _PrivacyFilterConfig,
 ) -> dict:
     total = 0
     skipped = 0
@@ -397,7 +518,7 @@ def _export_to_jsonl_parallel(
             state = project_state[task.project_index]
             if state["start_time"] is None:
                 state["start_time"] = time.perf_counter()
-            payload = (task, include_thinking, custom_strings, extra_usernames)
+            payload = (task, include_thinking, custom_strings, extra_usernames, pf_config)
             future = executor.submit(_export_session_task_worker, payload)
             pending[future] = order_index
 
@@ -494,6 +615,11 @@ def export_to_jsonl(
     except OSError as e:
         emit_blocked_error(f"cannot write to {output_path}: {e}")
 
+    pf_config = _read_privacy_filter_config()
+    if pf_config.enabled:
+        # stderr so it doesn't interleave with the per-project stdout summaries.
+        print("  Model privacy filter enabled; will run after mechanical redaction.", file=sys.stderr)
+
     with fh as f:
         if parse_project_sessions_fn is iter_project_sessions:
             tasks = build_export_session_tasks(selected_projects, default_source)
@@ -507,6 +633,7 @@ def export_to_jsonl(
                     tasks,
                     resolved_workers,
                     anonymizer,
+                    pf_config,
                 )
         return _export_to_jsonl_serial(
             selected_projects,
@@ -516,6 +643,7 @@ def export_to_jsonl(
             default_source,
             include_thinking,
             custom_strings,
+            pf_config,
         )
 
 
@@ -648,8 +776,87 @@ def _build_breakdown_table(label: str, breakdown: object) -> str:
     return "\n".join(lines)
 
 
-def push_to_huggingface(jsonl_path: Path, repo_id: str, meta: dict) -> None:
+REMOTE_CONVERSATIONS_FILE = "conversations.jsonl"
+_MERGE_MAX_ATTEMPTS = 5
+
+
+def _build_carry_forward_redactor(redaction: dict | None):
+    """Build a ``redact_fn(record) -> record`` matching the export-time pipeline.
+
+    Carried-forward remote records are re-redacted through the CURRENT redaction
+    policy (idempotent for already-current records) so old-policy redaction is
+    never republished. The Anonymizer + ``transform_session`` call are constructed
+    exactly the way the export loop builds them (``_export_to_jsonl_serial`` /
+    ``_export_session_task_worker``).
+    """
+    redaction = redaction or {}
+    extra_usernames = list(redaction.get("redact_usernames") or [])
+    custom_strings = list(redaction.get("redact_strings") or [])
+    # Carried-forward records must get the SAME passes fresh local sessions get,
+    # including the model privacy filter when it is enabled — otherwise the bulk of
+    # a steady-state push (carry-forwards) would ship with mechanical redaction only.
+    pf_config = _read_privacy_filter_config()
+    policy_version = redaction_policy_version(custom_strings, extra_usernames, pf_config)
+
+    def redact_fn(record: dict) -> dict:
+        # Keystone optimization: a record already redacted under the CURRENT policy
+        # needs no re-work. Skip it (return verbatim) so a steady-state push doesn't
+        # re-run mechanical + model redaction over the entire history every time.
+        # The version changes whenever the policy tightens, forcing a one-time
+        # re-scan -- so the tighten-only guarantee is preserved.
+        if record.get(_REDACTION_POLICY_KEY) == policy_version:
+            return record
+        # A fresh Anonymizer per record matches the per-worker construction and keeps
+        # pseudonyms deterministic (hash-based), so re-redaction stays idempotent.
+        anonymizer = Anonymizer(extra_usernames=extra_usernames)
+        source = record.get("source") or ""
+        redacted, _ = transform_session(
+            record,
+            anonymizer,
+            custom_strings=custom_strings,
+            non_anon_string_keys=get_provider_non_anon_string_keys(source),
+        )
+        # Mirror the export loop: model PII pass after mechanical redaction. No-op
+        # (and idempotent) when the filter is disabled or unavailable.
+        redacted = _apply_model_privacy_filter(redacted, pf_config)
+        redacted[_REDACTION_POLICY_KEY] = policy_version
+        return redacted
+
+    return redact_fn
+
+
+def _download_remote_conversations(api, repo_id: str, dest: Path) -> tuple[Path | None, str | None]:
+    """Download the remote conversations file. Fail closed on anything but 404/no-repo.
+
+    Returns ``(local_path, parent_commit_sha)``. ``local_path`` is ``None`` only when
+    the remote file (or repo) is confirmed absent, which means "empty remote". Any
+    other error (network/auth/HTTP) raises so the push aborts and the remote is never
+    overwritten with a local-only file.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+
+    try:
+        parent_commit = api.repo_info(repo_id, repo_type="dataset").sha
+    except RepositoryNotFoundError:
+        return None, None
+
+    try:
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=REMOTE_CONVERSATIONS_FILE,
+            repo_type="dataset",
+            revision=parent_commit,
+            local_dir=str(dest),
+        )
+    except (EntryNotFoundError, RepositoryNotFoundError):
+        return None, parent_commit
+    return Path(downloaded), parent_commit
+
+
+def push_to_huggingface(jsonl_path: Path, repo_id: str, meta: dict, redaction: dict | None = None) -> None:
     from huggingface_hub import HfApi
+    from huggingface_hub.utils import HfHubHTTPError
 
     api = HfApi()
 
@@ -663,17 +870,62 @@ def push_to_huggingface(jsonl_path: Path, repo_id: str, meta: dict) -> None:
         )
 
     print(f"Pushing to: {repo_id}")
+    api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
+
+    redact_fn = _build_carry_forward_redactor(redaction)
+
+    with tempfile.TemporaryDirectory(prefix="dataclaw-merge-") as temp_dir:
+        temp_path = Path(temp_dir)
+        merged_path = temp_path / "merged_conversations.jsonl"
+
+        for attempt in range(1, _MERGE_MAX_ATTEMPTS + 1):
+            try:
+                remote_path, parent_commit = _download_remote_conversations(api, repo_id, temp_path / "remote")
+            except (OSError, ValueError, HfHubHTTPError) as e:
+                # Fail closed: never overwrite the remote with a local-only file.
+                emit_blocked_error(
+                    f"reading remote dataset before merge (push aborted to avoid data loss): {e}"
+                )
+
+            try:
+                merged_total = _merge_or_passthrough(remote_path, jsonl_path, merged_path, redact_fn)
+            except (OSError, ValueError) as e:
+                emit_blocked_error(f"merging remote and local conversations: {e}")
+
+            # Keep metadata/README/shrink-gate consistent with what we actually upload.
+            meta["sessions"] = merged_total
+            upload_target = merged_path if remote_path is not None else jsonl_path
+
+            # No-op detection: if the merged result is byte-identical to the remote
+            # we just downloaded, there is nothing new to publish. Skip ALL uploads
+            # (data + metadata + README) so a no-change push doesn't churn the repo
+            # with empty commits (the metadata timestamp alone would otherwise differ
+            # every run). Only reachable when remote exists (passthrough has no remote).
+            if remote_path is not None and _files_identical(merged_path, remote_path):
+                print("Dataset already up to date; nothing to publish.")
+                print(f"\nDataset: {hf_dataset_url(repo_id)}")
+                return
+
+            try:
+                api.upload_file(
+                    path_or_fileobj=str(upload_target),
+                    path_in_repo=REMOTE_CONVERSATIONS_FILE,
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    commit_message="Update conversation data (merged)",
+                    parent_commit=parent_commit,
+                )
+                break
+            except HfHubHTTPError as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status == 412 and attempt < _MERGE_MAX_ATTEMPTS:
+                    print(f"  Concurrent update detected (412), re-merging (attempt {attempt + 1})...")
+                    continue
+                emit_blocked_error(f"uploading merged conversations to Hugging Face: {e}")
+            except (OSError, ValueError) as e:
+                emit_blocked_error(f"uploading merged conversations to Hugging Face: {e}")
+
     try:
-        api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
-
-        api.upload_file(
-            path_or_fileobj=str(jsonl_path),
-            path_in_repo="conversations.jsonl",
-            repo_id=repo_id,
-            repo_type="dataset",
-            commit_message="Update conversation data",
-        )
-
         api.upload_file(
             path_or_fileobj=json.dumps_bytes(meta, indent=2),
             path_in_repo="metadata.json",
@@ -689,11 +941,46 @@ def push_to_huggingface(jsonl_path: Path, repo_id: str, meta: dict) -> None:
             repo_type="dataset",
             commit_message="Update dataset card",
         )
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, HfHubHTTPError) as e:
         emit_blocked_error(f"uploading to Hugging Face: {e}")
 
     print(f"\nDataset: {hf_dataset_url(repo_id)}")
     print(f"Browse all: {hf_browse_tagged_url()}")
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    """True if two files have identical bytes (chunked sha256, large-file safe)."""
+    if a.stat().st_size != b.stat().st_size:
+        return False
+
+    def _digest(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    return _digest(a) == _digest(b)
+
+
+def _merge_or_passthrough(remote_path: Path | None, local_path: Path, merged_path: Path, redact_fn) -> int:
+    """Merge remote+local (or pass through local when remote is empty); return total."""
+    if remote_path is None:
+        # No prior remote data: the local file is the merged set as-is.
+        with local_path.open("rb") as src:
+            total = sum(1 for line in src if line.strip())
+        print(f"Merge: no prior remote dataset; publishing {total} local sessions")
+        return total
+
+    stats = merge_jsonl_union(remote_path, local_path, merged_path, redact_fn=redact_fn)
+    print(stats.changelog_line())
+    if stats.merged_total < stats.remote_total:
+        # Union invariant violated -> abort rather than risk a remote shrink.
+        emit_blocked_error(
+            f"merge produced fewer sessions ({stats.merged_total}) than the remote dataset "
+            f"({stats.remote_total}); aborting to prevent data loss."
+        )
+    return stats.merged_total
 
 
 def _build_dataset_card(repo_id: str, meta: dict) -> str:

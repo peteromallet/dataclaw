@@ -239,9 +239,13 @@ def run_export(
     has_session_sources_fn: Callable[[str], bool],
     export_to_jsonl_fn: Callable[..., dict],
     summarize_jsonl_fn: Callable[[Path], dict],
-    push_to_huggingface_fn: Callable[[Path, str, dict], None],
+    push_to_huggingface_fn: Callable[..., None],
 ) -> None:
     config = load_config_fn()
+    redaction = {
+        "redact_strings": config.get("redact_strings", []) or [],
+        "redact_usernames": config.get("redact_usernames", []) or [],
+    }
     source_choice, source_explicit = _resolve_source_choice(args.source, config)
     source_filter = _normalize_source_filter(source_choice)
 
@@ -420,7 +424,13 @@ def run_export(
             _print_export_elapsed(export_start_time)
             return
 
-        push_to_huggingface_fn(confirmed_file, repo_id, meta)
+        push_to_huggingface_fn(confirmed_file, repo_id, meta, redaction)
+
+        # push_to_huggingface updates meta["sessions"] to the merged remote+local total;
+        # keep last_export.sessions consistent with what was actually published (H5).
+        last_export = config.get("last_export")
+        if isinstance(last_export, dict):
+            last_export["sessions"] = meta.get("sessions", last_export.get("sessions"))
 
         config["stage"] = "done"
         save_config_fn(config)
@@ -596,7 +606,11 @@ def run_export(
         _print_export_elapsed(export_start_time)
         return
 
-    push_to_huggingface_fn(output_path, repo_id, meta)
+    push_to_huggingface_fn(output_path, repo_id, meta, redaction)
+
+    last_export = config.get("last_export")
+    if isinstance(last_export, dict):
+        last_export["sessions"] = meta.get("sessions", last_export.get("sessions"))
 
     config["stage"] = "done"
     save_config_fn(config)

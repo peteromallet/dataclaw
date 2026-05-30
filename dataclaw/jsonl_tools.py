@@ -135,6 +135,208 @@ class DiffResult:
     summary: dict[str, int]
 
 
+@dataclass
+class MergeStats:
+    """Outcome of a union merge of remote + local JSONL records."""
+
+    remote_total: int = 0
+    local_total: int = 0
+    merged_total: int = 0
+    added: int = 0  # local-only records added
+    updated: int = 0  # records present in both where the local copy won (superset)
+    carried_forward: int = 0  # remote-only records preserved (re-redacted)
+    unchanged: int = 0  # records present in both where the remote copy won (re-redacted)
+    malformed_preserved: int = 0  # unparseable lines carried through verbatim
+
+    def changelog_line(self) -> str:
+        line = (
+            f"Merge: added {self.added}, updated {self.updated}, "
+            f"carried_forward {self.carried_forward}, unchanged {self.unchanged} "
+            f"(remote {self.remote_total} -> merged {self.merged_total})"
+        )
+        if self.malformed_preserved:
+            line += f"; preserved {self.malformed_preserved} unparseable line(s) verbatim"
+        return line
+
+
+def merge_identity_key(obj: dict[str, Any]) -> tuple[Any, ...]:
+    """Dedup key for the union merge.
+
+    Uses ``(source, session_id)`` when ``session_id`` is truthy, otherwise falls
+    back to the full ``identity_key()`` tuple. Keying on ``session_id`` avoids the
+    ``start_time`` format drift (H1) and anonymized ``project`` drift (H2) bugs that
+    would otherwise let one session appear under two keys (duplicate + leak).
+    """
+    session_id = obj.get("session_id")
+    if session_id:
+        return ("sid", obj.get("source"), session_id)
+    return ("identity", *identity_key(obj))
+
+
+def _message_count(obj: dict[str, Any]) -> int:
+    messages = obj.get("messages")
+    return len(messages) if isinstance(messages, list) else 0
+
+
+def _end_time(obj: dict[str, Any]) -> str:
+    end_time = obj.get("end_time")
+    return end_time if isinstance(end_time, str) else ""
+
+
+def _record_prefers(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Return True if ``candidate`` should replace ``current`` in the union.
+
+    Tie-break order: more messages, then larger canonical byte size, then later
+    ``end_time``. A tie on all three keeps ``current`` (caller decides which side
+    that is so "unchanged vs updated" classification stays meaningful).
+    """
+    cand_messages = _message_count(candidate)
+    cur_messages = _message_count(current)
+    if cand_messages != cur_messages:
+        return cand_messages > cur_messages
+
+    cand_bytes = len(canonical_record_bytes(candidate))
+    cur_bytes = len(canonical_record_bytes(current))
+    if cand_bytes != cur_bytes:
+        return cand_bytes > cur_bytes
+
+    return _end_time(candidate) > _end_time(current)
+
+
+def _load_raw_records(path: Path) -> tuple[list[dict[str, Any]], list[bytes]]:
+    """Load JSONL records RAW (no diff normalization, preserves ``originalFile``).
+
+    Returns ``(records, malformed_lines)``. A line that is not valid JSON (or not a
+    JSON object) is returned verbatim in ``malformed_lines`` rather than raising or
+    being dropped: the merge preserves it so a single corrupt remote line can never
+    silently lose data nor permanently wedge all future pushes.
+    """
+    records: list[dict[str, Any]] = []
+    malformed: list[bytes] = []
+    with path.open("rb") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = orjson.loads(stripped)
+            except ValueError:  # orjson.JSONDecodeError subclasses ValueError
+                malformed.append(stripped)
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+            else:
+                malformed.append(stripped)
+    return records, malformed
+
+
+def merge_jsonl_union(
+    remote_path: Path,
+    local_path: Path,
+    output_path: Path,
+    *,
+    redact_fn: Callable[[dict[str, Any]], dict[str, Any]],
+) -> MergeStats:
+    """Union-merge remote + local JSONL into ``output_path``.
+
+    Rules (keyed by :func:`merge_identity_key`):
+      - remote-only  -> carry forward, re-redacted through ``redact_fn``
+      - local-only   -> add (already current-redacted upstream, passes through)
+      - both         -> keep the superset (see :func:`_record_prefers`)
+
+    Local records are written first when they win; carried-forward remote records
+    are always re-redacted via ``redact_fn`` before being written, which closes the
+    old-policy redaction-republish hole. The merge preserves first-seen ordering
+    (remote order, then any local-only additions) and guarantees
+    ``merged_total >= remote_total``.
+
+    ``redact_fn`` is injected so this module stays free of import cycles with the
+    redaction pipeline.
+    """
+    remote_records, remote_malformed = _load_raw_records(remote_path)
+    local_records, local_malformed = _load_raw_records(local_path)
+    # Preserve unparseable lines verbatim (deduped by exact bytes) so a corrupt
+    # remote line is never dropped (data loss) nor allowed to abort the push (wedge).
+    malformed = list(dict.fromkeys(remote_malformed + local_malformed))
+
+    # Totals are counted by UNIQUE merge key, not raw line count. A remote file
+    # written by the old non-deduping uploader can contain duplicate
+    # (source, session_id) lines; counting raw lines would make merged_total <
+    # remote_total trip the union-invariant guard and permanently block publishing
+    # even though no session was dropped. (Set precisely after the build below.)
+    stats = MergeStats()
+
+    # Build winning record per key, tracking origin (which side won) and which sides
+    # the key appeared on, so we can classify the change and re-redact correctly.
+    order: list[tuple[Any, ...]] = []
+    winners: dict[tuple[Any, ...], dict[str, Any]] = {}
+    origin: dict[tuple[Any, ...], str] = {}  # "remote" or "local" (winning side)
+    in_remote: set[tuple[Any, ...]] = set()
+    in_local: set[tuple[Any, ...]] = set()
+
+    for record in remote_records:
+        key = merge_identity_key(record)
+        in_remote.add(key)
+        if key not in winners:
+            order.append(key)
+            winners[key] = record
+            origin[key] = "remote"
+        elif _record_prefers(record, winners[key]):
+            winners[key] = record
+            origin[key] = "remote"
+
+    for record in local_records:
+        key = merge_identity_key(record)
+        in_local.add(key)
+        if key not in winners:
+            order.append(key)
+            winners[key] = record
+            origin[key] = "local"
+        elif _record_prefers(record, winners[key]):
+            winners[key] = record
+            origin[key] = "local"
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_total = 0
+    with output_path.open("wb") as handle:
+        for key in order:
+            record = winners[key]
+            seen_remote = key in in_remote
+            seen_local = key in in_local
+            if origin[key] == "remote":
+                # Winning side is a remote record: re-redact through the CURRENT
+                # pipeline before publishing (closes the old-policy redaction hole).
+                record = redact_fn(record)
+                if seen_local:
+                    stats.unchanged += 1  # in both, remote copy won
+                else:
+                    stats.carried_forward += 1  # remote-only
+            else:
+                # Winning side is a local record (already current-redacted upstream).
+                if seen_remote:
+                    stats.updated += 1  # in both, local copy won (superset)
+                else:
+                    stats.added += 1  # local-only
+            handle.write(canonical_record_bytes(record))
+            handle.write(b"\n")
+            merged_total += 1
+
+        for raw in malformed:
+            handle.write(raw)
+            handle.write(b"\n")
+            merged_total += 1
+
+    # Malformed remote lines count toward remote_total (by UNIQUE bytes, matching
+    # the unique-key counting above) so the union invariant merged_total >=
+    # remote_total accounts for the records they represent without false-tripping
+    # on duplicate corrupt lines.
+    stats.remote_total = len(in_remote) + len(set(remote_malformed))
+    stats.local_total = len(in_local) + len(set(local_malformed))
+    stats.merged_total = merged_total
+    stats.malformed_preserved = len(malformed)
+    return stats
+
+
 def clean_strings(obj: Any) -> Any:
     if isinstance(obj, str):
         text = ANSI_RE.sub("", obj)

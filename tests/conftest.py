@@ -66,3 +66,16 @@ def tmp_config(tmp_path, monkeypatch):
     monkeypatch.setattr("dataclaw.config.CONFIG_DIR", config_dir)
     monkeypatch.setattr("dataclaw.config.CONFIG_FILE", config_file)
     return config_file
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config(tmp_path_factory, monkeypatch):
+    """Never read the developer's real ~/.dataclaw/config.json during tests.
+
+    Without this, settings like ``privacy_filter.enabled`` from a real local
+    config would leak into export tests (slow, non-deterministic). Tests that
+    need specific config still monkeypatch ``load_config`` or use ``tmp_config``.
+    """
+    isolated_dir = tmp_path_factory.mktemp("dataclaw-config")
+    monkeypatch.setattr("dataclaw.config.CONFIG_DIR", isolated_dir)
+    monkeypatch.setattr("dataclaw.config.CONFIG_FILE", isolated_dir / "config.json")

@@ -1,6 +1,7 @@
 """Tests for CLI export and publish helpers."""
 
 from concurrent.futures import Future
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -597,20 +598,117 @@ class TestExportToJsonl:
         assert rows[0]["messages"][0]["content_parts"][0]["source"]["data"] == blob
 
 
+class _FakeEntryNotFoundError(Exception):
+    pass
+
+
+class _FakeRepositoryNotFoundError(Exception):
+    pass
+
+
+class _FakeHfHubHTTPError(Exception):
+    def __init__(self, message="", status_code=None):
+        super().__init__(message)
+        self.response = MagicMock(status_code=status_code)
+
+
+def _install_hf_mocks(mock_api, *, downloaded_path=None, download_error=None):
+    """Build mock ``huggingface_hub`` + ``huggingface_hub.utils`` modules.
+
+    ``hf_hub_download`` returns ``downloaded_path`` (or raises ``download_error``).
+    Returns the list/dict of submodules to feed ``patch.dict("sys.modules", ...)``.
+    """
+
+    def fake_download(*args, **kwargs):
+        if download_error is not None:
+            raise download_error
+        return str(downloaded_path)
+
+    utils_mod = MagicMock(
+        EntryNotFoundError=_FakeEntryNotFoundError,
+        RepositoryNotFoundError=_FakeRepositoryNotFoundError,
+        HfHubHTTPError=_FakeHfHubHTTPError,
+    )
+    hf_mod = MagicMock(
+        HfApi=MagicMock(return_value=mock_api),
+        hf_hub_download=fake_download,
+    )
+    hf_mod.utils = utils_mod
+    return {"huggingface_hub": hf_mod, "huggingface_hub.utils": utils_mod}
+
+
 class TestPushToHuggingface:
-    def test_success_flow(self, tmp_path):
-        jsonl_path = tmp_path / "data.jsonl"
-        jsonl_path.write_text("{}\n")
+    def test_merges_remote_then_uploads_merged(self, tmp_path):
+        # Remote has one session; local has a different session -> union of both.
+        remote = tmp_path / "remote.jsonl"
+        remote.write_text('{"source":"claude","session_id":"r1","messages":[{"role":"user"}]}\n')
+        local = tmp_path / "local.jsonl"
+        local.write_text('{"source":"claude","session_id":"l1","messages":[{"role":"user"}]}\n')
+
+        captured = {}
 
         mock_api = MagicMock()
         mock_api.whoami.return_value = {"name": "alice"}
-        mock_hfapi_cls = MagicMock(return_value=mock_api)
+        mock_api.repo_info.return_value = MagicMock(sha="abc123")
 
-        with patch.dict("sys.modules", {"huggingface_hub": MagicMock(HfApi=mock_hfapi_cls)}):
-            push_to_huggingface(jsonl_path, "user/repo", {})
+        def fake_upload(*args, **kwargs):
+            if kwargs.get("path_in_repo") == "conversations.jsonl":
+                captured["uploaded"] = Path(kwargs["path_or_fileobj"]).read_text()
+                captured["parent_commit"] = kwargs.get("parent_commit")
 
-        mock_api.create_repo.assert_called_once_with("user/repo", repo_type="dataset", exist_ok=True)
+        mock_api.upload_file.side_effect = fake_upload
+
+        with patch.dict("sys.modules", _install_hf_mocks(mock_api, downloaded_path=remote)):
+            push_to_huggingface(local, "user/repo", {}, {"redact_strings": [], "redact_usernames": []})
+
+        # Both remote-only and local-only sessions present in the uploaded merge.
+        assert '"r1"' in captured["uploaded"]
+        assert '"l1"' in captured["uploaded"]
+        assert captured["parent_commit"] == "abc123"
         assert mock_api.upload_file.call_count == 3
+
+    def test_empty_remote_passthrough(self, tmp_path):
+        local = tmp_path / "local.jsonl"
+        local.write_text('{"source":"claude","session_id":"l1","messages":[{"role":"user"}]}\n')
+
+        mock_api = MagicMock()
+        mock_api.whoami.return_value = {"name": "alice"}
+        mock_api.repo_info.return_value = MagicMock(sha="abc123")
+
+        captured = {}
+
+        def fake_upload(*args, **kwargs):
+            if kwargs.get("path_in_repo") == "conversations.jsonl":
+                captured["uploaded"] = Path(kwargs["path_or_fileobj"]).read_text()
+
+        mock_api.upload_file.side_effect = fake_upload
+
+        mocks = _install_hf_mocks(mock_api, download_error=_FakeEntryNotFoundError("404"))
+        with patch.dict("sys.modules", mocks):
+            push_to_huggingface(local, "user/repo", {}, {"redact_strings": [], "redact_usernames": []})
+
+        assert '"l1"' in captured["uploaded"]
+        assert mock_api.upload_file.call_count == 3
+
+    def test_fail_closed_on_download_error(self, tmp_path):
+        from dataclaw._cli.common import CLIBlockedError
+
+        local = tmp_path / "local.jsonl"
+        local.write_text('{"source":"claude","session_id":"l1","messages":[{"role":"user"}]}\n')
+
+        mock_api = MagicMock()
+        mock_api.whoami.return_value = {"name": "alice"}
+        mock_api.repo_info.return_value = MagicMock(sha="abc123")
+
+        # A non-404 HTTP error during download must abort the push (never upload local-only).
+        mocks = _install_hf_mocks(mock_api, download_error=_FakeHfHubHTTPError("500 server error"))
+        with patch.dict("sys.modules", mocks):
+            with pytest.raises(CLIBlockedError):
+                push_to_huggingface(local, "user/repo", {}, {"redact_strings": [], "redact_usernames": []})
+
+        # conversations.jsonl must NOT have been uploaded.
+        uploaded_paths = [c.kwargs.get("path_in_repo") for c in mock_api.upload_file.call_args_list]
+        assert "conversations.jsonl" not in uploaded_paths
 
     def test_auth_failure(self, tmp_path):
         from dataclaw._cli.common import CLIBlockedError
@@ -620,9 +718,8 @@ class TestPushToHuggingface:
 
         mock_api = MagicMock()
         mock_api.whoami.side_effect = OSError("Auth failed")
-        mock_hf_module = MagicMock(HfApi=MagicMock(return_value=mock_api))
 
-        with patch.dict("sys.modules", {"huggingface_hub": mock_hf_module}):
+        with patch.dict("sys.modules", _install_hf_mocks(mock_api)):
             with pytest.raises(CLIBlockedError):
                 push_to_huggingface(jsonl_path, "user/repo", {})
 
