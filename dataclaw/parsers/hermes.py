@@ -1,3 +1,4 @@
+import atexit
 import logging
 import sqlite3
 from collections.abc import Iterable, Iterator
@@ -25,10 +26,13 @@ logger = logging.getLogger(__name__)
 SOURCE = "hermes"
 HERMES_DIR = Path.home() / ".hermes"
 HERMES_DB = HERMES_DIR / "state.db"
+_DEFAULT_HERMES_DB = HERMES_DB
 UNKNOWN_HERMES_SOURCE = "<unknown-source>"
 
 _PROJECT_INDEX: dict[str, list[str]] = {}
 _SESSION_SIZE_MAP: dict[str, int] = {}
+_EXPORT_CONN: sqlite3.Connection | None = None
+_EXPORT_CONN_KEY: tuple[str, int, int] | None = None
 
 
 def get_project_index(refresh: bool = False) -> dict[str, list[str]]:
@@ -117,7 +121,24 @@ def parse_export_session_task(
 ) -> dict | None:
     if not task.item_id:
         return None
-    return parse_session(task.item_id, HERMES_DB, anonymizer, include_thinking, task.project_dir_name)
+    if not HERMES_DB.exists():
+        return None
+    if HERMES_DB != _DEFAULT_HERMES_DB:
+        return parse_session(task.item_id, HERMES_DB, anonymizer, include_thinking, task.project_dir_name)
+
+    try:
+        conn = get_export_connection(HERMES_DB)
+        return _parse_session_with_connection(
+            conn,
+            session_id=task.item_id,
+            anonymizer=anonymizer,
+            include_thinking=include_thinking,
+            target_session_source=task.project_dir_name,
+        )
+    except (sqlite3.Error, OSError) as e:
+        close_export_connection()
+        logger.warning("Failed to parse Hermes session %s: %s", task.item_id, e)
+        return None
 
 
 def build_project_name(session_source: str) -> str:
@@ -131,7 +152,53 @@ def connect_readonly(db_path: Path) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         conn = sqlite3.connect(f"file:{uri_path}?immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
+    configure_readonly_connection(conn)
     return conn
+
+
+def configure_readonly_connection(conn: sqlite3.Connection) -> None:
+    for pragma in (
+        "PRAGMA query_only = ON",
+        "PRAGMA cache_size = -65536",
+        "PRAGMA mmap_size = 268435456",
+    ):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            continue
+
+
+def get_export_connection(db_path: Path) -> sqlite3.Connection:
+    if db_path != _DEFAULT_HERMES_DB:
+        return connect_readonly(db_path)
+
+    global _EXPORT_CONN, _EXPORT_CONN_KEY
+    try:
+        resolved = db_path.expanduser().resolve()
+        stat = resolved.stat()
+    except OSError:
+        raise
+
+    key = (str(resolved), stat.st_size, stat.st_mtime_ns)
+    if _EXPORT_CONN is None or _EXPORT_CONN_KEY != key:
+        close_export_connection()
+        _EXPORT_CONN = connect_readonly(db_path)
+        _EXPORT_CONN_KEY = key
+    return _EXPORT_CONN
+
+
+def close_export_connection() -> None:
+    global _EXPORT_CONN, _EXPORT_CONN_KEY
+    if _EXPORT_CONN is not None:
+        try:
+            _EXPORT_CONN.close()
+        except sqlite3.Error:
+            pass
+    _EXPORT_CONN = None
+    _EXPORT_CONN_KEY = None
+
+
+atexit.register(close_export_connection)
 
 
 def build_project_index(db_path: Path) -> dict[str, list[str]]:
@@ -432,6 +499,7 @@ def apply_tool_result_row(
 def extract_thinking(row: sqlite3.Row) -> str | None:
     parts: list[str] = []
     seen: set[str] = set()
+    raw_seen: set[str] = set()
     for key in (
         "reasoning_content",
         "reasoning",
@@ -440,6 +508,11 @@ def extract_thinking(row: sqlite3.Row) -> str | None:
         "codex_message_items",
     ):
         value = row[key]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or stripped in raw_seen:
+                continue
+            raw_seen.add(stripped)
         text = stringify_thinking_value(value)
         if text and text not in seen:
             parts.append(text)
@@ -453,6 +526,8 @@ def stringify_thinking_value(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     stripped = value.strip()
+    if stripped[0] not in "[{\"-0123456789tfn":
+        return stripped
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
