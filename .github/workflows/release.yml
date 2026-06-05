@@ -27,6 +27,28 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Assert tag matches pyproject version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("pyproject.toml").read_text()
+          match = re.search(r'(?m)^\[project\][\s\S]*?^version\s*=\s*"([^"]+)"', text)
+          if not match:
+              raise SystemExit("Could not find [project] version in pyproject.toml")
+          print(match.group(1))
+          PY
+          )"
+          EXPECTED_TAG="v${VERSION}"
+          if [[ "$RELEASE_TAG" != "$EXPECTED_TAG" ]]; then
+            echo "Release tag $RELEASE_TAG does not match pyproject.toml version $VERSION (expected $EXPECTED_TAG)." >&2
+            exit 1
+          fi
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -204,8 +226,7 @@ jobs:
             ASSETS+=(latest.json)
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file RELEASE_NOTES.md
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
-            gh release create "$TAG" "${ASSETS[@]}" --notes-file RELEASE_NOTES.md
+            gh release create "$TAG" "${ASSETS[@]}" --generate-notes
           fi

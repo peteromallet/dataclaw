@@ -89,20 +89,30 @@ def test_app_versions_match_python_package():
     package_json = json.loads(read("app/package.json"))
     tauri_conf = json.loads(read("app/src-tauri/tauri.conf.json"))
     cargo_toml = read("app/src-tauri/Cargo.toml")
+    cargo_lock = read("app/src-tauri/Cargo.lock")
 
     py_version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE).group(1)
     cargo_version = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml, re.MULTILINE).group(1)
+    lock_version = re.search(r'\[\[package\]\]\nname = "dataclaw-app"\nversion = "([^"]+)"', cargo_lock).group(1)
 
     assert package_json["version"] == py_version
-    assert tauri_conf["version"] == py_version
     assert cargo_version == py_version
+    assert lock_version == py_version
+    assert "version" not in tauri_conf
 
 
 def test_release_yml_uploads_stable_dmg_names():
     text = read(".github/workflows/release.yml")
     assert "DataClaw-macOS-Apple-Silicon.dmg" in text
-    assert 'gh release edit "$TAG" --notes-file RELEASE_NOTES.md' in text
-    assert 'gh release create "$TAG" "${ASSETS[@]}" --notes-file RELEASE_NOTES.md' in text
+    assert 'gh release create "$TAG" "${ASSETS[@]}" --generate-notes' in text
+
+
+def test_workflows_guard_version_drift_and_tag_mismatch():
+    test_yml = read(".github/workflows/test.yml")
+    release_yml = read(".github/workflows/release.yml")
+    assert "python scripts/sync_version.py --check" in test_yml
+    assert "Assert tag matches pyproject version" in release_yml
+    assert "expected $EXPECTED_TAG" in release_yml
 
 
 def test_latest_json_uses_semver_with_tag_download_url():

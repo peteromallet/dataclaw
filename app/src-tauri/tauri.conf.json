@@ -2,7 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DataClaw",
   "identifier": "io.dataclaw.desktop",
-  "version": "0.4.2",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -27,10 +26,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/dataclaw"],
-    "icon": ["icons/icon.png"],
+    "externalBin": [
+      "binaries/dataclaw"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
     "macOS": {
       "signingIdentity": "${APPLE_SIGNING_IDENTITY-}",
       "entitlements": "entitlements.plist",
