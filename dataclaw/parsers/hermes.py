@@ -139,6 +139,11 @@ def build_project_index(db_path: Path) -> dict[str, list[str]]:
         return {}
 
     index: dict[str, list[str]] = {}
+    count_query = """
+        SELECT COUNT(*)
+        FROM sessions
+        WHERE COALESCE(message_count, 0) > 0
+    """
     query = """
         SELECT id, source
         FROM sessions
@@ -146,15 +151,35 @@ def build_project_index(db_path: Path) -> dict[str, list[str]]:
         ORDER BY started_at DESC, id DESC
     """
     try:
+        from .._cli.common import ProgressReporter, emit_progress_event
+
         with connect_readonly(db_path) as conn:
+            total = safe_int(conn.execute(count_query).fetchone()[0])
+            emit_progress_event(
+                "projects_index_started",
+                "discover",
+                {"source": SOURCE, "provider": SOURCE, "total": total, "database": str(db_path)},
+            )
+            progress = ProgressReporter(
+                "projects_index_progress",
+                "discover",
+                total,
+                base_extra={"source": SOURCE, "provider": SOURCE},
+            )
+            progress.emit(0, force=True)
             rows = conn.execute(query)
+            current = 0
             for session_id, session_source in rows:
+                current += 1
                 if not isinstance(session_id, str) or not session_id:
+                    progress.emit(current)
                     continue
                 normalized_source = (
                     session_source if isinstance(session_source, str) and session_source.strip() else UNKNOWN_HERMES_SOURCE
                 )
                 index.setdefault(normalized_source, []).append(session_id)
+                progress.emit(current)
+            progress.emit(current, force=True, extra={"projects": len(index)})
     except (sqlite3.Error, OSError) as e:
         logger.warning("Failed to query Hermes database %s: %s", db_path, e)
         return {}
@@ -175,6 +200,11 @@ def build_session_size_map(db_path: Path | None = None) -> dict[str, int]:
     except OSError:
         db_size = 0
 
+    totals_query = """
+        SELECT COUNT(*), COALESCE(SUM(COALESCE(message_count, 0)), 0)
+        FROM sessions
+        WHERE COALESCE(message_count, 0) > 0
+    """
     query = """
         SELECT id, COALESCE(message_count, 0)
         FROM sessions
@@ -182,17 +212,36 @@ def build_session_size_map(db_path: Path | None = None) -> dict[str, int]:
     """
     sizes: dict[str, int] = {}
     try:
+        from .._cli.common import ProgressReporter, emit_progress_event
+
         with connect_readonly(db_path) as conn:
-            rows = list(conn.execute(query))
+            row_count, total_messages = conn.execute(totals_query).fetchone()
+            row_count = safe_int(row_count)
+            total_messages = safe_int(total_messages)
+            emit_progress_event(
+                "projects_size_index_started",
+                "discover",
+                {"source": SOURCE, "provider": SOURCE, "total": row_count, "database": str(db_path)},
+            )
+            progress = ProgressReporter(
+                "projects_size_index_progress",
+                "discover",
+                row_count,
+                base_extra={"source": SOURCE, "provider": SOURCE},
+            )
+            progress.emit(0, force=True)
+            rows = conn.execute(query)
+            current = 0
+            if total_messages <= 0:
+                return {}
+            for session_id, message_count in rows:
+                current += 1
+                if isinstance(session_id, str) and session_id:
+                    sizes[session_id] = int(db_size * (safe_int(message_count) / total_messages))
+                progress.emit(current)
+            progress.emit(current, force=True)
     except (sqlite3.Error, OSError):
         return {}
-
-    total_messages = sum(safe_int(row[1]) for row in rows)
-    if total_messages <= 0:
-        return {}
-    for session_id, message_count in rows:
-        if isinstance(session_id, str) and session_id:
-            sizes[session_id] = int(db_size * (safe_int(message_count) / total_messages))
 
     if db_path == HERMES_DB:
         _SESSION_SIZE_MAP = sizes

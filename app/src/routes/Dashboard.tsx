@@ -19,6 +19,7 @@ type ProgressState = {
   startedAtMs: number;
   updatedAtMs: number;
   eventCount: number;
+  hasProgressEvent: boolean;
 };
 
 const STAGES = [
@@ -98,7 +99,8 @@ function progressFromRunError(message: string, startedAtMs: number): ProgressSta
     status: isBlocked ? "blocked" : "failed",
     startedAtMs,
     updatedAtMs: now,
-    eventCount: 1
+    eventCount: 1,
+    hasProgressEvent: false
   };
 }
 
@@ -207,9 +209,11 @@ function stageIndexFor(key: string) {
 
 function stageForMessage(msg: string, phase: string) {
   if (msg.startsWith("mechanical_pii_")) return "mechanical_pii";
+  if (msg.startsWith("pii_scan_")) return "mechanical_pii";
   if (msg.startsWith("privacy_filter_")) return "model_privacy";
   if (msg.startsWith("token_count_")) return "export";
   if (msg.startsWith("export_")) return "export";
+  if (msg.startsWith("projects_")) return "discover";
   if (msg.startsWith("push_")) return "push";
   if (msg.startsWith("auto_confirm_")) return "confirm";
   if (msg.startsWith("resolve_export_inputs_")) return "discover";
@@ -233,7 +237,8 @@ function initialProgress(startedAtMs = Date.now()): ProgressState {
     status: "active",
     startedAtMs,
     updatedAtMs: startedAtMs,
-    eventCount: 0
+    eventCount: 0,
+    hasProgressEvent: false
   };
 }
 
@@ -277,6 +282,7 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
   let detail = msg.replace(/_/g, " ");
   let percent: number | null = null;
   let status: ProgressState["status"] = "active";
+  let hasProgressEvent = previous?.hasProgressEvent ?? false;
   const metrics: Array<{ label: string; value: string } | null> = [];
 
   switch (msg) {
@@ -311,10 +317,53 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
       metrics.push(metric("Custom redactions", extra.custom_redactions, "0"));
       percent = 100;
       break;
+    case "projects_index_started":
+      detail = `Indexing ${display(extra.source ?? extra.provider)} sessions`;
+      hasProgressEvent = true;
+      metrics.push(metric("Provider", extra.provider ?? extra.source));
+      metrics.push(metric("Sessions", formatCount(extra.total)));
+      break;
+    case "projects_index_progress":
+      detail = `Indexing ${display(extra.source ?? extra.provider)} sessions`;
+      hasProgressEvent = true;
+      percent = ratio(extra.current, extra.total);
+      metrics.push(metricPair("Sessions", extra.current, extra.total));
+      metrics.push(metric("Projects", extra.projects));
+      break;
+    case "projects_size_index_started":
+      detail = `Sizing ${display(extra.source ?? extra.provider)} sessions`;
+      hasProgressEvent = true;
+      metrics.push(metric("Provider", extra.provider ?? extra.source));
+      metrics.push(metric("Sessions", formatCount(extra.total)));
+      break;
+    case "projects_size_index_progress":
+      detail = `Sizing ${display(extra.source ?? extra.provider)} sessions`;
+      hasProgressEvent = true;
+      percent = ratio(extra.current, extra.total);
+      metrics.push(metricPair("Sessions", extra.current, extra.total));
+      break;
     case "export_shards_started":
       detail = "Preparing export shards";
       metrics.push(metric("Projects", extra.included_projects, "0"));
       metrics.push(metric("Incremental", extra.incremental ? "yes" : "no"));
+      break;
+    case "export_tasks_indexed":
+      detail = "Prepared export session tasks";
+      hasProgressEvent = true;
+      percent = 100;
+      metrics.push(metric("Sessions", formatCount(extra.total)));
+      metrics.push(metric("Projects", extra.projects, "0"));
+      metrics.push(metric("Sources", Array.isArray(extra.sources) ? extra.sources.join(", ") : extra.sources));
+      break;
+    case "export_session_progress":
+      detail = `Exporting ${display(extra.source ?? "sessions")}`;
+      if (extra.project) detail = `Exporting ${display(extra.project)}`;
+      hasProgressEvent = true;
+      percent = ratio(extra.current, extra.total);
+      metrics.push(metricPair("Sessions", extra.current, extra.total));
+      metrics.push(metric("Exported", extra.sessions_exported, "0"));
+      metrics.push(metric("Skipped", extra.sessions_skipped, "0"));
+      metrics.push(metric("Workers", extra.workers));
       break;
     case "export_project_started":
       detail = `Reading ${display(extra.project)}`;
@@ -374,6 +423,27 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
     case "mechanical_pii_scan_started":
       detail = "Mechanical PII scan started";
       metrics.push(metric("Policy", extra.policy));
+      break;
+    case "pii_scan_started":
+      detail = "PII scan started";
+      hasProgressEvent = true;
+      metrics.push(metric("Chunks", extra.chunks ?? extra.total, "0"));
+      metrics.push(metric("Workers", extra.workers));
+      metrics.push(metric("Mode", extra.mode));
+      break;
+    case "pii_scan_progress":
+      detail = "Scanning export for PII";
+      hasProgressEvent = true;
+      percent = ratio(extra.current, extra.total);
+      metrics.push(metricPair("Chunks", extra.current, extra.total));
+      metrics.push(metric("Sessions", extra.sessions));
+      break;
+    case "pii_scan_finished":
+      detail = "PII scan finished";
+      hasProgressEvent = true;
+      percent = 100;
+      metrics.push(metric("Chunks", extra.chunks ?? extra.total, "0"));
+      metrics.push(metric("Sessions", extra.sessions, "0"));
       break;
     case "mechanical_pii_shard_started":
       detail = `Mechanical scan ${compactPath(extra.path) ?? "shard"}`;
@@ -454,6 +524,7 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
       break;
     case "privacy_filter_shard_progress":
       detail = `Scanning ${compactPath(extra.path) ?? "shard"}`;
+      hasProgressEvent = true;
       percent = ratio(extra.shard_index, extra.total_shards);
       metrics.push(metricPair("Shard", extra.shard_index, extra.total_shards));
       metrics.push(metric("Sessions scanned", extra.sessions_scanned, "0"));
@@ -482,6 +553,7 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
       break;
     case "privacy_filter_text_progress":
       detail = `Scanning ${display(extra.field)}`;
+      hasProgressEvent = true;
       percent = ratio(extra.chunk_index, extra.chunk_count);
       metrics.push(metricPair("Chunk", extra.chunk_index, extra.chunk_count));
       metrics.push(metric("Session", extra.session_id));
@@ -618,7 +690,8 @@ function formatProgressLine(raw: string, previous: ProgressState | null): Progre
     status,
     startedAtMs,
     updatedAtMs,
-    eventCount
+    eventCount,
+    hasProgressEvent
   };
 }
 
@@ -896,7 +969,9 @@ export default function Dashboard() {
             {progress.nextStages.length ? <div className="progress-next">Next: {progress.nextStages.join(" → ")}</div> : null}
             {isStalled ? (
               <div className="progress-stalled">
-                No log events for {formatDuration(lastProgressAgeMs)}. The sidecar may still be working on a long model-redaction step.
+                {progress.hasProgressEvent
+                  ? `No new progress events for ${formatDuration(lastProgressAgeMs)}. Last known work may still be running.`
+                  : `No log events for ${formatDuration(lastProgressAgeMs)}. The sidecar has not emitted detailed progress for this step.`}
               </div>
             ) : null}
           </div>

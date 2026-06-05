@@ -1,6 +1,7 @@
 """Tests for CLI review helpers."""
 
 import json
+from concurrent.futures import Future
 
 from dataclaw._cli import review as review_mod
 from dataclaw._cli.review import (
@@ -251,6 +252,11 @@ class TestConfirmStreaming:
 
             def __exit__(self, exc_type, exc, tb):
                 return False
+
+            def submit(self, fn, payload):
+                future = Future()
+                future.set_result(fn(payload))
+                return future
 
             def map(self, fn, payloads, chunksize=1):
                 del chunksize

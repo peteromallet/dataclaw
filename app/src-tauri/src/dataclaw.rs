@@ -281,6 +281,29 @@ fn emit_auto_progress(app: &AppHandle, msg: &str, phase: &str, extra: Value) {
     let _ = app.emit("logs-line", payload.to_string());
 }
 
+fn emit_sidecar_progress_line(app: &AppHandle, line: &str) {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return;
+    };
+    if value.get("msg").and_then(Value::as_str).is_none() {
+        return;
+    }
+    let _ = app.emit("logs-line", trimmed.to_string());
+}
+
+fn consume_sidecar_stderr_progress(app: &AppHandle, buffer: &mut Vec<u8>, chunk: &[u8]) {
+    buffer.extend_from_slice(chunk);
+    while let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
+        let line = buffer.drain(..=newline_index).collect::<Vec<_>>();
+        let text = String::from_utf8_lossy(&line);
+        emit_sidecar_progress_line(app, &text);
+    }
+}
+
 pub fn parse_json_block(stdout: &[u8]) -> Result<Value, String> {
     let text = String::from_utf8_lossy(stdout);
     let payload = if let Some(start) = text.find(JSON_MARKER) {
@@ -351,13 +374,17 @@ pub async fn run_sidecar(
     let (mut rx, _child) = command.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut stderr_progress_buffer = Vec::new();
     let mut exit_code: Option<i32> = None;
 
     let result = timeout(SIDECAR_TIMEOUT, async {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(chunk) => stdout.extend_from_slice(&chunk),
-                CommandEvent::Stderr(chunk) => stderr.extend_from_slice(&chunk),
+                CommandEvent::Stderr(chunk) => {
+                    consume_sidecar_stderr_progress(app, &mut stderr_progress_buffer, &chunk);
+                    stderr.extend_from_slice(&chunk);
+                }
                 CommandEvent::Terminated(payload) => {
                     exit_code = payload.code;
                     break;
@@ -367,6 +394,10 @@ pub async fn run_sidecar(
         }
     })
     .await;
+    if !stderr_progress_buffer.is_empty() {
+        let text = String::from_utf8_lossy(&stderr_progress_buffer);
+        emit_sidecar_progress_line(app, &text);
+    }
 
     if result.is_err() {
         let stderr_text = String::from_utf8_lossy(&stderr);

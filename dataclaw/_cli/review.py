@@ -6,7 +6,7 @@ import re
 import sys
 import time
 import unicodedata
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +25,9 @@ from .common import (
     REQUIRED_REVIEW_ATTESTATIONS,
     _format_size,
     emit_blocked_error,
+    emit_progress_event,
     fingerprint_strings,
+    ProgressReporter,
     sha256_file,
 )
 
@@ -473,17 +475,55 @@ def _scan_export_review(
 ) -> dict:
     resolved_workers = _resolve_review_workers(file_path.stat().st_size, workers)
     if resolved_workers <= 1:
-        return _scan_export_review_serial(file_path, full_name_query, max_examples)
+        emit_progress_event(
+            "pii_scan_started",
+            "mechanical_pii",
+            {"current": 0, "total": 1, "chunks": 1, "mode": "serial"},
+        )
+        result = _scan_export_review_serial(file_path, full_name_query, max_examples)
+        emit_progress_event(
+            "pii_scan_progress",
+            "mechanical_pii",
+            {"current": 1, "total": 1, "chunks": 1, "mode": "serial", "sessions": result["total_sessions"]},
+        )
+        emit_progress_event(
+            "pii_scan_finished",
+            "mechanical_pii",
+            {"current": 1, "total": 1, "chunks": 1, "mode": "serial", "sessions": result["total_sessions"]},
+        )
+        return result
 
     chunks = _plan_review_chunks(file_path, resolved_workers)
     payloads = [
         (str(file_path), start_offset, end_offset, start_line, full_name_query, max_examples)
         for start_offset, end_offset, start_line in chunks
     ]
+    emit_progress_event(
+        "pii_scan_started",
+        "mechanical_pii",
+        {"current": 0, "total": len(payloads), "chunks": len(payloads), "mode": "parallel", "workers": resolved_workers},
+    )
+    progress = ProgressReporter(
+        "pii_scan_progress",
+        "mechanical_pii",
+        len(payloads),
+        base_extra={"chunks": len(payloads), "mode": "parallel", "workers": resolved_workers},
+    )
 
     with ProcessPoolExecutor(max_workers=resolved_workers) as executor:
-        results = list(executor.map(_scan_review_chunk, payloads, chunksize=1))
-    return _merge_review_chunk_results(results, full_name_query, max_examples)
+        futures = [executor.submit(_scan_review_chunk, payload) for payload in payloads]
+        results = []
+        for current, future in enumerate(as_completed(futures), start=1):
+            results.append(future.result())
+            progress.emit(current)
+    merged = _merge_review_chunk_results(results, full_name_query, max_examples)
+    progress.emit(len(payloads), force=True, extra={"sessions": merged["total_sessions"]})
+    emit_progress_event(
+        "pii_scan_finished",
+        "mechanical_pii",
+        {"current": len(payloads), "total": len(payloads), "chunks": len(payloads), "sessions": merged["total_sessions"]},
+    )
+    return merged
 
 
 def _normalize_attestation_text(value: object) -> str:

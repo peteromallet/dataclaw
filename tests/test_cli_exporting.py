@@ -265,9 +265,18 @@ class TestExportToJsonl:
         assert [row["session_id"] for row in rows] == ["p1-a", "p1-b", "p2-a", "p2-b"]
         assert meta["sessions"] == 4
 
-        printed = [line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()]
+        captured = capsys.readouterr()
+        printed = [line.strip() for line in captured.out.splitlines() if line.strip()]
         assert printed[0].startswith("Parsing proj1... 2 sessions in ")
         assert printed[1].startswith("Parsing proj2... 2 sessions in ")
+        progress_events = [
+            json.loads(line)
+            for line in captured.err.splitlines()
+            if '"msg":"export_session_progress"' in line
+        ]
+        assert progress_events[-1]["extra"]["current"] == 4
+        assert progress_events[-1]["extra"]["total"] == 4
+        assert progress_events[-1]["extra"]["sessions_exported"] == 4
 
     def test_parallel_gemini_dedupe_respects_serial_order(self, tmp_path, mock_anonymizer, monkeypatch):
         output = tmp_path / "out.jsonl"

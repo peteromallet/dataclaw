@@ -2,7 +2,10 @@
 
 import hashlib
 import logging
+import sys
+import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
@@ -77,6 +80,60 @@ def emit_blocked_error(
 
 def format_elapsed_seconds(seconds: float) -> str:
     return f"{seconds:.2f}s"
+
+
+def emit_progress_event(msg: str, phase: str, extra: Mapping[str, Any] | None = None) -> None:
+    """Emit a structured progress event without touching stdout JSON contracts."""
+    payload = {
+        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        "msg": msg,
+        "phase": phase,
+        "extra": dict(extra or {}),
+    }
+    print(json.dumps(payload), file=sys.stderr, flush=True)
+
+
+class ProgressReporter:
+    """Throttle parent-process progress events for long loops."""
+
+    def __init__(
+        self,
+        msg: str,
+        phase: str,
+        total: int | None,
+        *,
+        interval_seconds: float = 2.0,
+        base_extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.msg = msg
+        self.phase = phase
+        self.total = total
+        self.interval_seconds = interval_seconds
+        self.base_extra = dict(base_extra or {})
+        self._last_emit_at: float | None = None
+        self._last_current: int | None = None
+
+    def emit(self, current: int, *, force: bool = False, extra: Mapping[str, Any] | None = None) -> bool:
+        now = time.monotonic()
+        is_final = self.total is not None and self.total >= 0 and current >= self.total
+        should_emit = (
+            force
+            or self._last_emit_at is None
+            or is_final
+            or now - self._last_emit_at >= self.interval_seconds
+        )
+        if not should_emit or (not force and self._last_current == current):
+            return False
+
+        payload = dict(self.base_extra)
+        payload.update(extra or {})
+        payload["current"] = current
+        if self.total is not None:
+            payload["total"] = self.total
+        emit_progress_event(self.msg, self.phase, payload)
+        self._last_emit_at = now
+        self._last_current = current
+        return True
 
 HF_TAG = "dataclaw"
 HF_DATASETS_URL = "https://huggingface.co/datasets"
@@ -255,7 +312,7 @@ def get_hf_username() -> str | None:
 
     try:
         return HfApi().whoami()["name"]
-    except (OSError, KeyError, ValueError) as e:
+    except Exception as e:  # noqa: BLE001 - auth/network probing must not break status/prep
         logger.warning("Could not fetch HuggingFace username: %s", e)
         return None
 

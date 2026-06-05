@@ -35,6 +35,7 @@ from .common import (
     _source_scope_placeholder,
     default_repo_name,
     emit_blocked_error,
+    emit_progress_event,
     fingerprint_strings,
     format_elapsed_seconds,
     get_hf_username,
@@ -463,9 +464,24 @@ def run_export(
         )
         emit_blocked_error(msg)
 
+    emit_progress_event(
+        "resolve_export_inputs_started",
+        "discover",
+        {"source": source_choice},
+    )
     projects = _filter_projects_by_source(discover_projects_fn(), source_filter)
     if not projects:
         emit_blocked_error(f"No {_source_label(source_filter)} sessions found.")
+    emit_progress_event(
+        "resolve_export_inputs_finished",
+        "discover",
+        {
+            "source": source_choice,
+            "included_projects": len(projects),
+            "total_sessions": sum(project["session_count"] for project in projects),
+            "total_size_bytes": sum(project["total_size_bytes"] for project in projects),
+        },
+    )
 
     if not args.all_projects and not config.get("projects_confirmed", False):
         excluded = set(config.get("excluded_projects", []))

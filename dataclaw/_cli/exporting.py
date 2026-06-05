@@ -28,10 +28,12 @@ from .common import (
     SKILL_URL,
     _format_token_count,
     _provider_dataset_tags,
+    emit_progress_event,
     emit_blocked_error,
     format_elapsed_seconds,
     hf_browse_tagged_url,
     hf_dataset_url,
+    ProgressReporter,
 )
 
 
@@ -385,25 +387,51 @@ def _export_to_jsonl_serial(
     total_output_tokens = 0
     seen_fingerprints: set[str] = set()
     policy_version = redaction_policy_version(custom_strings, _export_extra_usernames(anonymizer), pf_config)
+    total_expected = sum(int(project.get("session_count", 0) or 0) for project in selected_projects)
+    progress = ProgressReporter("export_session_progress", "export", total_expected or None)
+    processed = 0
+    progress.emit(0, force=True, extra={"sessions_exported": 0, "mode": "serial"})
 
-    for project in selected_projects:
+    for project_index, project in enumerate(selected_projects, start=1):
+        source = project.get("source", default_source)
+        emit_progress_event(
+            "export_project_started",
+            "export",
+            {
+                "project": project["display_name"],
+                "source": source,
+                "index": project_index,
+                "total_projects": len(selected_projects),
+                "sessions": project.get("session_count"),
+            },
+        )
         print(f"  Parsing {project['display_name']}...", end="", flush=True)
         project_start_time = time.perf_counter()
         sessions = parse_project_sessions_fn(
             project["dir_name"],
             anonymizer=anonymizer,
             include_thinking=include_thinking,
-            source=project.get("source", default_source),
+            source=source,
         )
         proj_count = 0
         project_input_tokens = 0
         project_output_tokens = 0
         project_has_token_stats = False
         for session in sessions:
+            processed += 1
             source = session.get("source") or project.get("source", default_source)
             model = session.get("model")
             if not model or model == "<synthetic>":
                 skipped += 1
+                progress.emit(
+                    processed,
+                    extra={
+                        "project": project["display_name"],
+                        "source": source,
+                        "sessions_exported": total,
+                        "sessions_skipped": skipped,
+                    },
+                )
                 continue
 
             session, n_redacted = transform_session(
@@ -448,6 +476,15 @@ def _export_to_jsonl_serial(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
+            progress.emit(
+                processed,
+                extra={
+                    "project": project["display_name"],
+                    "source": source,
+                    "sessions_exported": total,
+                    "sessions_skipped": skipped,
+                },
+            )
         project_elapsed = time.perf_counter() - project_start_time
         token_summary = ""
         if project_has_token_stats:
@@ -455,7 +492,24 @@ def _export_to_jsonl_serial(
                 f" ({_format_token_count(project_input_tokens)} input / "
                 f"{_format_token_count(project_output_tokens)} output tokens)"
             )
+        emit_progress_event(
+            "export_project_parsed",
+            "export",
+            {
+                "project": project["display_name"],
+                "source": project.get("source", default_source),
+                "index": project_index,
+                "total_projects": len(selected_projects),
+                "sessions_parsed": proj_count,
+            },
+        )
         print(f" {proj_count} sessions in {format_elapsed_seconds(project_elapsed)}{token_summary}")
+
+    progress.emit(
+        processed,
+        force=True,
+        extra={"sessions_exported": total, "sessions_skipped": skipped, "mode": "serial"},
+    )
 
     return {
         "sessions": total,
@@ -497,6 +551,14 @@ def _export_to_jsonl_parallel(
     frontier_limit = 0
     max_pending = workers
     reorder_window = workers * 2
+    completed_tasks = 0
+    progress = ProgressReporter(
+        "export_session_progress",
+        "export",
+        len(ordered_tasks),
+        base_extra={"mode": "parallel", "workers": workers},
+    )
+    progress.emit(0, force=True, extra={"sessions_exported": 0})
 
     for task in ordered_tasks:
         project_state[task.project_index]["remaining"] += 1
@@ -518,6 +580,17 @@ def _export_to_jsonl_parallel(
             state = project_state[task.project_index]
             if state["start_time"] is None:
                 state["start_time"] = time.perf_counter()
+                emit_progress_event(
+                    "export_project_started",
+                    "export",
+                    {
+                        "project": task.project_display_name,
+                        "source": task.source,
+                        "index": task.project_index + 1,
+                        "total_projects": len(selected_projects),
+                        "sessions": selected_projects[task.project_index].get("session_count"),
+                    },
+                )
             payload = (task, include_thinking, custom_strings, extra_usernames, pf_config)
             future = executor.submit(_export_session_task_worker, payload)
             pending[future] = order_index
@@ -581,12 +654,28 @@ def _export_to_jsonl_parallel(
             for future in done:
                 order_index = pending.pop(future)
                 completed[order_index] = future.result()
+                completed_tasks += 1
+                task = ordered_tasks[order_index]
+                progress.emit(
+                    completed_tasks,
+                    extra={
+                        "project": task.project_display_name,
+                        "source": task.source,
+                        "sessions_exported": total,
+                        "sessions_skipped": skipped,
+                    },
+                )
 
             flush_ready_results()
             extend_frontier()
             submit_ready(executor)
 
     flush_ready_results()
+    progress.emit(
+        completed_tasks,
+        force=True,
+        extra={"sessions_exported": total, "sessions_skipped": skipped},
+    )
 
     return {
         "sessions": total,
@@ -623,6 +712,16 @@ def export_to_jsonl(
     with fh as f:
         if parse_project_sessions_fn is iter_project_sessions:
             tasks = build_export_session_tasks(selected_projects, default_source)
+            emit_progress_event(
+                "export_tasks_indexed",
+                "export",
+                {
+                    "current": len(tasks),
+                    "total": len(tasks),
+                    "projects": len(selected_projects),
+                    "sources": sorted({task.source for task in tasks}),
+                },
+            )
             resolved_workers = _resolve_export_workers(len(tasks), workers)
             if _can_parallelize_export(parse_project_sessions_fn, len(tasks), resolved_workers):
                 return _export_to_jsonl_parallel(
