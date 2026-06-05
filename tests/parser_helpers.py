@@ -20,6 +20,11 @@ def disable_other_providers(monkeypatch, tmp_path, keep=()):
         monkeypatch.setattr("dataclaw.parsers.gemini.GEMINI_DIR", tmp_path / "no-gemini")
     monkeypatch.setattr("dataclaw.parsers.gemini._HASH_MAP", {})
 
+    if "hermes" not in keep:
+        monkeypatch.setattr("dataclaw.parsers.hermes.HERMES_DB", tmp_path / "no-hermes.db")
+    monkeypatch.setattr("dataclaw.parsers.hermes._PROJECT_INDEX", {})
+    monkeypatch.setattr("dataclaw.parsers.hermes._SESSION_SIZE_MAP", {})
+
     if "opencode" not in keep:
         monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", tmp_path / "no-opencode.db")
     monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
@@ -48,6 +53,66 @@ def write_opencode_db(db_path):
     )
     conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
     conn.execute("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, time_created INTEGER, data TEXT)")
+    conn.commit()
+    return conn
+
+
+def write_hermes_db(db_path):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            title TEXT,
+            cache_read_tokens INTEGER DEFAULT 0,
+            cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0,
+            billing_provider TEXT,
+            billing_base_url TEXT,
+            billing_mode TEXT,
+            estimated_cost_usd REAL,
+            actual_cost_usd REAL,
+            cost_status TEXT,
+            cost_source TEXT,
+            pricing_version TEXT,
+            api_call_count INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT,
+            reasoning TEXT,
+            reasoning_content TEXT,
+            reasoning_details TEXT,
+            codex_reasoning_items TEXT,
+            codex_message_items TEXT
+        )
+        """
+    )
     conn.commit()
     return conn
 

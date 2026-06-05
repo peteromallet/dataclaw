@@ -288,6 +288,7 @@ class TestWorkflowGateMessages:
             "cursor",
             "custom",
             "gemini",
+            "hermes",
             "kimi",
             "openclaw",
             "opencode",

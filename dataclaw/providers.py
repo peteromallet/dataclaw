@@ -12,6 +12,7 @@ from .parsers import codex as _codex_mod
 from .parsers import cursor as _cursor_mod
 from .parsers import custom as _custom_mod
 from .parsers import gemini as _gemini_mod
+from .parsers import hermes as _hermes_mod
 from .parsers import kimi as _kimi_mod
 from .parsers import openclaw as _openclaw_mod
 from .parsers import opencode as _opencode_mod
@@ -119,6 +120,11 @@ PROVIDERS: dict[str, Provider] = {
         _gemini_mod,
         hf_metadata_tag="gemini-cli",
         source_path_attr="GEMINI_DIR",
+    ),
+    _hermes_mod.SOURCE: ModuleProvider.from_module(
+        _hermes_mod,
+        hf_metadata_tag="hermes",
+        source_path_attr="HERMES_DB",
     ),
     _kimi_mod.SOURCE: ModuleProvider.from_module(
         _kimi_mod,

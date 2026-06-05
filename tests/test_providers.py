@@ -1,7 +1,5 @@
 """Direct tests for dataclaw.providers — the provider registry and ModuleProvider."""
 
-import pytest
-
 from dataclaw.providers import (
     PROVIDERS,
     ModuleProvider,
@@ -14,7 +12,7 @@ from dataclaw.providers import (
 
 class TestProvidersRegistry:
     def test_all_expected_sources_registered(self):
-        expected = {"claude", "codex", "cursor", "custom", "gemini", "kimi", "openclaw", "opencode"}
+        expected = {"claude", "codex", "cursor", "custom", "gemini", "hermes", "kimi", "openclaw", "opencode"}
         assert expected.issubset(PROVIDERS.keys())
 
     def test_iter_providers_returns_all(self):
